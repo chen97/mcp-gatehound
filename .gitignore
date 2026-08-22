@@ -1,0 +1,10 @@
+/target/
+**/node_modules/
+crates/gatehound-app/ui/dist/
+crates/gatehound-app/gen/
+.env
+*.db
+*.db-shm
+*.db-wal
+*.log
+.DS_Store

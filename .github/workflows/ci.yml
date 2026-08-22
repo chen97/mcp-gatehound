@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # The default workspace members are gatehound-core and gatehound-headless, which build
+      # without the Tauri system prerequisites. The desktop shell has its own job below.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+  end-to-end:
+    name: End to end against the mock rig
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build the headless gateway
+        run: cargo build -p gatehound-headless
+
+      - name: Start the mock Beeper / Anthropic rig
+        run: |
+          python3 tests_fixtures/mock_server.py 23399 &
+          for i in $(seq 1 40); do
+            curl -sf -H 'authorization: Bearer tok' http://127.0.0.1:23399/v1/accounts >/dev/null && break
+            sleep 0.25
+          done
+
+      - name: Start the gateway
+        env:
+          GATEHOUND_TOKEN: hubsecret-0123456789abcdef
+          DB_PATH: ${{ runner.temp }}/gatehound.db
+        run: |
+          ./target/debug/gatehound-headless --config tests_fixtures/gatehound.mock.toml serve &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8790/healthz >/dev/null && break
+            sleep 0.25
+          done
+          curl -sf http://127.0.0.1:8790/healthz
+
+      - name: Drafting and idempotent send reach the mock upstream
+        run: |
+          set -eu
+          T=hubsecret-0123456789abcdef
+          rpc() {
+            curl -sf -X POST http://127.0.0.1:8790/mcp \
+              -H "authorization: Bearer $T" -H 'content-type: application/json' -d "$1"
+          }
+
+          rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"draft_reply","arguments":{"chat_id":"!alice:ba_1.local-whatsapp.localhost"}}}' \
+            | tee /tmp/draft.json
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/draft.json'))['result']['structuredContent']
+          assert d['no_reply'] is False and '7pm' in d['draft'], d
+          print('draft ok:', d['draft'])
+          "
+
+          SEND='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_message","arguments":{"chat_id":"!alice:ba_1.local-whatsapp.localhost","text":"ok see you 7pm","idempotency_key":"ci-key-1"}}}'
+          rpc "$SEND" > /tmp/send1.json
+          rpc "$SEND" > /tmp/send2.json
+          curl -sf -H 'authorization: Bearer tok' http://127.0.0.1:23399/__mock/sent > /tmp/sent.json
+          python3 -c "
+          import json
+          a = json.load(open('/tmp/send1.json'))['result']['structuredContent']
+          b = json.load(open('/tmp/send2.json'))['result']['structuredContent']
+          sent = json.load(open('/tmp/sent.json'))['sent']
+          assert a['duplicate'] is False and b['duplicate'] is True, (a, b)
+          assert a['message_id'] == b['message_id'], (a, b)
+          assert len(sent) == 1, sent
+          print('the upstream saw the message once, not twice')
+          "
+
+      - name: An unauthenticated call is refused
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8790/mcp \
+            -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+          [ "$code" = "401" ] || { echo "expected 401, got $code"; exit 1; }
+
+  desktop:
+    name: Desktop shell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Build the frontend
+        working-directory: crates/gatehound-app/ui
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Check the shell
+        run: cargo clippy -p gatehound-app --all-targets -- -D warnings

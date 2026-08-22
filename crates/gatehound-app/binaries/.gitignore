@@ -1,0 +1,4 @@
+# cloudflared is fetched by scripts/fetch-cloudflared.sh, not committed — it is ~40 MB and
+# ships its own release cadence.
+*
+!.gitignore

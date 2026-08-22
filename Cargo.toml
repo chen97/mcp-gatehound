@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gatehound-core",
+    "crates/gatehound-headless",
+    "crates/gatehound-app",
+]
+# gatehound-app needs the Tauri system prerequisites (WebKitGTK on Linux, WebView2 on
+# Windows). Plain `cargo build` / `cargo test` therefore covers the two crates that build
+# anywhere; build the desktop shell explicitly with `cargo build -p gatehound-app`.
+default-members = [
+    "crates/gatehound-core",
+    "crates/gatehound-headless",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+repository = "https://github.com/chen97/mcp-gatehound"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = { version = "0.7", features = ["macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+jsonwebtoken = "9"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "process", "io-util"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

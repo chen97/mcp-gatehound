@@ -1,0 +1,42 @@
+[package]
+name = "gatehound-app"
+description = "MCP Gatehound — the desktop shell. The app being open is the gateway being up."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Building this crate needs the Tauri system prerequisites (WebKitGTK on Linux, WebView2 on
+# Windows, Xcode command line tools on macOS) and a built frontend in `ui/dist`. It is
+# excluded from the workspace's default members for that reason: `cargo test` at the root
+# covers the two crates that build anywhere.
+#
+#   cd crates/gatehound-app/ui && npm install && npm run build
+#   cargo build -p gatehound-app          # or: npm run tauri build
+
+[[bin]]
+name = "gatehound-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+gatehound-core = { path = "../gatehound-core" }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+
+anyhow.workspace = true
+dotenvy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

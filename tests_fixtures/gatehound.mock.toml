@@ -1,0 +1,41 @@
+# Configuration used by the test rig: the gateway talks to tests_fixtures/mock_server.py,
+# which stands in for both Beeper Desktop and the Anthropic Messages API on one port.
+#
+#   python3 tests_fixtures/mock_server.py 23399 &
+#   GATEHOUND_TOKEN=hubsecret-0123456789abcdef \
+#     cargo run -p gatehound-headless -- --config tests_fixtures/gatehound.mock.toml
+#
+# Message Desk's integration test then runs against http://127.0.0.1:8790/mcp.
+
+listen_addr = "127.0.0.1:8790"
+approval_timeout_secs = 10
+log_retention_days = 7
+
+[auth]
+# Cloudflare Access is deliberately absent here: the mock rig has no edge in front of it.
+# A real deployment sets [auth.access], and the gateway warns loudly when it is missing.
+bearer_identity = "message-desk"
+
+[[upstream]]
+name = "beeper"
+type = "beeper"
+base_url = "http://127.0.0.1:23399"
+token = "tok"
+
+# The Worker is a known client, seeded as `allow` (SPEC §9.1). The `ask` path exists for
+# new or unknown clients, and holding the Worker would spin the phone while a popup waited
+# on a laptop nobody is sitting at.
+[[identity]]
+identity = "message-desk"
+tool = "*"
+decision = "allow"
+
+[drafter]
+provider = "api"
+voice_file = "voice.md"
+context_messages = 20
+
+[drafter.api]
+base_url = "http://127.0.0.1:23399"
+api_key = "test-key"
+model = "claude-sonnet-4-6"

@@ -1,0 +1,167 @@
+# MCP Gatehound — example configuration.
+#
+# Copy to `gatehound.toml` next to the binary (or into the app's config directory) and edit.
+# Secrets never belong in this file: every credential below is read from the environment.
+#
+#   macOS/Linux app:  ~/.config/MCP Gatehound/gatehound.toml   (or beside the executable)
+#   headless:         --config /path/to/gatehound.toml
+
+# Loopback only. Public exposure is exclusively via cloudflared — the gateway refuses to bind
+# anything else.
+listen_addr = "127.0.0.1:8790"
+
+# How long a call from an unknown identity is held while waiting for you to decide. Must stay
+# comfortably under Cloudflare's ~100s edge timeout, or the edge gives up before you click.
+approval_timeout_secs = 60
+
+# The request log accumulates a plaintext copy of your conversations on disk. After this many
+# days, argument and response bodies are blanked; after four times as long, rows are deleted.
+log_retention_days = 30
+
+# Where the database goes. The desktop app ignores this and uses the platform's application
+# data directory.
+# db_path = "/Users/you/Library/Application Support/MCP Gatehound/gatehound.db"
+
+# --------------------------------------------------------------------------------------
+# Authentication — two independent factors, both required (SPEC §4.2)
+# --------------------------------------------------------------------------------------
+[auth]
+# Factor 1: a shared bearer token, from the GATEHOUND_TOKEN environment variable.
+#   openssl rand -hex 32
+# The same value goes into the Message Desk Worker's secret of the same name.
+
+# Optional allow-list applied to the identity in the Access JWT. Human logins carry `email`;
+# service tokens carry `common_name` instead. Leave it empty to accept anyone Access lets
+# through and rely on the per-identity policy below instead.
+allowed_identities = ["you@example.com", "message-desk"]
+
+# Factor 2: Cloudflare Access in front of the tunnel hostname. Omit this sub-table only for
+# loopback development — the gateway warns loudly at startup when it is missing, because
+# without it the bearer token is all that stands between the internet and your messages.
+[auth.access]
+team_domain = "yourteam.cloudflareaccess.com"
+aud = "the-access-application-aud-tag"
+
+# --------------------------------------------------------------------------------------
+# Upstreams — where `proxy` actions go. Credentials come from the environment.
+# --------------------------------------------------------------------------------------
+[[upstream]]
+name = "beeper"
+type = "beeper"
+base_url = "http://localhost:23373"     # BEEPER_API_URL overrides
+# token comes from BEEPER_ACCESS_TOKEN
+# (Beeper Desktop → Settings → Developers → Approved connections)
+
+# Another MCP server on this machine, reachable only through Gatehound's auth and policy.
+# [[upstream]]
+# name = "notes"
+# type = "mcp"
+# url = "http://127.0.0.1:9001/mcp"
+# bearer_token = "..."
+
+# --------------------------------------------------------------------------------------
+# Identity policy — who may call what (SPEC §4.3)
+# --------------------------------------------------------------------------------------
+# Lookup order: exact (identity, tool), then (identity, "*"), then `ask`. A tool set to `deny`
+# is filtered out of tools/list entirely, not merely refused when called.
+#
+# These seed the database on first run and never overwrite a decision you later made in the
+# GUI. The Message Desk Worker must be seeded as `allow`: if it hit `ask`, your phone would
+# spin while a popup waited for a click on a laptop you are not sitting at (SPEC §9.1).
+
+[[identity]]
+identity = "message-desk"     # the Access service token's name
+tool = "*"
+decision = "allow"
+
+[[identity]]
+identity = "you@example.com"
+tool = "*"
+decision = "allow"
+
+# --------------------------------------------------------------------------------------
+# Drafting (SPEC §4.6)
+# --------------------------------------------------------------------------------------
+[drafter]
+# "claude-cli" bills your Claude subscription and costs nothing extra; "api" uses
+# ANTHROPIC_API_KEY and survives any change to subscription policy.
+provider = "claude-cli"
+voice_file = "voice.md"
+context_messages = 20
+
+# How `claude -p` is invoked. `--safe-mode` disables project customizations, hooks, plugins,
+# skills and MCP, so a stranger's message cannot reach anything but the text generator.
+#
+# Verify these flag names against `claude --help` on this machine before relying on them —
+# the CLI moves fast.
+[drafter.exec]
+cmd = "claude"                                # CLAUDE_BIN overrides
+args = [
+  "-p",
+  "--output-format", "text",
+  "--safe-mode",
+  "--strict-mcp-config",
+  "--max-turns", "1",
+  "--system-prompt-file", "{system_prompt_file}",
+]
+stdin = "{prompt}"          # the transcript never becomes an argv element
+timeout_secs = 120
+max_output_bytes = 65536
+max_concurrency = 1         # each run is a Node process start; serialize them
+
+[drafter.api]
+model = "claude-sonnet-4-6"
+base_url = "https://api.anthropic.com"
+max_tokens = 600
+# api_key comes from ANTHROPIC_API_KEY
+
+# --------------------------------------------------------------------------------------
+# Which chats the Beeper upstream surfaces
+# --------------------------------------------------------------------------------------
+[beeper]
+lookback_minutes = 120
+include_groups = false
+include_muted = false
+only_unread = false
+mark_read_on_send = true    # note: this emits a read receipt to the other party
+allow_chat_ids = []         # bypasses the bot / read-only / group filters
+ignore_chat_ids = []
+
+# --------------------------------------------------------------------------------------
+# Tools — a name, a schema, and a fixed action. Omit this section entirely to get the v1
+# catalog below. A caller names a tool; it never chooses an action.
+#
+# When you aggregate several upstreams, prefix the tool names (`beeper_send_message`,
+# `notes_search`) so two upstreams cannot collide on one name.
+# --------------------------------------------------------------------------------------
+
+# [[tool]]
+# name = "list_new_messages"
+# description = "Direct chats whose latest message is inbound."
+# action = { type = "proxy", upstream = "beeper", op = "list_new_messages" }
+# [tool.input_schema]
+# type = "object"
+# [tool.input_schema.properties.limit]
+# type = "integer"
+
+# [[tool]]
+# name = "draft_reply"
+# description = "Draft a reply in the owner's voice. Never sends."
+# action = { type = "draft", upstream = "beeper" }
+
+# [[tool]]
+# name = "send_message"
+# description = "Send exact text. Reserved for the owner's approval flow."
+# action = { type = "proxy", upstream = "beeper", op = "send_message" }
+# rate_limit = { per_hour = 60, min_spacing_secs = 2 }
+# idempotent = true
+
+# An arbitrary local command, which is what makes this a gateway rather than a bot. The rules
+# are enforced for you: argv array only, never a shell; `cmd` fixed by config; long or
+# untrusted content on stdin; timeout, output cap and concurrency limit all mandatory.
+# Write a literal brace as `{{` or `}}`.
+#
+# [[tool]]
+# name = "disk_free"
+# description = "Free space on this machine."
+# action = { type = "exec", cmd = "/bin/df", args = ["-h", "/"], timeout_secs = 10, max_output_bytes = 8192 }

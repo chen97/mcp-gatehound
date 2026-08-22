@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MCP Gatehound</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header>
+      <span id="dot" class="dot"></span>
+      <h1>MCP Gatehound</h1>
+      <span id="subtitle" class="sub"></span>
+      <button id="pause" class="ghost">Pause gateway</button>
+    </header>
+
+    <nav>
+      <button data-screen="approvals" class="active">Approvals <span id="badge" class="badge">0</span></button>
+      <button data-screen="log">Live log</button>
+      <button data-screen="actions">Upstreams &amp; actions</button>
+      <button data-screen="identities">Identities</button>
+    </nav>
+
+    <main>
+      <section id="approvals" class="screen"></section>
+      <section id="log" class="screen hidden"></section>
+      <section id="actions" class="screen hidden"></section>
+      <section id="identities" class="screen hidden"></section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
