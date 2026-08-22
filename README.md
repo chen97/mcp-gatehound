@@ -85,10 +85,40 @@ also needs an AppIndicator extension for the tray to appear at all).
 ### The MCP surface
 
 Streamable HTTP: `POST /mcp`, JSON-RPC 2.0, one message per request, JSON responses. There is
-no SSE stream, because nothing here is server-initiated — `GET /mcp` returns 405. Also on the
-same listener: `GET /healthz` and `GET /version`.
+no standalone stream, because nothing here is server-initiated — `GET` and `DELETE` on `/mcp`
+return 405. Also on the same listener: `GET /healthz` and `GET /version`.
 
-- `initialize` negotiates from `2025-06-18`, `2025-03-26`, `2024-11-05`.
+This is a **dual-era server**. Revision `2026-07-28` made MCP stateless — no handshake, and
+every request carries its own protocol version — while everything up to `2025-11-25` negotiates
+once via `initialize`. The spec allows one server to serve both, choosing per request by how the
+client opens:
+
+| The client sends | Served as |
+|---|---|
+| `_meta` (or an `MCP-Protocol-Version` header) naming `2026-07-28` | **Modern**, statelessly |
+| `initialize` | **Legacy**, on the negotiated revision |
+| neither — a lenient client that skips the handshake | **Legacy** |
+
+Supported: `2026-07-28` · `2025-06-18` · `2025-03-26` · `2024-11-05`.
+
+On the modern path:
+
+- `server/discover` is implemented, as the spec requires. It reports every revision, the
+  capabilities and the server identity in one call.
+- Every result carries `resultType: "complete"` and `_meta` server identity.
+- `tools/list` carries `ttlMs` and `cacheScope: "private"` — **private** because the list is
+  filtered per identity, so a shared cache must never hand one caller's list to another.
+- The `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` headers are required and are checked
+  against the body. A disagreement is refused with `400` and `-32020`, because a load balancer
+  routing on the header and this server acting on the body must never see two different
+  requests. A `Mcp-Name` in the `=?base64?…?=` sentinel form is decoded before comparison.
+- An unsupported revision returns `400` with `-32022` and the list to retry with; an unknown
+  method returns `404` with `-32601`, which is how a client tells "no such RPC here" apart from
+  "nothing serves MCP at this URL".
+
+On the legacy path nothing changed: results carry no `resultType`, no cache hints, and no
+header requirements, so an older client sees exactly what it saw before.
+
 - Notifications (no `id`) get `202 Accepted` and an empty body.
 - Protocol errors are JSON-RPC errors (`-32700`, `-32600`, `-32601`, `-32602`).
 - A refused call carries an RFC 6750 `WWW-Authenticate` challenge, so a client learns what
@@ -248,11 +278,9 @@ Set the window to something you are comfortable with.
 - Unsigned builds trip Gatekeeper and SmartScreen. macOS notarization needs an Apple Developer
   account.
 - WeChat is out of scope: there is no sanctioned API for personal accounts.
-- **The MCP protocol has moved on.** This implements revision `2025-06-18`; the current
-  revision is `2026-07-28`, which drops the `initialize` handshake, makes the protocol
-  stateless and adds a mandatory `server/discover`. Several of its changes cost us nothing —
-  we were already stateless and already refuse `GET /mcp` — but catching up is real work.
-  See [`docs/market-alignment.md`](docs/market-alignment.md).
+- **Deprecated features are not implemented and will not be.** Roots, Sampling and Logging
+  were deprecated in `2026-07-28`; so were the HTTP+SSE transport and Dynamic Client
+  Registration. None of them appear here.
 - **Authentication is not MCP authorization.** The spec expects OAuth 2.1 with RFC 9728
   Protected Resource Metadata; we use a shared bearer plus a Cloudflare Access JWT. Deliberate
   for a single-user gateway, but it means a standards-compliant client cannot discover how to

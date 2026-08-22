@@ -14,6 +14,7 @@ pub mod drafter;
 pub mod events;
 pub mod mcp;
 pub mod policy;
+pub mod protocol;
 pub mod redact;
 pub mod store;
 pub mod upstreams;

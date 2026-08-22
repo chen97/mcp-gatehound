@@ -167,13 +167,29 @@ Three tiers, cheapest first. None of this is urgent; all of it is cheaper now th
 - ~~Decide about `ping`.~~ Kept, annotated. It is valid in every revision we advertise, so
   removing it would break conforming clients for no gain.
 
-**Tier 2 — protocol catch-up**
-- Add `server/discover`, backed by what `GET /version` already knows.
-- Accept per-request `_meta` version negotiation alongside the `initialize` handshake, and
-  keep both: the spec has an explicit backward-compatibility path for handshake-based
-  clients, and Message Desk is one of them.
-- Add `resultType` to every result; add `ttlMs` and `cacheScope` to `tools/list`.
-- Return `UnsupportedProtocolVersionError` (`-32022`) rather than a generic error.
+**Tier 2 — protocol catch-up — done, 2026-08-22**
+
+Implemented as a **dual-era server**, which the spec explicitly allows: the era is chosen per
+request from how the client opens, so legacy clients see no change at all.
+
+- ~~`server/discover`.~~ Done, reporting all four revisions, capabilities and identity.
+- ~~Per-request `_meta` negotiation alongside the handshake.~~ Done. A request naming
+  `2026-07-28` in `_meta` or the `MCP-Protocol-Version` header is served statelessly;
+  `initialize` selects legacy; neither is served leniently as legacy.
+- ~~`resultType`, `ttlMs`, `cacheScope`.~~ Done on the modern path only. `cacheScope` is
+  `private`: the tool list is filtered per identity, so a shared cache must never hand one
+  caller's list to another.
+- ~~`UnsupportedProtocolVersionError` (`-32022`).~~ Done, with the retry list. It advertises
+  only the modern revisions, because a client that reached this error cannot speak a handshake.
+- Also done beyond the original list: `Mcp-Method` / `Mcp-Name` / `MCP-Protocol-Version` header
+  validation against the body (`-32020` on mismatch, base64 sentinel decoded first), `404` for
+  an unknown modern method, and `405` on `DELETE` as well as `GET`.
+
+Message Desk was upgraded to a modern client in the same change, so the stateless path is what
+the end-to-end test actually exercises.
+
+Not adopted, deliberately: `2025-11-25` is not advertised — it is handshake-based like the
+older revisions but adds requirements we do not implement, and claiming it would be a lie.
 
 **Tier 3 — market parity, only if the gateway is meant for more than one user**
 - Prefix aggregated tool names per upstream, closing the shadowing gap.

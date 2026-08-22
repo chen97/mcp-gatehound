@@ -14,6 +14,7 @@
 use crate::approval::Outcome;
 use crate::auth::{self, AuthError};
 use crate::config::Decision;
+use crate::protocol::{self, Era, ProtocolError};
 use crate::redact;
 use crate::store::NewRequestLog;
 use crate::Gateway;
@@ -28,11 +29,13 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Instant;
 
-pub const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+/// Legacy revisions, kept for clients that open with `initialize`. The modern, stateless
+/// revisions live in [`protocol::MODERN_VERSIONS`].
+pub const PROTOCOL_VERSIONS: [&str; 3] = protocol::LEGACY_VERSIONS;
 
 pub fn router(gateway: Arc<Gateway>) -> Router {
     Router::new()
-        .route("/mcp", post(handle_mcp).get(reject_get))
+        .route("/mcp", post(handle_mcp).get(reject_get).delete(reject_get))
         .route("/healthz", get(healthz))
         .route("/version", get(version))
         .with_state(gateway)
@@ -46,17 +49,33 @@ async fn version(State(gw): State<Arc<Gateway>>) -> Json<Value> {
     Json(json!({
         "name": gw.cfg.server_name,
         "version": env!("CARGO_PKG_VERSION"),
-        "protocol_versions": PROTOCOL_VERSIONS,
+        "protocol_versions": protocol::all_versions(),
         "auth": gw.auth.label(),
         "upstreams": gw.engine.upstreams().names(),
         "started_at": gw.started_at.to_rfc3339(),
     }))
 }
 
+/// GET and DELETE were the session and standalone-stream mechanics of earlier Streamable HTTP
+/// revisions. Neither exists any more, and the spec asks a server that only implements the
+/// current shape to answer them with 405.
 async fn reject_get() -> Response {
     (
         StatusCode::METHOD_NOT_ALLOWED,
-        "POST JSON-RPC messages to /mcp; this server offers no SSE stream",
+        "POST JSON-RPC messages to /mcp; this server offers no standalone stream",
+    )
+        .into_response()
+}
+
+/// A JSON-RPC error that must also carry a specific HTTP status.
+fn protocol_error(id: Value, e: &ProtocolError) -> Response {
+    let mut body = json!({ "code": e.code, "message": e.message });
+    if let Some(data) = &e.data {
+        body["data"] = data.clone();
+    }
+    (
+        e.status,
+        Json(json!({ "jsonrpc": "2.0", "id": id, "error": body })),
     )
         .into_response()
 }
@@ -70,31 +89,41 @@ fn rpc_result(id: Value, result: Value) -> Value {
 }
 
 /// Success: a human-readable text block plus the machine-readable payload.
-fn tool_ok(id: Value, payload: Value) -> Value {
+fn tool_ok(gw: &Gateway, era: &Era, id: Value, payload: Value) -> Value {
     let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
     rpc_result(
         id,
-        json!({
-            "content": [ { "type": "text", "text": text } ],
-            "structuredContent": payload,
-            "isError": false
-        }),
+        protocol::finish(
+            era,
+            &gw.cfg.server_name,
+            env!("CARGO_PKG_VERSION"),
+            json!({
+                "content": [ { "type": "text", "text": text } ],
+                "structuredContent": payload,
+                "isError": false
+            }),
+        ),
     )
 }
 
 /// Tool failure. `code` is machine-readable so a client can tell "try again" from "never".
-fn tool_err(id: Value, message: &str, code: &str) -> Value {
+fn tool_err(gw: &Gateway, era: &Era, id: Value, message: &str, code: &str) -> Value {
     let mut structured = json!({ "error": message });
     if !code.is_empty() {
         structured["code"] = Value::String(code.to_string());
     }
     rpc_result(
         id,
-        json!({
-            "content": [ { "type": "text", "text": message } ],
-            "structuredContent": structured,
-            "isError": true
-        }),
+        protocol::finish(
+            era,
+            &gw.cfg.server_name,
+            env!("CARGO_PKG_VERSION"),
+            json!({
+                "content": [ { "type": "text", "text": message } ],
+                "structuredContent": structured,
+                "isError": true
+            }),
+        ),
     )
 }
 
@@ -152,6 +181,25 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
 
+    // Which revision is this client speaking, and does the request satisfy that revision?
+    let era = match protocol::negotiate(method, &params, &headers) {
+        Ok(era) => era,
+        Err(e) => {
+            gw.log(NewRequestLog {
+                identity: Some(identity.clone()),
+                method: Some(method.into()),
+                status: Some("error".into()),
+                decision: Some("protocol".into()),
+                error: Some(e.message.clone()),
+                ..Default::default()
+            });
+            return protocol_error(id, &e);
+        }
+    };
+    let stamp = |result: Value| {
+        protocol::finish(&era, &gw.cfg.server_name, env!("CARGO_PKG_VERSION"), result)
+    };
+
     let reply = match method {
         "initialize" => {
             let requested = params
@@ -173,17 +221,41 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
             });
             rpc_result(
                 id,
-                json!({
+                stamp(json!({
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": { "name": gw.cfg.server_name, "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Tools are bound to fixed actions by the gateway's configuration. draft_reply only suggests text; send_message delivers exactly the text given and is reserved for the owner's approval flow."
-                }),
+                    "instructions": DISCOVER_INSTRUCTIONS
+                })),
             )
         }
         // Removed in protocol revision 2026-07-28, but still valid in every revision this
         // server advertises, so clients on those revisions keep working.
-        "ping" => rpc_result(id, json!({})),
+        // Servers MUST implement this: it is how a client learns which revisions, capabilities
+        // and identity a server offers without guessing or opening a handshake.
+        "server/discover" => {
+            gw.log(NewRequestLog {
+                identity: Some(identity.clone()),
+                client_name: auth::client_name(&params),
+                method: Some("server/discover".into()),
+                status: Some("ok".into()),
+                ..Default::default()
+            });
+            rpc_result(
+                id,
+                stamp(protocol::cacheable(
+                    &era,
+                    json!({
+                        "supportedVersions": protocol::all_versions(),
+                        "capabilities": { "tools": { "listChanged": false } },
+                        "instructions": DISCOVER_INSTRUCTIONS
+                    }),
+                )),
+            )
+        }
+        // Removed in protocol revision 2026-07-28, but still valid in every legacy revision
+        // this server advertises, so clients on those revisions keep working.
+        "ping" => rpc_result(id, stamp(json!({}))),
         "tools/list" => {
             let tools: Vec<Value> = gw
                 .policy
@@ -204,7 +276,10 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
                 response_json: Some(format!("{{\"tools\":{}}}", tools.len())),
                 ..Default::default()
             });
-            rpc_result(id, json!({ "tools": tools }))
+            rpc_result(
+                id,
+                stamp(protocol::cacheable(&era, json!({ "tools": tools }))),
+            )
         }
         "tools/call" => {
             let name = params
@@ -216,16 +291,42 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            call_tool(&gw, id, &identity, &name, args).await
+            call_tool(&gw, id, &identity, &name, args, &era).await
         }
         "" => rpc_error(id, -32600, "invalid request: no method"),
-        other => rpc_error(id, -32601, &format!("method not found: {other}")),
+        other => {
+            let message = format!("method not found: {other}");
+            // The modern transport distinguishes "this endpoint does not implement that RPC"
+            // with a 404 carrying a JSON-RPC error, so a client can tell it apart from a 404
+            // returned by a host that does not serve MCP here at all.
+            if era.is_modern() {
+                return protocol_error(
+                    id,
+                    &ProtocolError {
+                        status: StatusCode::NOT_FOUND,
+                        code: -32601,
+                        message,
+                        data: None,
+                    },
+                );
+            }
+            rpc_error(id, -32601, &message)
+        }
     };
 
     Json(reply).into_response()
 }
 
-async fn call_tool(gw: &Arc<Gateway>, id: Value, identity: &str, name: &str, args: Value) -> Value {
+const DISCOVER_INSTRUCTIONS: &str = "Tools are bound to fixed actions by the gateway's configuration; a caller names a tool and never chooses an action. draft_reply only suggests text; send_message delivers exactly the text given, requires an idempotency key, and is reserved for the owner's approval flow.";
+
+async fn call_tool(
+    gw: &Arc<Gateway>,
+    id: Value,
+    identity: &str,
+    name: &str,
+    args: Value,
+    era: &Era,
+) -> Value {
     let started = Instant::now();
     let args_for_log = redact::for_log(&args, redact::LOG_BYTES);
 
@@ -275,7 +376,7 @@ async fn call_tool(gw: &Arc<Gateway>, id: Value, identity: &str, name: &str, arg
                     duration_ms: Some(started.elapsed().as_millis() as i64),
                     ..Default::default()
                 });
-                return tool_err(id, &message, other.error_code());
+                return tool_err(gw, era, id, &message, other.error_code());
             }
         }
     }
@@ -295,7 +396,7 @@ async fn call_tool(gw: &Arc<Gateway>, id: Value, identity: &str, name: &str, arg
             duration_ms: Some(started.elapsed().as_millis() as i64),
             ..Default::default()
         });
-        return tool_err(id, &message, "not_permitted");
+        return tool_err(gw, era, id, &message, "not_permitted");
     }
 
     match gw.engine.dispatch(tool, &args).await {
@@ -313,7 +414,7 @@ async fn call_tool(gw: &Arc<Gateway>, id: Value, identity: &str, name: &str, arg
                 response_json: Some(redact::for_log(&payload, redact::LOG_BYTES)),
                 ..Default::default()
             });
-            tool_ok(id, payload)
+            tool_ok(gw, era, id, payload)
         }
         Err(e) => {
             let message = e.to_string();
@@ -330,7 +431,7 @@ async fn call_tool(gw: &Arc<Gateway>, id: Value, identity: &str, name: &str, arg
                 duration_ms: Some(started.elapsed().as_millis() as i64),
                 ..Default::default()
             });
-            tool_err(id, &message, "action_failed")
+            tool_err(gw, era, id, &message, "action_failed")
         }
     }
 }
