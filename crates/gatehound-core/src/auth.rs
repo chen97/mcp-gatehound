@@ -67,7 +67,47 @@ pub enum AuthError {
     NotAllowed(String),
 }
 
+/// Escape a value for an RFC 6750 `quoted-string` parameter, and cap it. The reason text can
+/// carry an upstream error message, so it is not trusted to be header-safe.
+fn quoted(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii() && !c.is_ascii_control() && *c != '"' && *c != '\\')
+        .take(180)
+        .collect()
+}
+
 impl AuthError {
+    /// The `WWW-Authenticate` challenge for this failure (RFC 6750 §3).
+    ///
+    /// Without it a compliant MCP client has no way to discover what this server wants — it
+    /// sees a 401 with an opaque body and nothing else. This is not full RFC 9728 Protected
+    /// Resource Metadata, which the MCP authorization spec asks for; it is the honest subset
+    /// for a gateway that authenticates with a shared bearer rather than OAuth.
+    pub fn challenge(&self, realm: &str) -> String {
+        let mut out = format!("Bearer realm=\"{}\"", quoted(realm));
+        // RFC 6750 §3.1: a request that carried no credentials at all gets no error code.
+        let code = match self {
+            AuthError::MissingBearer => None,
+            AuthError::BadBearer | AuthError::BadAccessToken(_) => Some("invalid_token"),
+            AuthError::MissingAccessToken => Some("invalid_request"),
+            AuthError::NotAllowed(_) => Some("insufficient_scope"),
+        };
+        if let Some(code) = code {
+            out.push_str(&format!(
+                ", error=\"{code}\", error_description=\"{}\"",
+                quoted(&self.reason())
+            ));
+        }
+        out
+    }
+
+    /// True when retrying with a better token cannot help: the caller authenticated fine and
+    /// simply is not permitted here. That is 403, not 401.
+    pub fn forbidden(&self) -> bool {
+        matches!(self, AuthError::NotAllowed(_))
+    }
+
     pub fn reason(&self) -> String {
         match self {
             AuthError::MissingBearer => "no bearer token on request".into(),
@@ -497,6 +537,40 @@ mod tests {
                 .unwrap(),
             "bearer"
         );
+    }
+
+    #[test]
+    fn the_challenge_tells_a_client_what_this_server_wants() {
+        // No credentials at all: name the scheme, but do not claim the token was bad.
+        let c = AuthError::MissingBearer.challenge("mcp-gatehound");
+        assert_eq!(c, "Bearer realm=\"mcp-gatehound\"");
+        assert!(!c.contains("error="));
+
+        assert!(AuthError::BadBearer
+            .challenge("mcp-gatehound")
+            .contains("error=\"invalid_token\""));
+        assert!(AuthError::MissingAccessToken
+            .challenge("mcp-gatehound")
+            .contains("error=\"invalid_request\""));
+
+        // Authenticated but not permitted: retrying with a better token cannot help.
+        let denied = AuthError::NotAllowed("someone@example.com".into());
+        assert!(denied
+            .challenge("mcp-gatehound")
+            .contains("error=\"insufficient_scope\""));
+        assert!(denied.forbidden());
+        assert!(!AuthError::BadBearer.forbidden());
+    }
+
+    #[test]
+    fn an_upstream_error_cannot_break_out_of_the_header() {
+        // The reason text can carry a message we did not write.
+        let nasty = AuthError::BadAccessToken("he said \"no\"\r\nX-Evil: 1 \\ done".into());
+        let c = nasty.challenge("mcp-gatehound");
+        assert!(!c.contains('\r') && !c.contains('\n'));
+        assert!(!c.contains("X-Evil: 1\r"));
+        assert_eq!(c.matches('"').count(), 6, "only the six delimiters: {c}");
+        assert!(axum::http::HeaderValue::from_str(&c).is_ok());
     }
 
     #[test]

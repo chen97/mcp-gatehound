@@ -232,7 +232,7 @@ impl Gateway {
                     self.events.emit(GatewayEvent::RequestLogged(Box::new(row)));
                 }
             }
-            Err(e) => tracing::error!(error = %e, "could not write the request log"),
+            Err(e) => tracing::error!(error = %e, "could not write the audit log"),
         }
     }
 

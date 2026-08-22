@@ -156,12 +156,16 @@ Worth keeping, and worth naming in the README, because these are the actual diff
 
 Three tiers, cheapest first. None of this is urgent; all of it is cheaper now than later.
 
-**Tier 1 — conformance and vocabulary, hours not days**
-- Send `WWW-Authenticate` on 401. One header, one `MUST` satisfied.
-- Rename "request log" to "audit log" in the docs and UI; adopt "tool filtering" and
-  "virtual server" as the headline terms.
-- Stop saying RBAC. We have a per-identity policy, which is a different and smaller claim.
-- Drop `ping`, or keep it and note that it is no longer in the spec.
+**Tier 1 — conformance and vocabulary — done, 2026-08-22**
+- ~~Send `WWW-Authenticate` on 401.~~ Done, as an RFC 6750 challenge. A caller who
+  authenticated but is not permitted now gets `403` with `insufficient_scope`, because
+  retrying with a better token cannot help. Full RFC 9728 metadata remains Tier 2.
+- ~~Rename "request log" to "audit log"; adopt "tool filtering" and "virtual server".~~ Done
+  in the README and crate docs. The `requests` table and the "Live log" screen keep their
+  names — the screen genuinely shows the log live.
+- ~~Stop saying RBAC.~~ Nothing claimed it; the README now says so explicitly.
+- ~~Decide about `ping`.~~ Kept, annotated. It is valid in every revision we advertise, so
+  removing it would break conforming clients for no gain.
 
 **Tier 2 — protocol catch-up**
 - Add `server/discover`, backed by what `GET /version` already knows.

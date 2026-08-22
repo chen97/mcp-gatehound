@@ -19,7 +19,7 @@ use crate::store::NewRequestLog;
 use crate::Gateway;
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -98,12 +98,22 @@ fn tool_err(id: Value, message: &str, code: &str) -> Value {
     )
 }
 
-fn unauthorized(err: &AuthError) -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({ "error": "unauthorized", "reason": err.reason() })),
+/// Refuse a call, telling the caller how to authenticate rather than only that it failed.
+fn refuse(realm: &str, err: &AuthError) -> Response {
+    let (status, label) = if err.forbidden() {
+        (StatusCode::FORBIDDEN, "forbidden")
+    } else {
+        (StatusCode::UNAUTHORIZED, "unauthorized")
+    };
+    let mut resp = (
+        status,
+        Json(json!({ "error": label, "reason": err.reason() })),
     )
-        .into_response()
+        .into_response();
+    if let Ok(value) = HeaderValue::from_str(&err.challenge(realm)) {
+        resp.headers_mut().insert(header::WWW_AUTHENTICATE, value);
+    }
+    resp
 }
 
 async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: String) -> Response {
@@ -118,7 +128,7 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
                 error: Some(e.reason()),
                 ..Default::default()
             });
-            return unauthorized(&e);
+            return refuse(&gw.cfg.server_name, &e);
         }
     };
 
@@ -171,6 +181,8 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
                 }),
             )
         }
+        // Removed in protocol revision 2026-07-28, but still valid in every revision this
+        // server advertises, so clients on those revisions keep working.
         "ping" => rpc_result(id, json!({})),
         "tools/list" => {
             let tools: Vec<Value> = gw

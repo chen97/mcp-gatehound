@@ -222,6 +222,30 @@ async fn a_call_without_the_bearer_token_is_rejected() {
     assert_eq!(h.post_raw(Some("wrong-token"), &body).await.status(), 401);
     assert_eq!(h.post_raw(Some(TOKEN), &body).await.status(), 200);
 
+    // A refusal names the scheme, so a compliant client can work out what to send.
+    let r = h.post_raw(None, &body).await;
+    let challenge = r
+        .headers()
+        .get("www-authenticate")
+        .expect("a 401 must carry a WWW-Authenticate challenge")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(challenge.starts_with("Bearer realm="), "{challenge}");
+    assert!(
+        !challenge.contains("error="),
+        "no credentials, so no error code: {challenge}"
+    );
+
+    let r = h.post_raw(Some("wrong-token"), &body).await;
+    let challenge = r
+        .headers()
+        .get("www-authenticate")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(challenge.contains("error=\"invalid_token\""), "{challenge}");
+
     // The rejection is logged, so a probe is visible in the live log.
     let logged = h.gateway.recent_requests(20).unwrap();
     assert!(logged

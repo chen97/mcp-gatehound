@@ -3,10 +3,15 @@
 An authenticated MCP gateway that runs on your laptop.
 
 It accepts MCP requests arriving from the public internet through a Cloudflare Tunnel,
-verifies two independent auth factors, decides per identity which tools that caller may even
-*see*, routes each call to an action declared in configuration — an upstream REST or MCP
-server, or a local command — and logs everything. New or unknown clients are held for your
-approval rather than silently let in.
+verifies two independent auth factors, applies **tool filtering** per identity so a caller
+sees only the tools it may use, routes each call to an action declared in configuration — an
+upstream REST or MCP server, or a local command — and writes an **audit log** of everything.
+New or unknown clients are held for your approval rather than silently let in.
+
+In the vocabulary the gateway market has settled on: `gatehound.toml` defines one **virtual
+server** — a curated tool set composed from your upstreams and exposed as a single
+endpoint — with per-identity tool filtering in front of it. What it does *not* have is
+RBAC: there are no roles, only a per-identity policy.
 
 Its first job is personal messaging: reading WhatsApp, Messenger, Telegram and Instagram
 through Beeper Desktop, and drafting replies in your own voice with `claude -p` on your
@@ -86,6 +91,9 @@ same listener: `GET /healthz` and `GET /version`.
 - `initialize` negotiates from `2025-06-18`, `2025-03-26`, `2024-11-05`.
 - Notifications (no `id`) get `202 Accepted` and an empty body.
 - Protocol errors are JSON-RPC errors (`-32700`, `-32600`, `-32601`, `-32602`).
+- A refused call carries an RFC 6750 `WWW-Authenticate` challenge, so a client learns what
+  to send rather than only that it failed. A caller who authenticated but is not permitted
+  gets `403`, not `401` — retrying with a better token cannot help.
 - **Tool failures are not JSON-RPC errors.** They come back as `result.isError = true` with a
   text block and a machine-readable `code`, so a client can tell `approval_timeout` (retry)
   from `not_permitted` (never).
@@ -107,7 +115,7 @@ with an `email` claim and **service tokens with `common_name` instead**; both ar
 the identity string is derived `email` → `common_name` → `sub`. That string is what policy and
 the log key off.
 
-### Policy, and what a caller can see
+### Tool filtering, and what a caller can see
 
 `(identity, tool)` resolves to `allow`, `deny` or `ask` — exact match first, then
 `(identity, "*")`, then `ask`. A `deny` **removes the tool from `tools/list`**; an unauthorized
@@ -214,14 +222,14 @@ cargo fmt --check
 ```
 
 The surface tests start a real gateway on a loopback port and assert the protocol semantics,
-that a bearer-less call is refused and logged, that a denied tool vanishes from `tools/list`
+that a bearer-less call is refused with a usable `WWW-Authenticate` challenge and logged, that a denied tool vanishes from `tools/list`
 and is refused when called anyway, that an unknown identity is held until someone decides,
 that a timeout and a shutdown each return the right retryable code, and that secrets in
 arguments never reach the log.
 
 ## Data on disk, and whose it is
 
-The request log accumulates a plaintext copy of your conversations — which are also other
+The audit log accumulates a plaintext copy of your conversations — which are also other
 people's messages. Secrets are redacted by key and bodies are truncated on the way in; after
 `log_retention_days` the bodies are blanked, and after four times that the rows are deleted.
 Set the window to something you are comfortable with.
@@ -240,6 +248,15 @@ Set the window to something you are comfortable with.
 - Unsigned builds trip Gatekeeper and SmartScreen. macOS notarization needs an Apple Developer
   account.
 - WeChat is out of scope: there is no sanctioned API for personal accounts.
+- **The MCP protocol has moved on.** This implements revision `2025-06-18`; the current
+  revision is `2026-07-28`, which drops the `initialize` handshake, makes the protocol
+  stateless and adds a mandatory `server/discover`. Several of its changes cost us nothing —
+  we were already stateless and already refuse `GET /mcp` — but catching up is real work.
+  See [`docs/market-alignment.md`](docs/market-alignment.md).
+- **Authentication is not MCP authorization.** The spec expects OAuth 2.1 with RFC 9728
+  Protected Resource Metadata; we use a shared bearer plus a Cloudflare Access JWT. Deliberate
+  for a single-user gateway, but it means a standards-compliant client cannot discover how to
+  authenticate beyond the scheme our challenge names.
 
 ## Licence
 
