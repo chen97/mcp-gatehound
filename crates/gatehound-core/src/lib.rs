@@ -10,9 +10,9 @@ pub mod actions;
 pub mod approval;
 pub mod auth;
 pub mod config;
-pub mod drafter;
 pub mod events;
 pub mod mcp;
+pub mod pack;
 pub mod policy;
 pub mod protocol;
 pub mod redact;
@@ -40,7 +40,7 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 /// How often old log bodies are pruned.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 
-/// Where the database lives when config does not say (SPEC §4.7). The Tauri shell passes its
+/// Where the database lives when config does not say. The Tauri shell passes its
 /// own `app_data_dir()` instead.
 pub fn default_db_path() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
@@ -121,7 +121,7 @@ impl Gateway {
         mcp::router(self.clone())
     }
 
-    /// Bind the configured listen address. Loopback only (SPEC §7.1) — public exposure belongs
+    /// Bind the configured listen address. Loopback only — public exposure belongs
     /// to cloudflared, not to this listener.
     pub async fn bind(&self) -> Result<tokio::net::TcpListener> {
         let addr: SocketAddr =
@@ -147,7 +147,7 @@ impl Gateway {
     }
 
     /// Serve on an already-bound listener until `cancel` fires, then drain in-flight calls,
-    /// release held approvals and checkpoint the WAL (SPEC §5.1).
+    /// release held approvals and checkpoint the WAL.
     pub async fn serve_on(
         self: Arc<Self>,
         listener: tokio::net::TcpListener,

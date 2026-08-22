@@ -1,4 +1,4 @@
-//! cloudflared, bundled as a Tauri sidecar (SPEC §5.4).
+//! cloudflared, bundled as a Tauri sidecar.
 //!
 //! It is started with the app and killed explicitly on exit, never orphaned — an orphaned
 //! tunnel would keep publishing a hostname with nothing behind it.

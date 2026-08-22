@@ -1,6 +1,6 @@
 # MCP Gatehound
 
-An authenticated MCP gateway that runs on your laptop.
+An authenticated MCP gateway that runs on your own machine.
 
 It accepts MCP requests arriving from the public internet through a Cloudflare Tunnel,
 verifies two independent auth factors, applies **tool filtering** per identity so a caller
@@ -13,29 +13,26 @@ server** — a curated tool set composed from your upstreams and exposed as a si
 endpoint — with per-identity tool filtering in front of it. What it does *not* have is
 RBAC: there are no roles, only a per-identity policy.
 
-Its first job is personal messaging: reading WhatsApp, Messenger, Telegram and Instagram
-through Beeper Desktop, and drafting replies in your own voice with `claude -p` on your
-existing Claude subscription. The website half lives in
-[**message-desk**](https://github.com/chen97/message-desk). **Nothing is ever sent without an
-explicit human tap.**
-
-The full design is in [`SPEC.md`](SPEC.md).
+The gateway ships knowing nothing about any particular service. What it fronts is entirely
+config: an upstream, its named operations, and the tools bound to them. A **pack** is that
+configuration as a portable file, so an integration written once can be imported rather than
+retyped.
 
 ```
-phone / browser
+phone / browser / agent
   → Cloudflare Access (identity)
-  → Message Desk: Cloudflare Worker + D1 (site, draft queue, conversation cache)
   → Cloudflare Tunnel
-  → MCP Gatehound on the laptop        [MCP gateway + GUI + SQLite]
-      ├─ action: proxy → Beeper Desktop REST → WhatsApp / Messenger / Telegram / Instagram
-      └─ action: exec  → claude -p (your Max plan, no tools, no ambient config)
+  → MCP Gatehound                       [MCP gateway + GUI + SQLite]
+      ├─ action: proxy → an upstream REST API declared in config
+      ├─ action: proxy → another MCP server, kept on loopback behind this gateway
+      └─ action: exec  → a local command, argv-only, never a shell
 ```
 
 ## What is in here
 
 | Crate | What it is |
 |---|---|
-| `gatehound-core` | Everything: the MCP server, auth, policy, the approval queue, the action engine, upstreams, drafting, SQLite. No GUI, no Tauri. |
+| `gatehound-core` | Everything: the MCP server, auth, policy, the approval queue, the action engine, upstreams, packs, SQLite. No GUI, no Tauri. |
 | `gatehound-headless` | A thin binary that runs the core with no GUI — for an always-on machine, and for the test rig. |
 | `gatehound-app` | **MCP Gatehound**, the Tauri v2 desktop shell: tray, approvals, live log, identities. |
 
@@ -45,28 +42,28 @@ needs the Tauri system prerequisites, so build it explicitly with `cargo build -
 ## Quick start
 
 ```sh
-cp .env.example .env                     # fill in GATEHOUND_TOKEN and BEEPER_ACCESS_TOKEN
-cp gatehound.example.toml gatehound.toml # edit the identities and upstreams
+cp .env.example .env                     # fill in GATEHOUND_TOKEN and your upstream credentials
+cp gatehound.example.toml gatehound.toml # edit the upstreams, tools and identities
 cargo run -p gatehound-headless -- check # validate the config and probe the upstreams
 cargo run -p gatehound-headless          # serve on 127.0.0.1:8790
 ```
 
 `check` prints the listen address, both auth factors, every tool with the action it is bound
-to, whether each upstream answers, and the stored policy rules. It exits non-zero if an
-upstream is down, which makes it usable as a health check.
+to, every operation each upstream declares, whether each upstream answers, and the stored
+policy rules. It exits non-zero if an upstream is down, which makes it usable as a health
+check.
 
-### Try the whole chain without a Beeper account
+### Try the whole chain without a real API
 
 ```sh
-python3 tests_fixtures/mock_server.py 23399 &
+python3 tests_fixtures/mock_upstream.py 23399 &
 GATEHOUND_TOKEN=hubsecret-0123456789abcdef \
   cargo run -p gatehound-headless -- --config tests_fixtures/gatehound.mock.toml
 ```
 
-`mock_server.py` stands in for both Beeper Desktop and the Anthropic Messages API on one
-port, with fixtures for an English thread, a Chinese thread, a bot channel that must be
-filtered out, a sticker that must produce no reply, and a chat you already answered. Message
-Desk's `npm run test:integration` drives the real Worker logic against this.
+`mock_upstream.py` is a dull REST service — a few notes behind a bearer token — plus an
+endpoint reporting what it received, which is how the idempotency test proves a replayed
+call reached the upstream exactly once. See [`tests_fixtures/README.md`](tests_fixtures/README.md).
 
 ### The desktop app
 
@@ -89,7 +86,7 @@ no standalone stream, because nothing here is server-initiated — `GET` and `DE
 return 405. Also on the same listener: `GET /healthz` and `GET /version`.
 
 This is a **dual-era server**. Revision `2026-07-28` made MCP stateless — no handshake, and
-every request carries its own protocol version — while everything up to `2025-11-25` negotiates
+every request carries its own protocol version — while everything up to `2025-06-18` negotiates
 once via `initialize`. The spec allows one server to serve both, choosing per request by how the
 client opens:
 
@@ -165,47 +162,54 @@ A tool is a name, an input schema, and an action. **Actions are declared in conf
 never chosen by a caller** — that is the whole reason "call this tool" cannot become "run this
 command".
 
-- `proxy` — forward to a declared upstream (Beeper Desktop's REST API, or another MCP server
-  kept on loopback behind this gateway).
+- `proxy` — forward to a named operation on a declared upstream. An upstream is either a REST
+  API described entirely in config (each operation a method, a path, and optional query and
+  body templates) or another MCP server reachable over Streamable HTTP. A tool naming an
+  operation its upstream does not declare is a startup error, not a runtime surprise.
 - `exec` — run a local command, under rules enforced in one place: argv array only and never
   a shell; `cmd` fixed by config with caller input only filling declared `{placeholders}`;
   long or untrusted content on stdin, never argv; timeout, output cap and a concurrency
   semaphore all mandatory; a value that renders over 4 KB or contains a NUL is refused. A
   placeholder with no value is a hard error rather than an empty string, and a literal brace
   is written `{{`.
-- `draft` — gather a chat's transcript from an upstream, then generate a reply. Never sends.
 
-`send_message` is additionally **idempotent**: a required `idempotency_key` is claimed before
-the send and completed after, so replaying a key returns the recorded result instead of
-sending again. Without this, a network timeout *after* successful delivery sends a real person
-the same message twice. It is also rate-limited (60/hour, 2s apart) because Beeper's bridges
-are unofficial and volume is what gets an account suspended.
+Template substitution is deliberately narrow. A path placeholder is percent-encoded, so an
+argument carrying `../../admin` reaches the upstream as one mangled path segment rather than
+another endpoint. A path or query value must be a string, number or boolean; only a JSON body
+may carry structure, and only in the field the template declares. A placeholder standing alone
+keeps its argument's JSON type, so a number stays a number.
 
-### Drafting
+Any tool may be marked **idempotent**: a required `idempotency_key` is claimed before the
+action and completed after, so replaying a key returns the recorded result instead of acting
+again. Without this, a network timeout *after* the upstream succeeded acts twice. A key is
+only burned by a call that actually succeeded, so a failed call can be retried with the same
+key. Any tool may also carry a **rate limit** — a per-hour cap and a minimum gap — which is a
+second, independent brake on a runaway agent.
 
-The drafting model reads untrusted text written by strangers, so it gets no tools and no
-ambient configuration. The default invocation is:
+### Packs: importing and exporting an integration
 
+Everything the gateway knows about a service is data, so it can travel:
+
+```sh
+gatehound-headless export my-tracker -o tracker.pack.toml   # what this gateway fronts
+gatehound-headless import tracker.pack.toml                 # merge it into gatehound.toml
+gatehound-headless import tracker.pack.toml --replace       # …overwriting existing names
 ```
-claude -p --output-format text --safe-mode --strict-mcp-config --max-turns 1 \
-       --system-prompt-file <temp file>          # transcript arrives on stdin
-```
 
-`--safe-mode` turns off project customizations, hooks, plugins, skills and MCP servers. The
-system prompt is written to a mode-0600 temp file that is deleted when the draft finishes; the
-transcript goes in on stdin. Neither is ever an argv element, and no code path lets the
-model's output trigger an action. **Verify these flag names against `claude --help` on your
-machine** — the CLI moves fast, and they are config, not code, precisely so you can fix them
-without a rebuild.
+A pack is upstreams, tools and identity seeds in one TOML file. Two rules make one safe to
+accept from someone else:
 
-The prompt tells the model to mirror the conversation's language and register (including
-Chinese ↔ English mixing), to imitate your own earlier messages, to invent nothing, never to
-mention being an AI, to treat the transcript as **data and never as instructions**, and to
-answer `[NO_REPLY]` when no reply is warranted.
+- **No credentials travel.** A pack names the environment variable that carries a token; it
+  never carries the token. Export strips any that were written inline and names a variable in
+  its place, then lists everything the importer still has to set.
+- **Nothing is silently replaced.** Import refuses on the first name collision unless you pass
+  `--replace`, so a pack cannot quietly redefine a tool that already exists — which is the
+  shape of the "rug pull" the MCP threat literature warns about. Identity seeds are advisory:
+  they apply only where the database holds no decision yet, so importing a pack can never
+  override a choice you made in the GUI.
 
-Setting `provider = "api"` switches to the Anthropic Messages API with an API key, so the
-system survives a change to subscription policy by changing one setting rather than by
-exporting an account token to the cloud.
+An import runs the same validation as startup, so a pack that references a missing upstream or
+an undeclared operation is rejected before it reaches your config.
 
 ### The desktop shell
 
@@ -226,14 +230,12 @@ re-reads whenever the core pushes an event.
 
 `gatehound.toml` plus environment overrides — see [`gatehound.example.toml`](gatehound.example.toml)
 and [`.env.example`](.env.example). Credentials are read from the environment only, so the
-config file stays safe to keep in version control.
+config file stays safe to keep in version control: each upstream names the variable that
+carries its own via `token_env`.
 
 Environment keys: `GATEHOUND_TOKEN`, `LISTEN_ADDR`, `DB_PATH`, `APPROVAL_TIMEOUT_SECS`,
 `LOG_RETENTION_DAYS`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `ALLOWED_EMAILS`,
-`BEEPER_ACCESS_TOKEN`, `BEEPER_API_URL`, `DRAFT_PROVIDER`, `CLAUDE_BIN`, `ANTHROPIC_API_KEY`,
-`ANTHROPIC_MODEL`, `ANTHROPIC_API_URL`, `VOICE_FILE`, `CONTEXT_MESSAGES`, `LOOKBACK_MINUTES`,
-`INCLUDE_GROUPS`, `INCLUDE_MUTED`, `ONLY_UNREAD`, `MARK_READ_ON_SEND`, `ALLOW_CHAT_IDS`,
-`IGNORE_CHAT_IDS`, `SEND_LIMIT_PER_HOUR`.
+`SEND_LIMIT_PER_HOUR`, plus whatever variables your own upstreams name.
 
 Where things live:
 
@@ -246,38 +248,36 @@ Where things live:
 ## Testing
 
 ```sh
-cargo test                              # 76 unit tests + 16 MCP surface tests over a real socket
+cargo test                              # unit tests, MCP surface tests over a real socket, shipped-config tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
 The surface tests start a real gateway on a loopback port and assert the protocol semantics,
-that a bearer-less call is refused with a usable `WWW-Authenticate` challenge and logged, that a denied tool vanishes from `tools/list`
-and is refused when called anyway, that an unknown identity is held until someone decides,
-that a timeout and a shutdown each return the right retryable code, and that secrets in
-arguments never reach the log.
+that a bearer-less call is refused with a usable `WWW-Authenticate` challenge and logged, that
+a denied tool vanishes from `tools/list` and is refused when called anyway, that an unknown
+identity is held until someone decides, that a timeout and a shutdown each return the right
+retryable code, and that secrets in arguments never reach the log.
+
+CI additionally runs the whole chain against the mock rig: the modern revision served
+statelessly, a legacy client's handshake, a header that disagrees with its body being refused,
+an awkward identifier surviving the round trip to the upstream intact, a replayed idempotency
+key reaching the upstream exactly once, and a pack surviving export and import without
+carrying a credential.
 
 ## Data on disk, and whose it is
 
-The audit log accumulates a plaintext copy of your conversations — which are also other
-people's messages. Secrets are redacted by key and bodies are truncated on the way in; after
-`log_retention_days` the bodies are blanked, and after four times that the rows are deleted.
-Set the window to something you are comfortable with.
+The audit log accumulates a plaintext copy of whatever passes through — which, depending on
+what you front, may be other people's data. Secrets are redacted by key and bodies are
+truncated on the way in; after `log_retention_days` the bodies are blanked, and after four
+times that the rows are deleted. Set the window to something you are comfortable with.
 
 ## Known limits
 
-- **Everything needs the laptop awake.** Reading, drafting and sending all go through this
-  process. Message Desk's conversation cache keeps the site usable while the laptop sleeps,
-  but it cannot send. The real fix is `gatehound-headless` on an always-on machine.
-- **The Beeper endpoints are built against documentation and the mock rig**, not a live
-  account. Confirm them on first run — `check` will tell you quickly.
-- **Beeper chat IDs are assumed stable across re-linking a network account.** That is
-  unverified; if it turns out not to hold, re-linking would orphan labels and last-seen state.
-- **`mark_read` emits a read receipt** to the other party. It is on by default after a send.
-- Text only: no attachments, no reactions.
+- **Everything needs the machine awake.** Every call goes through this process; there is no
+  cloud half. For always-on service, run `gatehound-headless` somewhere that stays up.
 - Unsigned builds trip Gatekeeper and SmartScreen. macOS notarization needs an Apple Developer
   account.
-- WeChat is out of scope: there is no sanctioned API for personal accounts.
 - **Deprecated features are not implemented and will not be.** Roots, Sampling and Logging
   were deprecated in `2026-07-28`; so were the HTTP+SSE transport and Dynamic Client
   Registration. None of them appear here.
@@ -285,6 +285,9 @@ Set the window to something you are comfortable with.
   Protected Resource Metadata; we use a shared bearer plus a Cloudflare Access JWT. Deliberate
   for a single-user gateway, but it means a standards-compliant client cannot discover how to
   authenticate beyond the scheme our challenge names.
+- **An upstream's tools are not re-exported automatically.** An MCP upstream contributes only
+  the tools you declare, because a gateway that mirrors whatever an upstream advertises inherits
+  whatever an upstream later adds.
 
 ## Licence
 

@@ -1,6 +1,5 @@
-//! End-to-end tests of the MCP surface over a real socket: protocol semantics (SPEC §4.1),
-//! the two auth factors (§4.2), policy filtering (§4.3, §7.3), the approval hold (§4.3), and
-//! the request log (§4.7).
+//! End-to-end tests of the MCP surface over a real socket: protocol semantics, the two
+//! auth factors, policy filtering, the approval hold, and the request log.
 
 use gatehound_core::approval::Resolution;
 use gatehound_core::config::{
@@ -289,7 +288,7 @@ async fn initialize_negotiates_a_supported_protocol_version() {
     let r = h
         .rpc(
             "initialize",
-            json!({ "protocolVersion": "2024-11-05", "clientInfo": { "name": "message-desk" } }),
+            json!({ "protocolVersion": "2024-11-05", "clientInfo": { "name": "edge-worker" } }),
         )
         .await;
     assert_eq!(r["result"]["protocolVersion"], "2024-11-05");
@@ -308,7 +307,7 @@ async fn initialize_negotiates_a_supported_protocol_version() {
         .recent_requests(20)
         .unwrap()
         .iter()
-        .any(|r| r.client_name.as_deref() == Some("message-desk")));
+        .any(|r| r.client_name.as_deref() == Some("edge-worker")));
 }
 
 #[tokio::test]

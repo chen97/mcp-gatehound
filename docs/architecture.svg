@@ -5,178 +5,114 @@
     <marker id="mGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5CCB8B"/></marker>
     <marker id="mMute" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8A95A3"/></marker>
   </defs>
-
   <rect x="0" y="0" width="1440" height="1080" fill="#15191F"/>
-
-  <!-- Header -->
-  <text x="48" y="56" font-size="26" font-weight="700" fill="#EDF0F4">MCP Gatehound — everything in one app</text>
-  <text x="48" y="82" font-size="14" fill="#96A1AE">phone → Message Desk (Cloudflare) → tunnel → MCP Gatehound (gateway + GUI + SQLite) → Beeper → networks</text>
-
-  <!-- Legend -->
-  <line x1="960" y1="46" x2="996" y2="46" stroke="#F2C14E" stroke-width="3"/>
-  <text x="1004" y="50" font-size="12" fill="#C9D2DC">you · approve &amp; send</text>
-  <line x1="1180" y1="46" x2="1216" y2="46" stroke="#5B9DFF" stroke-width="3"/>
-  <text x="1224" y="50" font-size="12" fill="#C9D2DC">request path</text>
-  <line x1="960" y1="72" x2="996" y2="72" stroke="#5CCB8B" stroke-width="3"/>
-  <text x="1004" y="76" font-size="12" fill="#C9D2DC">drafting · your Max plan</text>
-  <line x1="1180" y1="72" x2="1216" y2="72" stroke="#8A95A3" stroke-width="2.5" stroke-dasharray="5 4"/>
-  <text x="1224" y="76" font-size="12" fill="#C9D2DC">localhost</text>
-
-  <!-- ============ ROW 1 · the chain ============ -->
-  <text x="48" y="136" font-size="11" letter-spacing="1.6" fill="#7C8794">THE CHAIN</text>
-
-  <rect x="60" y="166" width="180" height="104" rx="14" fill="#1E242C" stroke="#313A46"/>
-  <rect x="60" y="166" width="4" height="104" rx="2" fill="#F2C14E"/>
-  <text x="84" y="200" font-size="14" font-weight="600" fill="#EDF0F4">Phone / browser</text>
-  <text x="84" y="224" font-size="11.5" fill="#96A1AE">conversations · drafts</text>
-  <text x="84" y="246" font-size="11.5" fill="#96A1AE">tap Send</text>
-
-  <rect x="280" y="166" width="260" height="104" rx="14" fill="#1E242C" stroke="#313A46"/>
-  <rect x="280" y="166" width="260" height="5" rx="2.5" fill="#F2C14E"/>
-  <text x="302" y="202" font-size="14" font-weight="600" fill="#EDF0F4">Message Desk · Cloudflare</text>
-  <text x="302" y="226" font-size="11.5" fill="#96A1AE">Access (your email · MFA)</text>
-  <text x="302" y="248" font-size="11.5" fill="#96A1AE">Worker site + D1 cache &amp; queue</text>
-
-  <rect x="576" y="200" width="70" height="32" rx="16" fill="#15191F" stroke="#F6821F" stroke-width="1.5"/>
-  <text x="611" y="220" font-size="10.5" fill="#F6821F" text-anchor="middle">tunnel</text>
-
-  <rect x="686" y="156" width="250" height="124" rx="14" fill="#1E242C" stroke="#5B9DFF" stroke-width="2"/>
-  <text x="710" y="192" font-size="15" font-weight="600" fill="#EDF0F4">MCP Gatehound</text>
-  <rect x="710" y="204" width="202" height="22" rx="11" fill="#5B9DFF"/>
-  <text x="811" y="219" font-size="9.5" font-weight="700" letter-spacing="0.4" fill="#0C1626" text-anchor="middle">GATEWAY + GUI · ONE PROCESS</text>
-  <text x="710" y="248" font-size="11.5" fill="#96A1AE">Tauri app · runs in background</text>
-  <text x="710" y="268" font-size="11.5" fill="#96A1AE">menubar / tray icon</text>
-
-  <rect x="976" y="166" width="160" height="104" rx="14" fill="#1E242C" stroke="#313A46"/>
-  <text x="998" y="202" font-size="14" font-weight="600" fill="#EDF0F4">Beeper</text>
-  <text x="998" y="226" font-size="11.5" fill="#96A1AE">on-device bridges</text>
-  <text x="998" y="248" font-size="11.5" fill="#96A1AE">logged in as you</text>
-
-  <rect x="1176" y="166" width="200" height="104" rx="14" fill="#1E242C" stroke="#313A46"/>
-  <circle cx="1200" cy="196" r="5" fill="#25D366"/><text x="1214" y="200" font-size="12" fill="#DCE3EA">WhatsApp</text>
-  <circle cx="1200" cy="222" r="5" fill="#8A5CFF"/><text x="1214" y="226" font-size="12" fill="#DCE3EA">Messenger</text>
-  <circle cx="1200" cy="248" r="5" fill="#2AABEE"/><text x="1214" y="252" font-size="12" fill="#DCE3EA">Telegram · Instagram</text>
-
-  <line x1="240" y1="218" x2="274" y2="218" stroke="#F2C14E" stroke-width="2.5" marker-end="url(#mAmber)"/>
-  <line x1="540" y1="216" x2="570" y2="216" stroke="#5B9DFF" stroke-width="2.5" marker-end="url(#mBlue)"/>
-  <line x1="646" y1="216" x2="680" y2="216" stroke="#5B9DFF" stroke-width="2.5" marker-end="url(#mBlue)"/>
-  <line x1="936" y1="218" x2="970" y2="218" stroke="#8A95A3" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#mMute)"/>
-  <line x1="1136" y1="218" x2="1170" y2="218" stroke="#8A95A3" stroke-width="1.5"/>
-
-  <!-- zoom callout -->
-  <line x1="686" y1="280" x2="48" y2="346" stroke="#5B9DFF" stroke-width="1.2" stroke-dasharray="5 5" stroke-opacity="0.4"/>
-  <line x1="936" y1="280" x2="1392" y2="346" stroke="#5B9DFF" stroke-width="1.2" stroke-dasharray="5 5" stroke-opacity="0.4"/>
-
-  <!-- ============ ROW 2 · inside the app ============ -->
-  <rect x="48" y="346" width="1344" height="614" rx="20" fill="#1A2028" stroke="#5B9DFF" stroke-opacity="0.35"/>
-  <text x="72" y="378" font-size="11" letter-spacing="1.6" fill="#7C8794">INSIDE MCP GATEHOUND · ONE PROCESS, ONE LIFECYCLE</text>
-
-  <!-- GUI column -->
-  <rect x="72" y="396" width="330" height="160" rx="14" fill="#1E242C" stroke="#313A46"/>
-  <rect x="72" y="396" width="4" height="160" rx="2" fill="#F2C14E"/>
-  <text x="96" y="428" font-size="14" font-weight="600" fill="#EDF0F4">Tray icon — the primary surface</text>
-  <circle cx="100" cy="452" r="5" fill="#5CCB8B"/><text x="114" y="456" font-size="11.5" fill="#C9D2DC">green: listening</text>
-  <circle cx="240" cy="452" r="5" fill="#8A95A3"/><text x="254" y="456" font-size="11.5" fill="#C9D2DC">grey: paused</text>
-  <circle cx="100" cy="476" r="5" fill="#F07167"/><text x="114" y="480" font-size="11.5" fill="#C9D2DC">red: Beeper not answering</text>
-  <rect x="96" y="494" width="282" height="26" rx="8" fill="#262D37"/>
-  <text x="108" y="512" font-size="11" fill="#DCE3EA">Pending 2 · Open · Pause gateway · Quit</text>
-  <text x="96" y="540" font-size="11" fill="#7C8794">native notification on each new approval</text>
-
-  <rect x="72" y="576" width="330" height="200" rx="14" fill="#1E242C" stroke="#313A46"/>
-  <rect x="72" y="576" width="4" height="200" rx="2" fill="#F2C14E"/>
-  <text x="96" y="608" font-size="14" font-weight="600" fill="#EDF0F4">WebView window</text>
-  <rect x="96" y="622" width="130" height="24" rx="12" fill="#262D37" stroke="#F2C14E" stroke-width="1.2"/>
-  <text x="161" y="638" font-size="10.5" fill="#DCE3EA" text-anchor="middle">Approvals</text>
-  <rect x="234" y="622" width="130" height="24" rx="12" fill="#262D37" stroke="#313A46"/>
-  <text x="299" y="638" font-size="10.5" fill="#DCE3EA" text-anchor="middle">Live log</text>
-  <rect x="96" y="654" width="130" height="24" rx="12" fill="#262D37" stroke="#313A46"/>
-  <text x="161" y="670" font-size="10.5" fill="#DCE3EA" text-anchor="middle">Upstreams</text>
-  <rect x="234" y="654" width="130" height="24" rx="12" fill="#262D37" stroke="#313A46"/>
-  <text x="299" y="670" font-size="10.5" fill="#DCE3EA" text-anchor="middle">Identities</text>
-  <text x="96" y="704" font-size="11.5" fill="#C9D2DC">Allow once · Allow + whitelist · Reject</text>
-  <text x="96" y="726" font-size="11" fill="#7C8794">close button → hides to tray, keeps serving</text>
-  <text x="96" y="746" font-size="11" fill="#7C8794">macOS: Accessory mode, no Dock icon</text>
-  <text x="96" y="764" font-size="11" fill="#7C8794">window created lazily on first open</text>
-
-  <rect x="72" y="796" width="330" height="88" rx="14" fill="#1E242C" stroke="#313A46"/>
-  <rect x="72" y="796" width="4" height="88" rx="2" fill="#F6821F"/>
-  <text x="96" y="826" font-size="13.5" font-weight="600" fill="#EDF0F4">cloudflared — sidecar child</text>
-  <text x="96" y="848" font-size="11.5" fill="#96A1AE">tunnel comes up and dies with the app</text>
-  <text x="96" y="868" font-size="11" fill="#7C8794">killed explicitly on exit — never orphaned</text>
-
-  <text x="72" y="912" font-size="11.5" fill="#F2C14E">Quit the app → the whole process exits → gateway stops.</text>
-  <text x="72" y="932" font-size="11" fill="#7C8794">Graceful shutdown drains in-flight calls and checkpoints the WAL.</text>
-
-  <!-- gateway-core -->
-  <rect x="430" y="396" width="680" height="470" rx="16" fill="#171D25" stroke="#5B9DFF" stroke-opacity="0.5"/>
-  <text x="452" y="424" font-size="13.5" font-weight="600" fill="#5B9DFF">gatehound-core (Rust crate — also builds a headless binary)</text>
-
-  <rect x="606" y="438" width="480" height="60" rx="12" fill="#1E242C" stroke="#313A46"/>
-  <text x="626" y="462" font-size="13" font-weight="600" fill="#EDF0F4">MCP listener</text>
-  <text x="626" y="484" font-size="11.5" fill="#96A1AE">axum · POST /mcp · JSON-RPC 2.0 · bound to 127.0.0.1</text>
-
-  <line x1="846" y1="498" x2="846" y2="518" stroke="#5B9DFF" stroke-width="2.5" marker-end="url(#mBlue)"/>
-
-  <rect x="606" y="520" width="480" height="60" rx="12" fill="#1E242C" stroke="#313A46"/>
-  <text x="626" y="544" font-size="13" font-weight="600" fill="#EDF0F4">Verify</text>
-  <text x="626" y="566" font-size="11.5" fill="#96A1AE">Access JWT (JWKS · aud · iss · exp) + shared bearer</text>
-
-  <line x1="846" y1="580" x2="846" y2="600" stroke="#5B9DFF" stroke-width="2.5" marker-end="url(#mBlue)"/>
-
-  <rect x="606" y="602" width="480" height="60" rx="12" fill="#1E242C" stroke="#313A46"/>
-  <text x="626" y="626" font-size="13" font-weight="600" fill="#EDF0F4">Identity policy</text>
-  <text x="626" y="648" font-size="11.5" fill="#96A1AE">per client + tool: allow · deny · ask (first seen → ask)</text>
-
-  <!-- approval queue + links to GUI -->
-  <rect x="446" y="596" width="140" height="72" rx="12" fill="#1E242C" stroke="#F2C14E" stroke-width="1.4"/>
-  <text x="462" y="622" font-size="12" font-weight="600" fill="#F2C14E">Approval queue</text>
-  <text x="462" y="642" font-size="10.5" fill="#96A1AE">holds the request</text>
-  <text x="462" y="658" font-size="10.5" fill="#96A1AE">open, 60s timeout</text>
-  <line x1="600" y1="624" x2="590" y2="624" stroke="#F2C14E" stroke-width="2" marker-end="url(#mAmber)"/>
-  <text x="592" y="590" font-size="10" fill="#F2C14E" text-anchor="middle">ask</text>
-  <line x1="444" y1="614" x2="408" y2="614" stroke="#F2C14E" stroke-width="2" marker-end="url(#mAmber)"/>
-  <text x="426" y="604" font-size="9.5" fill="#F2C14E" text-anchor="middle">notify</text>
-  <line x1="408" y1="652" x2="442" y2="652" stroke="#F2C14E" stroke-width="2" marker-end="url(#mAmber)"/>
-  <text x="426" y="672" font-size="9.5" fill="#F2C14E" text-anchor="middle">decision</text>
-
-  <line x1="846" y1="662" x2="846" y2="682" stroke="#5B9DFF" stroke-width="2.5" marker-end="url(#mBlue)"/>
-
-  <rect x="606" y="684" width="480" height="76" rx="12" fill="#1E242C" stroke="#313A46"/>
-  <text x="626" y="708" font-size="13" font-weight="600" fill="#EDF0F4">Action engine</text>
-  <rect x="626" y="720" width="106" height="24" rx="12" fill="#262D37" stroke="#5B9DFF" stroke-width="1.2"/>
-  <text x="679" y="736" font-size="10.5" fill="#DCE3EA" text-anchor="middle">route proxy</text>
-  <rect x="740" y="720" width="106" height="24" rx="12" fill="#262D37" stroke="#5CCB8B" stroke-width="1.2"/>
-  <text x="793" y="736" font-size="10.5" fill="#DCE3EA" text-anchor="middle">exec command</text>
-  <rect x="854" y="720" width="106" height="24" rx="12" fill="#262D37" stroke="#313A46"/>
-  <text x="907" y="736" font-size="10.5" fill="#7C8794" text-anchor="middle">http call…</text>
-
-  <line x1="846" y1="760" x2="846" y2="780" stroke="#5B9DFF" stroke-width="2.5" marker-end="url(#mBlue)"/>
-
-  <rect x="606" y="782" width="480" height="62" rx="12" fill="#1E242C" stroke="#313A46"/>
-  <text x="626" y="806" font-size="13" font-weight="600" fill="#EDF0F4">SQLite — bundled, in app data dir</text>
-  <text x="626" y="828" font-size="11.5" fill="#96A1AE">every request · response · decision · action · WAL mode</text>
-
-  <!-- outputs on the laptop, outside gateway-core -->
-  <rect x="1156" y="620" width="216" height="104" rx="14" fill="#1E242C" stroke="#313A46"/>
-  <rect x="1156" y="620" width="4" height="104" rx="2" fill="#5B9DFF"/>
-  <text x="1176" y="650" font-size="13" font-weight="600" fill="#EDF0F4">Beeper Desktop</text>
-  <text x="1176" y="672" font-size="11" fill="#96A1AE">REST · 127.0.0.1:23373</text>
-  <text x="1176" y="694" font-size="11" fill="#96A1AE">read chats · send approved</text>
-  <text x="1176" y="712" font-size="10.5" fill="#7C8794">separate app you already run</text>
-
-  <rect x="1156" y="748" width="216" height="104" rx="14" fill="#1E242C" stroke="#313A46"/>
-  <rect x="1156" y="748" width="4" height="104" rx="2" fill="#5CCB8B"/>
-  <text x="1176" y="778" font-size="13" font-weight="600" fill="#EDF0F4">claude -p</text>
-  <text x="1176" y="800" font-size="11" fill="#96A1AE">child process · argv + stdin</text>
-  <text x="1176" y="822" font-size="11" fill="#5CCB8B">your Max plan · $0 extra</text>
-  <text x="1176" y="840" font-size="10.5" fill="#7C8794">drafts only — no tools, no send</text>
-
-  <path d="M1086 706 H1124 V672 H1150" fill="none" stroke="#5B9DFF" stroke-width="2.5" marker-end="url(#mBlue)"/>
-  <path d="M1086 730 H1124 V800 H1150" fill="none" stroke="#5CCB8B" stroke-width="2.5" marker-end="url(#mGreen)"/>
-
-  <!-- Bottom strip -->
-  <rect x="48" y="985" width="1344" height="76" rx="16" fill="#1E242C" stroke="#5B9DFF" stroke-opacity="0.5" stroke-width="1.5"/>
-  <text x="72" y="1013" font-size="13" font-weight="700" letter-spacing="1" fill="#5B9DFF">ONE APP, ONE LIFECYCLE</text>
-  <text x="72" y="1036" font-size="13" fill="#EDF0F4">Gatehound running (even hidden in the menubar) = gateway listening, SQLite open, tunnel up. Quit = all of it stops, and Message Desk shows "gateway offline" with cached drafts still readable.</text>
-  <text x="72" y="1055" font-size="12" fill="#96A1AE">gatehound-core stays a separate crate, so the same logic can later ship as gatehound-headless on a Mac mini — a build target, not a rewrite.</text>
+  <text x="48" y="58" font-size="26" font-weight="700" fill="#EDF0F4">MCP Gatehound — an authenticated MCP gateway</text>
+  <text x="48" y="84" font-size="14" font-weight="400" fill="#96A1AE">agent or browser → Cloudflare Access → tunnel → the gateway → upstreams declared in config</text>
+  <text x="48" y="126" font-size="12" font-weight="700" fill="#7A8695" letter-spacing="1.6">THE REQUEST PATH</text>
+  <line x1="48" y1="136" x2="1392" y2="136" stroke="#2C3540" stroke-width="1"/>
+  <rect x="48" y="152" width="236" height="140" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="70" y="186" font-size="15" font-weight="600" fill="#EDF0F4">Agent · browser · phone</text>
+  <text x="70" y="214" font-size="13" font-weight="400" fill="#96A1AE">speaks MCP over HTTPS</text>
+  <text x="70" y="238" font-size="12" font-weight="400" fill="#7A8695" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">POST /mcp · JSON-RPC 2.0</text>
+  <text x="70" y="266" font-size="12" font-weight="400" fill="#7A8695">one endpoint, not N integrations</text>
+  <path d="M292,222.0 L336,222.0" stroke="#5B9DFF" stroke-width="2" fill="none" marker-end="url(#mBlue)"/>
+  <rect x="344" y="152" width="268" height="140" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="366" y="186" font-size="15" font-weight="600" fill="#EDF0F4">Cloudflare Access + Tunnel</text>
+  <text x="366" y="214" font-size="13" font-weight="400" fill="#96A1AE">identity: a person&#x27;s email, or</text>
+  <text x="366" y="234" font-size="13" font-weight="400" fill="#96A1AE">service token&#x27;s common_name</text>
+  <text x="366" y="266" font-size="12" font-weight="400" fill="#7A8695">nothing is exposed directly</text>
+  <path d="M620,222.0 L664,222.0" stroke="#5B9DFF" stroke-width="2" fill="none" marker-end="url(#mBlue)"/>
+  <rect x="672" y="152" width="300" height="140" rx="10" fill="#222A33" stroke="#F2C14E" stroke-width="1"/>
+  <text x="694" y="186" font-size="15" font-weight="700" fill="#EDF0F4">MCP Gatehound</text>
+  <text x="694" y="214" font-size="13" font-weight="400" fill="#96A1AE">bound to 127.0.0.1 — it refuses</text>
+  <text x="694" y="234" font-size="13" font-weight="400" fill="#96A1AE">to start on any other address</text>
+  <text x="694" y="266" font-size="12" font-weight="400" fill="#F2C14E">gateway · GUI · SQLite · one process</text>
+  <path d="M980,222.0 L1024,222.0" stroke="#5CCB8B" stroke-width="2" fill="none" marker-end="url(#mGreen)"/>
+  <rect x="1032" y="152" width="360" height="140" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="1054" y="182" font-size="13" font-weight="600" fill="#EDF0F4">Upstreams — whatever config declares</text>
+  <circle cx="1062" cy="204" r="3.5" fill="#5CCB8B"/>
+  <text x="1076" y="208" font-size="12" font-weight="600" fill="#EDF0F4">A REST API</text>
+  <text x="1076" y="224" font-size="11" font-weight="400" fill="#7A8695">named ops: method, path, query, body</text>
+  <circle cx="1062" cy="240" r="3.5" fill="#5CCB8B"/>
+  <text x="1076" y="244" font-size="12" font-weight="600" fill="#EDF0F4">Another MCP server</text>
+  <text x="1076" y="260" font-size="11" font-weight="400" fill="#7A8695">contributes only the tools you declare</text>
+  <circle cx="1062" cy="276" r="3.5" fill="#F2C14E"/>
+  <text x="1076" y="280" font-size="12" font-weight="600" fill="#EDF0F4">A local command</text>
+  <text x="1076" y="296" font-size="11" font-weight="400" fill="#7A8695">argv only, never a shell</text>
+  <text x="48" y="330" font-size="12" font-weight="700" fill="#7A8695" letter-spacing="1.6">ONE PROCESS, ONE LIFECYCLE</text>
+  <line x1="48" y1="340" x2="1392" y2="340" stroke="#2C3540" stroke-width="1"/>
+  <rect x="48" y="356" width="432" height="176" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="70" y="386" font-size="14" font-weight="600" fill="#EDF0F4">Tray icon — the primary surface</text>
+  <circle cx="76" cy="412" r="5" fill="#5CCB8B"/>
+  <text x="92" y="416" font-size="13" font-weight="400" fill="#96A1AE">green — listening</text>
+  <circle cx="76" cy="438" r="5" fill="#8A95A3"/>
+  <text x="92" y="442" font-size="13" font-weight="400" fill="#96A1AE">grey — paused</text>
+  <circle cx="76" cy="464" r="5" fill="#E0685F"/>
+  <text x="92" y="468" font-size="13" font-weight="400" fill="#96A1AE">red — an upstream is not answering</text>
+  <text x="70" y="506" font-size="12" font-weight="400" fill="#7A8695">a badge counts waiting approvals · one notification each</text>
+  <rect x="504" y="356" width="432" height="176" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="526" y="386" font-size="14" font-weight="600" fill="#EDF0F4">WebView window — no state of record</text>
+  <rect x="526" y="402" width="190" height="26" rx="6" fill="#222A33" stroke="#2C3540"/>
+  <text x="538" y="420" font-size="12" font-weight="400" fill="#96A1AE">Approvals</text>
+  <rect x="732" y="402" width="190" height="26" rx="6" fill="#222A33" stroke="#2C3540"/>
+  <text x="744" y="420" font-size="12" font-weight="400" fill="#96A1AE">Live log</text>
+  <rect x="526" y="432" width="190" height="26" rx="6" fill="#222A33" stroke="#2C3540"/>
+  <text x="538" y="450" font-size="12" font-weight="400" fill="#96A1AE">Upstreams &amp; actions</text>
+  <rect x="732" y="432" width="190" height="26" rx="6" fill="#222A33" stroke="#2C3540"/>
+  <text x="744" y="450" font-size="12" font-weight="400" fill="#96A1AE">Identities</text>
+  <text x="526" y="506" font-size="12" font-weight="400" fill="#7A8695">closing hides it to the tray, and the gateway keeps serving</text>
+  <rect x="960" y="356" width="432" height="176" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="982" y="386" font-size="14" font-weight="600" fill="#EDF0F4">cloudflared — a child process</text>
+  <text x="982" y="416" font-size="13" font-weight="400" fill="#96A1AE">the tunnel comes up and dies with the app;</text>
+  <text x="982" y="438" font-size="13" font-weight="400" fill="#96A1AE">killed explicitly on exit, never orphaned</text>
+  <text x="982" y="484" font-size="12" font-weight="400" fill="#7A8695">Quitting cancels the listener, drains in-flight calls,</text>
+  <text x="982" y="506" font-size="12" font-weight="400" fill="#7A8695">releases held approvals, and checkpoints the WAL.</text>
+  <text x="48" y="574" font-size="12" font-weight="700" fill="#7A8695" letter-spacing="1.6">INSIDE gatehound-core — THE SAME CRATE THE HEADLESS BINARY RUNS</text>
+  <line x1="48" y1="584" x2="1392" y2="584" stroke="#2C3540" stroke-width="1"/>
+  <rect x="48" y="602" width="250" height="152" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="68" y="630" font-size="14" font-weight="700" fill="#EDF0F4">MCP listener</text>
+  <text x="68" y="652" font-size="12" font-weight="400" fill="#96A1AE">axum · POST /mcp</text>
+  <text x="68" y="677" font-size="12" font-weight="400" fill="#96A1AE">2026-07-28 served statelessly,</text>
+  <text x="68" y="694" font-size="12" font-weight="400" fill="#96A1AE">or a legacy handshake</text>
+  <text x="68" y="717" font-size="11" font-weight="400" fill="#7A8695">GET and DELETE return 405</text>
+  <path d="M304,678.0 L326,678.0" stroke="#8A95A3" stroke-width="2" fill="none" marker-end="url(#mMute)"/>
+  <rect x="334" y="602" width="250" height="152" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="354" y="630" font-size="14" font-weight="700" fill="#EDF0F4">Verify</text>
+  <text x="354" y="652" font-size="12" font-weight="400" fill="#96A1AE">two factors, both required</text>
+  <text x="354" y="677" font-size="12" font-weight="400" fill="#96A1AE">Access JWT: JWKS · aud · exp</text>
+  <text x="354" y="694" font-size="12" font-weight="400" fill="#96A1AE">bearer: constant-time compare</text>
+  <text x="354" y="717" font-size="11" font-weight="400" fill="#7A8695">401 carries a challenge; 403 if</text>
+  <text x="354" y="732" font-size="11" font-weight="400" fill="#7A8695">authenticated but not permitted</text>
+  <path d="M590,678.0 L612,678.0" stroke="#8A95A3" stroke-width="2" fill="none" marker-end="url(#mMute)"/>
+  <rect x="620" y="602" width="250" height="152" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="640" y="630" font-size="14" font-weight="700" fill="#EDF0F4">Identity policy</text>
+  <text x="640" y="652" font-size="12" font-weight="400" fill="#96A1AE">(identity, tool)</text>
+  <text x="640" y="677" font-size="12" font-weight="400" fill="#96A1AE">allow · deny · ask — exact match,</text>
+  <text x="640" y="694" font-size="12" font-weight="400" fill="#96A1AE">then *, then ask</text>
+  <text x="640" y="717" font-size="11" font-weight="400" fill="#7A8695">deny removes the tool from</text>
+  <text x="640" y="732" font-size="11" font-weight="400" fill="#7A8695">tools/list entirely</text>
+  <path d="M876,678.0 L898,678.0" stroke="#8A95A3" stroke-width="2" fill="none" marker-end="url(#mMute)"/>
+  <rect x="906" y="602" width="250" height="152" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="926" y="630" font-size="14" font-weight="700" fill="#EDF0F4">Action engine</text>
+  <text x="926" y="652" font-size="12" font-weight="400" fill="#F2C14E">the caller names a tool,</text>
+  <text x="926" y="669" font-size="12" font-weight="400" fill="#F2C14E">never an action</text>
+  <text x="926" y="694" font-size="12" font-weight="400" fill="#96A1AE">proxy → an upstream op</text>
+  <text x="926" y="711" font-size="12" font-weight="400" fill="#96A1AE">exec → a fixed argv template</text>
+  <text x="926" y="734" font-size="11" font-weight="400" fill="#7A8695">an idempotency key is claimed</text>
+  <text x="926" y="749" font-size="11" font-weight="400" fill="#7A8695">before and completed after</text>
+  <rect x="48" y="806" width="536" height="96" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
+  <text x="68" y="834" font-size="13" font-weight="700" fill="#EDF0F4">SQLite — bundled, WAL mode</text>
+  <text x="68" y="858" font-size="12" font-weight="400" fill="#96A1AE">the audit log: every request, decision and outcome, denials included</text>
+  <text x="68" y="882" font-size="11" font-weight="400" fill="#7A8695">secrets redacted by key · bodies truncated, then blanked, then deleted</text>
+  <rect x="620" y="806" width="536" height="96" rx="10" fill="#222A33" stroke="#F2C14E" stroke-width="1"/>
+  <text x="640" y="834" font-size="13" font-weight="700" fill="#EDF0F4">Approval queue — a person in the loop</text>
+  <text x="640" y="858" font-size="11" font-weight="400" fill="#96A1AE">the HTTP request is parked on a bounded hold — allow once · allow and whitelist · reject</text>
+  <text x="640" y="882" font-size="11" font-weight="400" fill="#7A8695">kept under Cloudflare&#x27;s ~100s edge timeout · unanswered returns approval_timeout</text>
+  <path d="M745.0,760 L745.0,798" stroke="#F2C14E" stroke-width="2" fill="none" marker-end="url(#mAmber)"/>
+  <text x="757.0" y="788" font-size="12" font-weight="400" fill="#F2C14E">ask</text>
+  <rect x="48" y="930" width="1344" height="120" rx="10" fill="#222A33" stroke="#2C3540" stroke-width="1"/>
+  <text x="72" y="962" font-size="15" font-weight="700" fill="#EDF0F4">Packs — the gateway ships knowing nothing</text>
+  <text x="72" y="988" font-size="13" font-weight="400" fill="#96A1AE">Everything it fronts is configuration: an upstream, its named operations, and the tools bound to them. A pack is that configuration as one portable file.</text>
+  <text x="72" y="1014" font-size="12" font-weight="400" fill="#5CCB8B" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">export  strips every credential and names an environment variable in its place</text>
+  <text x="72" y="1034" font-size="12" font-weight="400" fill="#5CCB8B" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">import  refuses on the first name collision unless you pass --replace, so a pack cannot quietly redefine an already-approved tool</text>
 </svg>

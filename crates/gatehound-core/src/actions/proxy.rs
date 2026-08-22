@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-/// Per-hour cap plus a minimum gap between calls (SPEC §7.7). Beeper's bridges are unofficial;
-/// high-volume sending is what gets an account suspended.
+/// Per-hour cap plus a minimum gap between calls. A gateway sits in front of somebody
+/// else's API, and a runaway agent calling it in a tight loop is what gets the credential
+/// revoked.
 ///
 /// The window lives in memory, so restarting the gateway starts a fresh hour. That is
 /// deliberate: the limit exists to stop a runaway loop, not to meter a quota.
@@ -104,7 +105,7 @@ impl Drop for IdempotencyClaim {
     }
 }
 
-/// SPEC §6.4: without this, a network timeout after successful delivery sends a real person
+/// Without this, a network timeout after successful delivery sends a real person
 /// the same message twice.
 pub fn begin_idempotent(
     store: &Arc<Store>,

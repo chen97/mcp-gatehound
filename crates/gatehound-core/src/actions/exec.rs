@@ -1,4 +1,4 @@
-//! Running a local command as an action (SPEC §4.4, §7.4).
+//! Running a local command as an action.
 //!
 //! The rules here are not negotiable, so they are enforced in one place:
 //!

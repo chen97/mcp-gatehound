@@ -17,7 +17,7 @@ pub enum GatewayStatus {
 }
 
 impl GatewayStatus {
-    /// Tray colour (SPEC §5.2).
+    /// Tray colour.
     pub fn colour(&self) -> &'static str {
         match self {
             GatewayStatus::Listening => "green",

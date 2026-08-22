@@ -1,4 +1,4 @@
-//! Holding a call while a human decides (SPEC §4.3).
+//! Holding a call while a human decides.
 //!
 //! When policy resolves to `ask`, the HTTP request is parked on a oneshot channel and a card
 //! appears in the GUI. The wait is bounded by `approval_timeout_secs`, which must stay
@@ -255,7 +255,7 @@ mod tests {
     async fn an_unanswered_hold_times_out_and_clears_its_row() {
         let q = queue(5); // clamped minimum
         let started = Instant::now();
-        let outcome = q.hold("ghost", "draft_reply", "{}").await;
+        let outcome = q.hold("ghost", "get_issue", "{}").await;
         assert_eq!(outcome, Outcome::TimedOut);
         assert_eq!(outcome.error_code(), "approval_timeout");
         assert!(started.elapsed() >= Duration::from_secs(5));

@@ -406,7 +406,7 @@ mod tests {
         let wrong = headers(&[
             ("mcp-protocol-version", "2026-07-28"),
             ("mcp-method", "tools/call"),
-            ("mcp-name", "draft_reply"),
+            ("mcp-name", "get_issue"),
         ]);
         assert_eq!(
             negotiate("tools/call", &params, &wrong).unwrap_err().code,

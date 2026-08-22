@@ -1,4 +1,4 @@
-//! Log hygiene: secrets never reach the request log, and bodies are capped (SPEC §7.8, §9.5).
+//! Log hygiene: secrets never reach the request log, and bodies are capped.
 
 use serde_json::Value;
 

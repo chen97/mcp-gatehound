@@ -1,4 +1,4 @@
-//! Inbound authentication — two independent factors (SPEC §4.2).
+//! Inbound authentication — two independent factors.
 //!
 //! 1. A Cloudflare Access JWT (`Cf-Access-Jwt-Assertion` header or `CF_Authorization` cookie),
 //!    verified RS256 against the team's JWKS, with `aud`, `iss` and expiry checked.
@@ -34,7 +34,8 @@ struct AccessClaims {
 }
 
 impl AccessClaims {
-    /// SPEC §4.2: `email` → `common_name` → `sub`.
+    /// Access puts a human's address in `email` and a service token's name in
+    /// `common_name`; `sub` is the last resort.
     fn identity(&self) -> Option<String> {
         self.email
             .as_deref()
@@ -407,8 +408,8 @@ mod tests {
     #[tokio::test]
     async fn accepts_a_service_token_via_common_name() {
         let v = verifier().await;
-        let tok = sign("aud123", ISS, None, Some("message-desk"), Some("s-1"), 600);
-        assert_eq!(v.verify(&tok).await.unwrap(), "message-desk");
+        let tok = sign("aud123", ISS, None, Some("edge-worker"), Some("s-1"), 600);
+        assert_eq!(v.verify(&tok).await.unwrap(), "edge-worker");
     }
 
     #[tokio::test]

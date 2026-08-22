@@ -1,4 +1,4 @@
-//! Identity × tool → allow / deny / ask (SPEC §4.3).
+//! Identity × tool → allow / deny / ask.
 //!
 //! Lookup order is exact `(identity, tool)`, then `(identity, "*")`, then the default `ask`.
 //! `deny` also hides the tool from `tools/list`; `ask` keeps it visible, because the point of
@@ -42,7 +42,7 @@ impl Policy {
         }
     }
 
-    /// SPEC §7.3: unauthorized tools are filtered out of `tools/list`, not merely rejected
+    /// Unauthorized tools are filtered out of `tools/list`, not merely rejected
     /// when called.
     pub fn visible_tools<'a>(
         &self,
@@ -59,7 +59,25 @@ impl Policy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::default_tools;
+    use crate::config::{Action, ToolConfig};
+
+    /// A small catalog standing in for a deployment's own: two reads and one write.
+    fn catalog() -> Vec<ToolConfig> {
+        ["list_issues", "get_issue", "comment_on_issue"]
+            .into_iter()
+            .map(|name| ToolConfig {
+                name: name.into(),
+                description: name.into(),
+                input_schema: None,
+                action: Action::Proxy {
+                    upstream: "tracker".into(),
+                    op: name.into(),
+                },
+                rate_limit: None,
+                idempotent: false,
+            })
+            .collect()
+    }
 
     fn policy() -> (Policy, Arc<Store>) {
         let store = Arc::new(Store::open_memory().unwrap());
@@ -69,7 +87,7 @@ mod tests {
     #[test]
     fn an_unknown_identity_defaults_to_ask() {
         let (p, _) = policy();
-        assert_eq!(p.resolve("stranger", "send_message"), Decision::Ask);
+        assert_eq!(p.resolve("stranger", "comment_on_issue"), Decision::Ask);
     }
 
     #[test]
@@ -77,19 +95,19 @@ mod tests {
         let (p, store) = policy();
         store.set_decision("desk", "*", Decision::Allow).unwrap();
         store
-            .set_decision("desk", "send_message", Decision::Deny)
+            .set_decision("desk", "comment_on_issue", Decision::Deny)
             .unwrap();
-        assert_eq!(p.resolve("desk", "get_thread"), Decision::Allow);
-        assert_eq!(p.resolve("desk", "send_message"), Decision::Deny);
+        assert_eq!(p.resolve("desk", "get_issue"), Decision::Allow);
+        assert_eq!(p.resolve("desk", "comment_on_issue"), Decision::Deny);
     }
 
     #[test]
     fn denied_tools_are_hidden_but_ask_tools_are_listed() {
         let (p, store) = policy();
-        let tools = default_tools();
+        let tools = catalog();
         store.set_decision("desk", "*", Decision::Allow).unwrap();
         store
-            .set_decision("desk", "send_message", Decision::Deny)
+            .set_decision("desk", "comment_on_issue", Decision::Deny)
             .unwrap();
 
         let names: Vec<_> = p
@@ -97,8 +115,8 @@ mod tests {
             .into_iter()
             .map(|t| t.name.as_str())
             .collect();
-        assert!(!names.contains(&"send_message"));
-        assert!(names.contains(&"draft_reply"));
+        assert!(!names.contains(&"comment_on_issue"));
+        assert!(names.contains(&"get_issue"));
 
         // A completely unknown identity sees everything, because every tool resolves to `ask`.
         assert_eq!(p.visible_tools("stranger", &tools).len(), tools.len());

@@ -20,7 +20,6 @@ interface Snapshot {
   pending: number;
   tools: ToolInfo[];
   upstreams: string[];
-  drafter: string;
 }
 
 interface ToolInfo {
@@ -101,7 +100,7 @@ async function renderHeader(): Promise<Snapshot> {
   const s = await invoke<Snapshot>("snapshot");
   $("#dot").className = `dot ${s.colour}`;
   $("#subtitle").textContent =
-    `${s.listen_addr} · ${s.auth} · ${s.upstreams.length} upstream(s) · ${s.drafter}` +
+    `${s.listen_addr} · ${s.auth} · ${s.upstreams.length} upstream(s) · ${s.tools.length} tools` +
     (s.status === "degraded" ? " · an upstream is not answering" : "");
   const badge = $("#badge");
   badge.textContent = String(s.pending);

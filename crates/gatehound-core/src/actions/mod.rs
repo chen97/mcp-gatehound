@@ -1,4 +1,4 @@
-//! The action engine (SPEC §4.4).
+//! The action engine.
 //!
 //! A tool is a name, an input schema, and an action. Actions are declared in config; a caller
 //! only ever names a tool. This is what stops "call this tool" from turning into "run this
@@ -8,9 +8,7 @@ pub mod exec;
 pub mod proxy;
 
 use crate::config::{Action, Config, ToolConfig};
-use crate::drafter::{DraftSubject, Drafter};
 use crate::store::Store;
-use crate::upstreams::beeper::ContextMsg;
 use crate::upstreams::Upstreams;
 use anyhow::{anyhow, bail, Result};
 use exec::ExecRunner;
@@ -20,10 +18,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub struct ActionEngine {
-    cfg: Arc<Config>,
     store: Arc<Store>,
     upstreams: Arc<Upstreams>,
-    drafter: Arc<Drafter>,
     /// One runner per exec tool, so each keeps its own concurrency semaphore.
     execs: HashMap<String, ExecRunner>,
     /// One limiter per rate-limited tool.
@@ -33,7 +29,6 @@ pub struct ActionEngine {
 impl ActionEngine {
     pub fn build(cfg: Arc<Config>, store: Arc<Store>) -> Result<Self> {
         let upstreams = Arc::new(Upstreams::from_config(&cfg.upstreams)?);
-        let drafter = Arc::new(Drafter::new(cfg.drafter.clone())?);
         let mut execs = HashMap::new();
         let mut limits = HashMap::new();
         for tool in &cfg.tools {
@@ -45,10 +40,8 @@ impl ActionEngine {
             }
         }
         Ok(Self {
-            cfg,
             store,
             upstreams,
-            drafter,
             execs,
             limits,
         })
@@ -56,10 +49,6 @@ impl ActionEngine {
 
     pub fn upstreams(&self) -> &Arc<Upstreams> {
         &self.upstreams
-    }
-
-    pub fn drafter(&self) -> &Arc<Drafter> {
-        &self.drafter
     }
 
     /// Run one tool call. Errors are tool failures, reported to the caller as
@@ -131,8 +120,7 @@ impl ActionEngine {
                     .upstreams
                     .get(upstream)
                     .ok_or_else(|| anyhow!("upstream '{upstream}' is not configured"))?;
-                up.call(op, args, &self.cfg.beeper, self.drafter.context_messages())
-                    .await
+                up.call(op, args).await
             }
             Action::Exec(_) => {
                 let runner = self
@@ -146,86 +134,6 @@ impl ActionEngine {
                     "truncated": out.truncated
                 }))
             }
-            Action::Draft { upstream } => self.draft(upstream, args).await,
-        }
-    }
-
-    /// `draft_reply`: gather the transcript from the upstream, then generate. Never sends.
-    async fn draft(&self, upstream: &str, args: &Value) -> Result<Value> {
-        let chat_id = args
-            .get("chat_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow!("chat_id is required"))?;
-        let instruction = args.get("instruction").and_then(Value::as_str);
-
-        let up = self
-            .upstreams
-            .get(upstream)
-            .ok_or_else(|| anyhow!("upstream '{upstream}' is not configured"))?;
-        let ctx = up
-            .call(
-                "get_chat_context",
-                &json!({ "chat_id": chat_id }),
-                &self.cfg.beeper,
-                self.drafter.context_messages(),
-            )
-            .await?;
-
-        let subject = DraftSubject::from_context(&ctx);
-        let latest_id = ctx
-            .get("latest_message_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let messages: Vec<ContextMsg> = ctx
-            .get("messages")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|m| ContextMsg {
-                        sender: m
-                            .get("sender")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Unknown")
-                            .to_string(),
-                        text: m
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                        ts: m
-                            .get("ts")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                        is_me: m
-                            .get("is_from_me")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if messages.is_empty() {
-            bail!("chat has no messages to draft from");
-        }
-
-        match self.drafter.draft(&subject, &messages, instruction).await? {
-            Some(text) => Ok(json!({
-                "chat_id": chat_id,
-                "draft": text,
-                "no_reply": false,
-                "latest_message_id": latest_id
-            })),
-            None => Ok(json!({
-                "chat_id": chat_id,
-                "draft": Value::Null,
-                "no_reply": true,
-                "latest_message_id": latest_id
-            })),
         }
     }
 }
@@ -295,11 +203,24 @@ mod tests {
                 ..Default::default()
             },
             upstreams: vec![UpstreamConfig {
-                name: "beeper".into(),
-                kind: UpstreamKind::Beeper {
-                    // Nothing listens here; upstream tests use the mock rig instead.
+                name: "notes".into(),
+                kind: UpstreamKind::Http {
+                    // Nothing listens here; the mock rig covers a live upstream.
                     base_url: "http://127.0.0.1:1".into(),
+                    auth: crate::upstreams::http::HttpAuth::Bearer,
                     token: "tok".into(),
+                    token_env: None,
+                    ops: std::collections::BTreeMap::from([(
+                        "read".to_string(),
+                        crate::upstreams::http::HttpOp {
+                            method: "GET".into(),
+                            path: "/v1/notes".into(),
+                            query: std::collections::BTreeMap::new(),
+                            body: None,
+                        },
+                    )]),
+                    timeout_secs: 2,
+                    health_path: None,
                 },
             }],
             tools,
@@ -407,12 +328,12 @@ mod tests {
     #[tokio::test]
     async fn a_proxy_action_to_an_unreachable_upstream_is_an_error_not_a_panic() {
         let tool = ToolConfig {
-            name: "mark_read".into(),
+            name: "read_note".into(),
             description: String::new(),
             input_schema: None,
             action: Action::Proxy {
-                upstream: "beeper".into(),
-                op: "mark_read".into(),
+                upstream: "notes".into(),
+                op: "read".into(),
             },
             rate_limit: None,
             idempotent: false,

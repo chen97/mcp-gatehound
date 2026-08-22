@@ -1,4 +1,4 @@
-//! SQLite: request log, identity policy, pending approvals, idempotent sends (SPEC §4.7).
+//! SQLite: request log, identity policy, pending approvals, idempotent sends.
 //!
 //! Bundled SQLite (no system dependency). WAL so the GUI can read while the listener writes.
 
@@ -234,7 +234,7 @@ impl Store {
             .optional()?)
     }
 
-    /// Retention (SPEC §9.5): the log accumulates other people's messages, so bodies are
+    /// Retention: the log accumulates other people's messages, so bodies are
     /// blanked after `days` and whole rows dropped after four times that.
     pub fn prune(&self, days: i64) -> Result<usize> {
         if days <= 0 {

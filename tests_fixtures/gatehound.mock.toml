@@ -1,41 +1,69 @@
-# Configuration used by the test rig: the gateway talks to tests_fixtures/mock_server.py,
-# which stands in for both Beeper Desktop and the Anthropic Messages API on one port.
+# The configuration the test rig uses: the gateway fronting tests_fixtures/mock_upstream.py.
 #
-#   python3 tests_fixtures/mock_server.py 23399 &
+#   python3 tests_fixtures/mock_upstream.py 23399 &
 #   GATEHOUND_TOKEN=hubsecret-0123456789abcdef \
 #     cargo run -p gatehound-headless -- --config tests_fixtures/gatehound.mock.toml
-#
-# Message Desk's integration test then runs against http://127.0.0.1:8790/mcp.
 
 listen_addr = "127.0.0.1:8790"
 approval_timeout_secs = 10
 log_retention_days = 7
 
 [auth]
-# Cloudflare Access is deliberately absent here: the mock rig has no edge in front of it.
-# A real deployment sets [auth.access], and the gateway warns loudly when it is missing.
-bearer_identity = "message-desk"
+# Cloudflare Access is deliberately absent: the rig has no edge in front of it. A real
+# deployment sets [auth.access], and the gateway warns loudly when it is missing.
+bearer_identity = "test-client"
 
 [[upstream]]
-name = "beeper"
-type = "beeper"
+name = "notes"
+type = "http"
 base_url = "http://127.0.0.1:23399"
+auth = "bearer"
+# The file value is the rig's default; MOCK_UPSTREAM_TOKEN overrides it, which is how a
+# real deployment keeps its credential out of the config file.
 token = "tok"
+token_env = "MOCK_UPSTREAM_TOKEN"
+health_path = "/healthz"
 
-# The Worker is a known client, seeded as `allow` (SPEC §9.1). The `ask` path exists for
-# new or unknown clients, and holding the Worker would spin the phone while a popup waited
-# on a laptop nobody is sitting at.
+[upstream.ops.list]
+method = "GET"
+path = "/v1/notes"
+query = { limit = "{limit}" }
+
+[upstream.ops.read]
+method = "GET"
+path = "/v1/notes/{id}"
+
+[upstream.ops.append]
+method = "POST"
+path = "/v1/notes/{id}"
+body = { body = "{body}" }
+
 [[identity]]
-identity = "message-desk"
+identity = "test-client"
 tool = "*"
 decision = "allow"
 
-[drafter]
-provider = "api"
-voice_file = "voice.md"
-context_messages = 20
+[[tool]]
+name = "list_notes"
+description = "List the notes this upstream holds."
+action = { type = "proxy", upstream = "notes", op = "list" }
+input_schema = { type = "object", properties = { limit = { type = "integer" } } }
 
-[drafter.api]
-base_url = "http://127.0.0.1:23399"
-api_key = "test-key"
-model = "claude-sonnet-4-6"
+[[tool]]
+name = "read_note"
+description = "Read one note by id."
+action = { type = "proxy", upstream = "notes", op = "read" }
+input_schema = { type = "object", properties = { id = { type = "string" } }, required = ["id"] }
+
+[[tool]]
+name = "append_note"
+description = "Append to a note. Requires an idempotency key; repeating one replays the first result."
+action = { type = "proxy", upstream = "notes", op = "append" }
+rate_limit = { per_hour = 60, min_spacing_secs = 0 }
+idempotent = true
+input_schema = { type = "object", properties = { id = { type = "string" }, body = { type = "string" }, idempotency_key = { type = "string" } }, required = ["id", "body", "idempotency_key"] }
+
+[[tool]]
+name = "disk_free"
+description = "Free space on this machine."
+action = { type = "exec", cmd = "/bin/df", args = ["-h", "/"], timeout_secs = 10, max_output_bytes = 8192 }

@@ -75,13 +75,10 @@ fn default_exec_concurrency() -> usize {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
-    /// Forward to an upstream (Beeper REST, or another MCP server).
+    /// Forward to a declared upstream operation.
     Proxy { upstream: String, op: String },
     /// Spawn a local process.
     Exec(ExecSpec),
-    /// Gather chat context from `upstream`, then draft a reply with the configured provider.
-    /// The CLI provider runs through the same hardened exec runner as `Action::Exec`.
-    Draft { upstream: String },
 }
 
 impl Action {
@@ -89,13 +86,12 @@ impl Action {
         match self {
             Action::Proxy { .. } => "proxy",
             Action::Exec(_) => "exec",
-            Action::Draft { .. } => "draft",
         }
     }
 
     pub fn upstream(&self) -> Option<&str> {
         match self {
-            Action::Proxy { upstream, .. } | Action::Draft { upstream } => Some(upstream),
+            Action::Proxy { upstream, .. } => Some(upstream),
             Action::Exec(_) => None,
         }
     }
@@ -143,23 +139,37 @@ impl ToolConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UpstreamKind {
-    /// Beeper Desktop local REST API.
-    Beeper {
-        #[serde(default = "default_beeper_url")]
+    /// A REST API described entirely by config: named operations, each with a method, a path
+    /// and optional query and body templates.
+    Http {
         base_url: String,
         #[serde(default)]
+        auth: crate::upstreams::http::HttpAuth,
+        /// Credential, normally supplied by the environment rather than written here.
+        #[serde(default)]
         token: String,
+        #[serde(default)]
+        token_env: Option<String>,
+        #[serde(default)]
+        ops: BTreeMap<String, crate::upstreams::http::HttpOp>,
+        #[serde(default = "default_http_timeout")]
+        timeout_secs: u64,
+        /// Optional path probed to decide whether this upstream is answering.
+        #[serde(default)]
+        health_path: Option<String>,
     },
     /// Another MCP server reachable over Streamable HTTP.
     Mcp {
         url: String,
         #[serde(default)]
         bearer_token: Option<String>,
+        #[serde(default)]
+        token_env: Option<String>,
     },
 }
 
-fn default_beeper_url() -> String {
-    "http://localhost:23373".into()
+fn default_http_timeout() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -211,148 +221,6 @@ fn default_bearer_identity() -> String {
     "bearer".into()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DraftProviderKind {
-    ClaudeCli,
-    Api,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ApiDrafterConfig {
-    #[serde(default = "default_model")]
-    pub model: String,
-    #[serde(default = "default_anthropic_url")]
-    pub base_url: String,
-    #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
-}
-
-fn default_model() -> String {
-    "claude-sonnet-4-6".into()
-}
-fn default_anthropic_url() -> String {
-    "https://api.anthropic.com".into()
-}
-fn default_max_tokens() -> u32 {
-    600
-}
-
-impl Default for ApiDrafterConfig {
-    fn default() -> Self {
-        Self {
-            model: default_model(),
-            base_url: default_anthropic_url(),
-            api_key: None,
-            max_tokens: default_max_tokens(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DrafterConfig {
-    #[serde(default = "default_provider")]
-    pub provider: DraftProviderKind,
-    #[serde(default = "default_voice_file")]
-    pub voice_file: String,
-    #[serde(default = "default_context_messages")]
-    pub context_messages: usize,
-    /// Exec spec used when `provider = "claude-cli"`.
-    #[serde(default = "default_claude_exec")]
-    pub exec: ExecSpec,
-    #[serde(default)]
-    pub api: ApiDrafterConfig,
-}
-
-fn default_provider() -> DraftProviderKind {
-    DraftProviderKind::ClaudeCli
-}
-fn default_voice_file() -> String {
-    "voice.md".into()
-}
-fn default_context_messages() -> usize {
-    20
-}
-
-/// `claude -p` with ambient configuration disabled and no tools.
-///
-/// `--safe-mode` turns off project customizations, hooks, plugins, skills and MCP servers, so a
-/// stranger's message cannot reach anything but the text generator. Verify the flag names against
-/// `claude --help` on the target machine — the CLI moves fast (SPEC §4.6).
-fn default_claude_exec() -> ExecSpec {
-    ExecSpec {
-        cmd: "claude".into(),
-        args: vec![
-            "-p".into(),
-            "--output-format".into(),
-            "text".into(),
-            "--safe-mode".into(),
-            "--strict-mcp-config".into(),
-            "--max-turns".into(),
-            "1".into(),
-            "--system-prompt-file".into(),
-            "{system_prompt_file}".into(),
-        ],
-        stdin: Some("{prompt}".into()),
-        timeout_secs: 120,
-        max_output_bytes: 65_536,
-        max_concurrency: 1,
-        env: BTreeMap::new(),
-        cwd: None,
-    }
-}
-
-impl Default for DrafterConfig {
-    fn default() -> Self {
-        Self {
-            provider: default_provider(),
-            voice_file: default_voice_file(),
-            context_messages: default_context_messages(),
-            exec: default_claude_exec(),
-            api: ApiDrafterConfig::default(),
-        }
-    }
-}
-
-/// Chat selection knobs for the Beeper upstream.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct BeeperBehaviour {
-    #[serde(default = "default_lookback")]
-    pub lookback_minutes: i64,
-    #[serde(default)]
-    pub include_groups: bool,
-    #[serde(default)]
-    pub include_muted: bool,
-    #[serde(default)]
-    pub only_unread: bool,
-    #[serde(default)]
-    pub mark_read_on_send: bool,
-    #[serde(default)]
-    pub allow_chat_ids: Vec<String>,
-    #[serde(default)]
-    pub ignore_chat_ids: Vec<String>,
-}
-
-fn default_lookback() -> i64 {
-    120
-}
-
-impl Default for BeeperBehaviour {
-    fn default() -> Self {
-        Self {
-            lookback_minutes: default_lookback(),
-            include_groups: false,
-            include_muted: false,
-            only_unread: false,
-            mark_read_on_send: true,
-            allow_chat_ids: Vec::new(),
-            ignore_chat_ids: Vec::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_listen")]
@@ -373,10 +241,6 @@ pub struct Config {
     pub tools: Vec<ToolConfig>,
     #[serde(default, rename = "identity")]
     pub identities: Vec<IdentitySeed>,
-    #[serde(default)]
-    pub drafter: DrafterConfig,
-    #[serde(default)]
-    pub beeper: BeeperBehaviour,
 }
 
 fn default_listen() -> String {
@@ -404,8 +268,6 @@ impl Default for Config {
             upstreams: Vec::new(),
             tools: Vec::new(),
             identities: Vec::new(),
-            drafter: DrafterConfig::default(),
-            beeper: BeeperBehaviour::default(),
         }
     }
 }
@@ -415,10 +277,6 @@ fn env(key: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-}
-
-fn env_bool(key: &str) -> Option<bool> {
-    env(key).map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
 }
 
 fn env_list(key: &str) -> Option<Vec<String>> {
@@ -442,23 +300,11 @@ impl Config {
             None => Config::default(),
         };
         cfg.apply_env();
-        if cfg.tools.is_empty() {
-            cfg.tools = default_tools();
-        }
-        if cfg.upstreams.is_empty() {
-            cfg.upstreams.push(UpstreamConfig {
-                name: "beeper".into(),
-                kind: UpstreamKind::Beeper {
-                    base_url: env("BEEPER_API_URL").unwrap_or_else(default_beeper_url),
-                    token: env("BEEPER_ACCESS_TOKEN").unwrap_or_default(),
-                },
-            });
-        }
         cfg.validate()?;
         Ok(cfg)
     }
 
-    /// Environment overrides (SPEC §13). Env always wins over the file so a launchd/systemd
+    /// Environment overrides. Env always wins over the file so a launchd/systemd
     /// unit can adjust a deployment without editing config.
     pub fn apply_env(&mut self) {
         if let Some(v) = env("LISTEN_ADDR") {
@@ -505,61 +351,25 @@ impl Config {
             self.auth.allowed_identities = v;
         }
 
-        if let Some(v) = env("DRAFT_PROVIDER") {
-            self.drafter.provider = match v.as_str() {
-                "api" => DraftProviderKind::Api,
-                _ => DraftProviderKind::ClaudeCli,
-            };
-        }
-        if let Some(v) = env("CLAUDE_BIN") {
-            self.drafter.exec.cmd = v;
-        }
-        if let Some(v) = env("ANTHROPIC_API_KEY") {
-            self.drafter.api.api_key = Some(v);
-        }
-        if let Some(v) = env("ANTHROPIC_MODEL") {
-            self.drafter.api.model = v;
-        }
-        if let Some(v) = env("ANTHROPIC_API_URL") {
-            self.drafter.api.base_url = v;
-        }
-        if let Some(v) = env("VOICE_FILE") {
-            self.drafter.voice_file = v;
-        }
-        if let Some(v) = env("CONTEXT_MESSAGES").and_then(|v| v.parse::<usize>().ok()) {
-            self.drafter.context_messages = v.clamp(4, 80);
-        }
-
-        if let Some(v) = env("LOOKBACK_MINUTES").and_then(|v| v.parse::<i64>().ok()) {
-            self.beeper.lookback_minutes = v.clamp(5, 10_080);
-        }
-        if let Some(v) = env_bool("INCLUDE_GROUPS") {
-            self.beeper.include_groups = v;
-        }
-        if let Some(v) = env_bool("INCLUDE_MUTED") {
-            self.beeper.include_muted = v;
-        }
-        if let Some(v) = env_bool("ONLY_UNREAD") {
-            self.beeper.only_unread = v;
-        }
-        if let Some(v) = env_bool("MARK_READ_ON_SEND") {
-            self.beeper.mark_read_on_send = v;
-        }
-        if let Some(v) = env_list("ALLOW_CHAT_IDS") {
-            self.beeper.allow_chat_ids = v;
-        }
-        if let Some(v) = env_list("IGNORE_CHAT_IDS") {
-            self.beeper.ignore_chat_ids = v;
-        }
-
-        // Upstream credentials come from the environment so they never sit in the config file.
+        // Upstream credentials come from the environment so they never sit in the config
+        // file: each upstream names the variable that carries its own.
         for u in self.upstreams.iter_mut() {
-            if let UpstreamKind::Beeper { base_url, token } = &mut u.kind {
-                if let Some(v) = env("BEEPER_API_URL") {
-                    *base_url = v;
+            match &mut u.kind {
+                UpstreamKind::Http {
+                    token, token_env, ..
+                } => {
+                    if let Some(v) = token_env.as_deref().and_then(env) {
+                        *token = v;
+                    }
                 }
-                if let Some(v) = env("BEEPER_ACCESS_TOKEN") {
-                    *token = v;
+                UpstreamKind::Mcp {
+                    bearer_token,
+                    token_env,
+                    ..
+                } => {
+                    if let Some(v) = token_env.as_deref().and_then(env) {
+                        *bearer_token = Some(v);
+                    }
                 }
             }
         }
@@ -592,9 +402,22 @@ impl Config {
             if !seen.insert(&t.name) {
                 bail!("duplicate tool name: {}", t.name);
             }
-            if let Some(name) = t.action.upstream() {
-                if !self.upstreams.iter().any(|u| u.name == name) {
-                    bail!("tool '{}' references unknown upstream '{}'", t.name, name);
+            if let Action::Proxy { upstream, op } = &t.action {
+                let Some(u) = self.upstream(upstream) else {
+                    bail!(
+                        "tool '{}' references unknown upstream '{}'",
+                        t.name,
+                        upstream
+                    );
+                };
+                // Catch a typo at startup rather than on the first call that needs it.
+                if let UpstreamKind::Http { ops, .. } = &u.kind {
+                    if !ops.contains_key(op) {
+                        bail!(
+                            "tool '{}' calls op '{op}', which upstream '{upstream}' does not declare",
+                            t.name
+                        );
+                    }
                 }
             }
             if let Action::Exec(spec) = &t.action {
@@ -632,91 +455,11 @@ impl Config {
     }
 }
 
-/// The v1 catalog (SPEC §4.5). Used when `gatehound.toml` declares no `[[tool]]`.
-pub fn default_tools() -> Vec<ToolConfig> {
-    vec![
-        ToolConfig {
-            name: "list_new_messages".into(),
-            description: "List recent direct chats in the primary inbox whose latest message is inbound (from the other person). Returns per chat: ids, network, title, the latest message, and a short recent context. Use this to decide which chats need a reply.".into(),
-            input_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "lookback_minutes": { "type": "integer", "description": "How far back to scan chat activity (default from server config)" },
-                    "include_groups": { "type": "boolean", "description": "Also include group chats (default false)" },
-                    "limit": { "type": "integer", "description": "Max chats to return (default 25)" }
-                }
-            })),
-            action: Action::Proxy { upstream: "beeper".into(), op: "list_new_messages".into() },
-            rate_limit: None,
-            idempotent: false,
-        },
-        ToolConfig {
-            name: "get_thread".into(),
-            description: "Recent transcript of one chat, oldest first.".into(),
-            input_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "chat_id": { "type": "string" },
-                    "limit": { "type": "integer", "description": "Max messages (default 20)" }
-                },
-                "required": ["chat_id"]
-            })),
-            action: Action::Proxy { upstream: "beeper".into(), op: "get_thread".into() },
-            rate_limit: None,
-            idempotent: false,
-        },
-        ToolConfig {
-            name: "draft_reply".into(),
-            description: "Draft a reply for one chat in the owner's voice using Claude. Gathers context locally and returns suggested text only — it never sends. May return no_reply=true when no reply is appropriate.".into(),
-            input_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "chat_id": { "type": "string" },
-                    "instruction": { "type": "string", "description": "Optional steer, e.g. 'shorter' or 'politely decline'" }
-                },
-                "required": ["chat_id"]
-            })),
-            action: Action::Draft { upstream: "beeper".into() },
-            rate_limit: None,
-            idempotent: false,
-        },
-        ToolConfig {
-            name: "send_message".into(),
-            description: "Send exact text to a chat as the owner. Reserved for the owner's approval flow — do not call this unless the owner explicitly approved this exact text for this chat.".into(),
-            input_schema: Some(json!({
-                "type": "object",
-                "properties": {
-                    "chat_id": { "type": "string" },
-                    "text": { "type": "string" },
-                    "reply_to_message_id": { "type": "string" },
-                    "idempotency_key": { "type": "string", "description": "Required. Repeating a key returns the original result instead of sending again." }
-                },
-                "required": ["chat_id", "text", "idempotency_key"]
-            })),
-            action: Action::Proxy { upstream: "beeper".into(), op: "send_message".into() },
-            rate_limit: Some(RateLimit { per_hour: 60, min_spacing_secs: 2 }),
-            idempotent: true,
-        },
-        ToolConfig {
-            name: "mark_read".into(),
-            description: "Mark a chat as read. Note that this emits a read receipt to the other party.".into(),
-            input_schema: Some(json!({
-                "type": "object",
-                "properties": { "chat_id": { "type": "string" } },
-                "required": ["chat_id"]
-            })),
-            action: Action::Proxy { upstream: "beeper".into(), op: "mark_read".into() },
-            rate_limit: None,
-            idempotent: false,
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn base_toml() -> &'static str {
+    fn sample() -> &'static str {
         r#"
 listen_addr = "127.0.0.1:9999"
 
@@ -724,106 +467,102 @@ listen_addr = "127.0.0.1:9999"
 bearer_token = "0123456789abcdef0123"
 
 [[upstream]]
-name = "beeper"
-type = "beeper"
-base_url = "http://127.0.0.1:23399"
-token = "tok"
+name = "notes"
+type = "http"
+base_url = "http://127.0.0.1:9100"
+auth = "bearer"
+token_env = "NOTES_TOKEN"
+
+[upstream.ops.read]
+method = "GET"
+path = "/v1/notes/{id}"
 
 [[tool]]
-name = "echo"
-description = "echo back"
-action = { type = "exec", cmd = "/bin/echo", args = ["{word}"], timeout_secs = 5 }
+name = "read_note"
+description = "Read one note"
+action = { type = "proxy", upstream = "notes", op = "read" }
+
+[[tool]]
+name = "disk_free"
+description = "Free space"
+action = { type = "exec", cmd = "/bin/df", args = ["-h", "/"], timeout_secs = 5 }
 
 [[identity]]
-identity = "message-desk"
+identity = "some-client"
 tool = "*"
 decision = "allow"
 "#
     }
 
-    fn write(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-        let p = dir.join("gatehound.toml");
-        std::fs::write(&p, body).unwrap();
-        p
-    }
-
     #[test]
-    fn parses_tools_upstreams_and_identities() {
-        let dir = std::env::temp_dir().join(format!("gh-cfg-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = write(&dir, base_toml());
-        let cfg: Config = toml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    fn parses_upstream_ops_tools_and_identities() {
+        let cfg: Config = toml::from_str(sample()).unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.listen_addr, "127.0.0.1:9999");
-        assert_eq!(cfg.tools.len(), 1);
-        assert_eq!(cfg.tools[0].action.kind(), "exec");
+        assert_eq!(cfg.tools.len(), 2);
+        assert_eq!(cfg.tools[0].action.kind(), "proxy");
+        assert_eq!(cfg.tools[1].action.kind(), "exec");
         assert_eq!(cfg.identities[0].decision, Decision::Allow);
         assert!(!cfg.access_required());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn rejects_short_bearer_token_and_dangling_references() {
-        let mut cfg = Config {
-            tools: default_tools(),
-            ..Default::default()
-        };
+    fn a_tool_naming_an_op_the_upstream_does_not_declare_is_refused() {
+        // Catching this at startup beats discovering it on the first call.
+        let broken = sample().replace(r#"op = "read""#, r#"op = "write""#);
+        let cfg: Config = toml::from_str(&broken).unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("does not declare"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_short_bearer_token_and_dangling_references() {
+        let mut cfg = Config::default();
         assert!(cfg.validate().is_err(), "no bearer token must fail");
 
         cfg.auth.bearer_token = Some("0123456789abcdef0123".into());
-        assert!(
-            cfg.validate().is_err(),
-            "tools reference the 'beeper' upstream, which is not declared"
-        );
-
-        cfg.upstreams.push(UpstreamConfig {
-            name: "beeper".into(),
-            kind: UpstreamKind::Beeper {
-                base_url: default_beeper_url(),
-                token: String::new(),
-            },
-        });
         cfg.validate().unwrap();
 
+        cfg.tools.push(ToolConfig {
+            name: "orphan".into(),
+            description: String::new(),
+            input_schema: None,
+            action: Action::Proxy {
+                upstream: "nowhere".into(),
+                op: "read".into(),
+            },
+            rate_limit: None,
+            idempotent: false,
+        });
+        assert!(cfg.validate().is_err(), "unknown upstream");
+
+        cfg.tools.clear();
         cfg.identities.push(IdentitySeed {
             identity: "x".into(),
             tool: "nope".into(),
             decision: Decision::Allow,
         });
-        assert!(cfg.validate().is_err(), "unknown tool in identity seed");
+        assert!(cfg.validate().is_err(), "unknown tool in an identity seed");
     }
 
     #[test]
-    fn default_catalog_covers_the_v1_tools() {
-        let names: Vec<_> = default_tools().into_iter().map(|t| t.name).collect();
-        assert_eq!(
-            names,
-            vec![
-                "list_new_messages",
-                "get_thread",
-                "draft_reply",
-                "send_message",
-                "mark_read"
-            ]
-        );
+    fn a_gateway_ships_no_opinion_about_what_it_fronts() {
+        // No default catalog: every tool a caller can reach was written down by the operator.
+        let cfg = Config::default();
+        assert!(cfg.tools.is_empty());
+        assert!(cfg.upstreams.is_empty());
     }
 
     #[test]
-    fn send_message_is_idempotent_and_rate_limited() {
-        let tools = default_tools();
-        let send = tools.iter().find(|t| t.name == "send_message").unwrap();
-        assert!(send.idempotent);
-        let rl = send.rate_limit.unwrap();
-        assert_eq!(rl.per_hour, 60);
-        assert_eq!(rl.min_spacing_secs, 2);
-    }
-
-    #[test]
-    fn drafting_defaults_disable_ambient_claude_config() {
-        let d = DrafterConfig::default();
-        assert!(d.exec.args.iter().any(|a| a == "--safe-mode"));
-        assert!(d.exec.args.iter().any(|a| a == "--strict-mcp-config"));
-        assert_eq!(d.exec.max_concurrency, 1);
-        assert_eq!(d.exec.stdin.as_deref(), Some("{prompt}"));
+    fn credentials_come_from_the_environment_named_by_the_upstream() {
+        std::env::set_var("GATEHOUND_TEST_TOKEN", "from-the-env");
+        let mut cfg: Config =
+            toml::from_str(&sample().replace("NOTES_TOKEN", "GATEHOUND_TEST_TOKEN")).unwrap();
+        cfg.apply_env();
+        match &cfg.upstreams[0].kind {
+            UpstreamKind::Http { token, .. } => assert_eq!(token, "from-the-env"),
+            _ => panic!("expected an http upstream"),
+        }
+        std::env::remove_var("GATEHOUND_TEST_TOKEN");
     }
 }

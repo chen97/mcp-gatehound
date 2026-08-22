@@ -1,7 +1,7 @@
 //! Headless MCP Gatehound: the same core, no GUI.
 //!
-//! This is what runs on an always-on machine (SPEC §9.2), and what the Message Desk
-//! integration test drives against the mock rig.
+//! This is what runs on an always-on machine, and what the integration tests drive
+//! against the mock rig.
 //!
 //! Usage:
 //!   gatehound-headless [serve]            run the gateway (default)
@@ -9,6 +9,8 @@
 //!   gatehound-headless identities         list the stored policy rules
 //!   gatehound-headless allow <id> [tool]  persist an allow rule (tool defaults to *)
 //!   gatehound-headless deny  <id> [tool]  persist a deny rule
+//!   gatehound-headless import <pack.toml> merge a pack of upstreams and tools into the config
+//!   gatehound-headless export <name>      write the current setup out as a pack
 //!
 //! Options:
 //!   --config <path>     gatehound.toml (default: ./gatehound.toml when it exists)
@@ -16,11 +18,14 @@
 //!   --auto-approve      resolve every `ask` immediately. Development only: it removes the
 //!                       human from the approval loop, so never use it on a machine reachable
 //!                       from a tunnel.
+//!   --replace           on import, overwrite an upstream or tool that already exists
+//!   -o <path>           on export, write here instead of standard output
 
 use anyhow::{bail, Context, Result};
 use gatehound_core::approval::Resolution;
 use gatehound_core::config::{Config, Decision};
 use gatehound_core::events::GatewayEvent;
+use gatehound_core::pack::{self, Pack};
 use gatehound_core::{default_db_path, Gateway};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +38,8 @@ struct Args {
     config: Option<PathBuf>,
     db: Option<PathBuf>,
     auto_approve: bool,
+    replace: bool,
+    out: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -41,6 +48,8 @@ fn parse_args() -> Result<Args> {
     let mut config = None;
     let mut db = None;
     let mut auto_approve = false;
+    let mut replace = false;
+    let mut out = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -48,6 +57,8 @@ fn parse_args() -> Result<Args> {
             "--config" => config = Some(PathBuf::from(it.next().context("--config needs a path")?)),
             "--db" => db = Some(PathBuf::from(it.next().context("--db needs a path")?)),
             "--auto-approve" => auto_approve = true,
+            "--replace" => replace = true,
+            "-o" | "--out" => out = Some(PathBuf::from(it.next().context("-o needs a path")?)),
             "-h" | "--help" | "help" => {
                 print_help();
                 std::process::exit(0);
@@ -66,6 +77,8 @@ fn parse_args() -> Result<Args> {
         config,
         db,
         auto_approve,
+        replace,
+        out,
     })
 }
 
@@ -77,11 +90,15 @@ fn print_help() {
          check                     validate config and probe the upstreams\n  \
          identities                list stored policy rules\n  \
          allow <identity> [tool]   persist an allow rule (tool defaults to *)\n  \
-         deny  <identity> [tool]   persist a deny rule\n\n\
+         deny  <identity> [tool]   persist a deny rule\n  \
+         import <pack.toml>        merge a pack of upstreams and tools into the config\n  \
+         export <name>             write the current setup out as a pack\n\n\
          OPTIONS\n  \
          --config <path>           gatehound.toml\n  \
          --db <path>               database file\n  \
-         --auto-approve            resolve every approval immediately (development only)"
+         --auto-approve            resolve every approval immediately (development only)\n  \
+         --replace                 on import, overwrite anything that already exists\n  \
+         -o <path>                 on export, write here instead of standard output"
     );
 }
 
@@ -130,6 +147,8 @@ async fn main() -> Result<()> {
         "identities" => identities(cfg, db_path),
         "allow" => set_rule(cfg, db_path, &args.rest, Decision::Allow),
         "deny" => set_rule(cfg, db_path, &args.rest, Decision::Deny),
+        "import" => import_pack(cfg, &args),
+        "export" => export_pack(cfg, &args),
         other => {
             print_help();
             bail!("unknown command '{other}'")
@@ -250,19 +269,19 @@ async fn check(cfg: Config, db_path: Option<PathBuf>) -> Result<()> {
             "ok"
         };
         println!(
-            "  - {:<12} {:<6} {:<40} {}",
+            "  - {:<12} {:<6} {:<38} {}",
             name,
             up.kind(),
             up.endpoint(),
             state
         );
+        let ops = up.ops();
+        if !ops.is_empty() {
+            println!("      ops: {}", ops.join(", "));
+        }
     }
     println!();
 
-    println!(
-        "Drafting via:    {}",
-        gateway.engine.drafter().provider_label()
-    );
     let rules = gateway.identities()?;
     println!("Policy rules ({}):", rules.len());
     for r in &rules {
@@ -310,5 +329,64 @@ fn set_rule(
     }
     gateway.set_identity(identity, tool, decision)?;
     println!("{identity} → {tool}: {}", decision.as_str());
+    Ok(())
+}
+
+/// Merge a pack into `gatehound.toml`. Refuses on a collision unless `--replace` is given, so
+/// a pack can never quietly redefine a tool an identity has already been allowed to call.
+fn import_pack(mut cfg: Config, args: &Args) -> Result<()> {
+    let Some(path) = args.rest.first().map(PathBuf::from) else {
+        bail!("usage: gatehound-headless import <pack.toml> [--config gatehound.toml] [--replace]");
+    };
+    let target = args
+        .config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("gatehound.toml"));
+
+    let pack = Pack::load(&path)?;
+    let applied = pack::merge(&mut cfg, &pack, args.replace)?;
+
+    // The importer holds the credentials, not the pack, so say what still needs setting.
+    let missing = pack.missing_env();
+
+    let body = toml::to_string_pretty(&cfg).context("serializing the merged configuration")?;
+    std::fs::write(&target, body).with_context(|| format!("writing {}", target.display()))?;
+
+    println!("imported '{}' into {}", pack.pack.name, target.display());
+    for (label, items) in [
+        ("upstreams", &applied.upstreams),
+        ("tools", &applied.tools),
+        ("identity seeds", &applied.identities),
+        ("replaced", &applied.replaced),
+    ] {
+        if !items.is_empty() {
+            println!("  {label}: {}", items.join(", "));
+        }
+    }
+    if !missing.is_empty() {
+        println!("\nSet these before starting the gateway:");
+        for k in missing {
+            println!("  {k}");
+        }
+    }
+    Ok(())
+}
+
+/// Write the current upstreams, tools and identity seeds out as a pack, with every credential
+/// left behind.
+fn export_pack(cfg: Config, args: &Args) -> Result<()> {
+    let name = args
+        .rest
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "gatehound".to_string());
+    let body = pack::to_toml(&pack::export(&cfg, &name, ""))?;
+    match &args.out {
+        Some(path) => {
+            std::fs::write(path, &body).with_context(|| format!("writing {}", path.display()))?;
+            eprintln!("wrote {}", path.display());
+        }
+        None => print!("{body}"),
+    }
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! The MCP surface (SPEC §4.1): Streamable HTTP, `POST /mcp`, JSON-RPC 2.0, one message per
+//! The MCP surface: Streamable HTTP, `POST /mcp`, JSON-RPC 2.0, one message per
 //! request, JSON responses. No SSE stream, because nothing here is server-initiated.
 //!
 //! Conventions:
@@ -6,7 +6,7 @@
 //!   * tool failures → `result.isError = true` with a text block, *not* a JSON-RPC error;
 //!   * success → a text block **and** `structuredContent` with the machine-readable payload;
 //!   * notifications (no `id`) → 202 Accepted, empty body;
-//!   * be lenient — a server-to-server client such as the Message Desk Worker may skip
+//!   * be lenient — a server-to-server client with no interactive session may skip
 //!     `initialize` entirely.
 //!
 //! The listener binds loopback only. Public exposure is exclusively via cloudflared.
@@ -317,7 +317,7 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
     Json(reply).into_response()
 }
 
-const DISCOVER_INSTRUCTIONS: &str = "Tools are bound to fixed actions by the gateway's configuration; a caller names a tool and never chooses an action. draft_reply only suggests text; send_message delivers exactly the text given, requires an idempotency key, and is reserved for the owner's approval flow.";
+const DISCOVER_INSTRUCTIONS: &str = "Tools are bound to fixed actions by the gateway's configuration; a caller names a tool and never chooses an action. Every call is checked against a per-identity policy and recorded, a tool the policy holds waits for a human decision, and a tool marked idempotent requires an idempotency_key — repeating one replays the first result instead of acting again.";
 
 async fn call_tool(
     gw: &Arc<Gateway>,

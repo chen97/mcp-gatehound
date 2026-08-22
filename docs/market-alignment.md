@@ -58,8 +58,8 @@ is which is more useful than claiming coverage of all four.
 |---|---|
 | **Rug pull** — a tool's definition changes after it was approved | **Yes, and it is unhandled.** We approve `(identity, tool)` by *name*. Editing `gatehound.toml` can change what that name does without re-prompting anyone |
 | **Cross-server shadowing** — one upstream's tool overrides another's | **Partly.** Tool names are unique per config, but we do not auto-prefix aggregated upstreams |
-| **Tool poisoning** — malicious instructions hidden in tool descriptions | No. We author every description ourselves; nothing is imported from a third-party server |
-| **Prompt injection via tool output** | **Yes, and it is handled.** Inbound messages are untrusted; the drafting model runs with no tools and is told the transcript is data. See SPEC §4.6 |
+| **Tool poisoning** — malicious instructions hidden in tool descriptions | **Yes, since packs.** A pack you write yourself is no different from hand-written config, but a pack from elsewhere carries somebody else's tool descriptions straight into your `tools/list`. Import refuses to overwrite silently and prints what it changed, so the descriptions are at least reviewable — but nothing scans them |
+| **Prompt injection via tool output** | **Partly, and structurally.** Upstream output is returned to the caller verbatim; the gateway never interprets it, and no tool result can select or trigger another action. What the caller's model does with that text is the caller's problem, not something we can fix here |
 
 ---
 
@@ -112,8 +112,8 @@ Two specifics:
   compliant client currently has no way to learn what we want.
 - **We get token passthrough right.** The spec forbids forwarding the caller's token to a
   downstream API, and calls it out as the road to confused-deputy attacks. We never do:
-  the caller's bearer authenticates to *us*, and Beeper is reached with a separate
-  credential of our own. That is the behaviour the spec asks for, and it is worth saying so.
+  the caller's bearer authenticates to *us*, and each upstream is reached with its own
+  separate credential. That is the behaviour the spec asks for, and it is worth saying so.
 
 ---
 
@@ -121,13 +121,13 @@ Two specifics:
 
 | Feature | Market baseline | Gatehound |
 |---|---|---|
-| Aggregate N upstreams behind one endpoint | Yes, universally | **Partial.** Two upstream *types*, but the shipped catalog is single-upstream and names are not auto-prefixed |
+| Aggregate N upstreams behind one endpoint | Yes, universally | **Partial.** Any number of upstreams of two types, but names are not auto-prefixed |
 | Tool filtering per caller | Yes | **Yes**, and denied tools vanish from `tools/list` rather than failing on call |
 | Audit log including denials | Yes | **Yes**, with redaction and retention |
 | Per-tool rate limiting | Common | **Yes** |
 | OAuth / IdP integration | Yes | **No** — Access JWT only |
 | OpenTelemetry export | Increasingly expected; the 2026 spec standardises `traceparent` in `_meta` | **No.** We use `tracing` but export nothing |
-| Server catalog and self-service discovery | Yes | **No.** Tools are hand-declared |
+| Server catalog and self-service discovery | Yes | **Partial.** Packs make an integration portable — export it, import it elsewhere — but there is no registry to browse and nothing is installed automatically |
 | Guardrail / interceptor plugins | Emerging (Lasso, ContextForge) | **No** |
 | Circuit breaking | Common | **No.** We health-check but do not trip |
 | Admin UI | Common | **Yes** (Tauri app) |
@@ -141,14 +141,20 @@ Worth keeping, and worth naming in the README, because these are the actual diff
    parks the request on a bounded timer and asks a person in real time. Our approval queue
    with its 60-second hold — kept under Cloudflare's ~100s edge timeout — is unusual.
 2. **Idempotency keys on side-effecting tools.** This did not appear in any gateway feature
-   list surveyed. For a tool that messages a real person, replaying a key instead of acting
-   twice is a genuine safety property, not a nicety.
+   list surveyed. For any tool whose effect is visible outside the machine, replaying a key
+   instead of acting twice is a genuine safety property, not a nicety — and the key is burned
+   only by a call that actually succeeded, so a failure stays retryable.
 3. **`exec` actions with a fixed argv template.** The market's answer to "run something
    local" is either a container (Docker) or nothing. A fixed binary with declared
    placeholders and content on stdin is a narrower, more auditable middle ground.
-4. **Consequence-first approval.** The card says "send a message to Alice on WhatsApp, as
-   you" rather than "allow `send_message`?". The decision a person is being asked to make
-   is about the effect, not the method name.
+4. **Consequence-first approval.** The card describes the effect — who is being asked to do
+   what, to what, on whose behalf — rather than asking "allow `some_tool`?". The decision a
+   person is being asked to make is about the consequence, not the method name.
+
+5. **Packs that refuse to travel with credentials.** Exporting an integration strips every
+   token and names an environment variable in its place; importing one refuses on the first
+   name collision. Portable configuration is common; portable configuration that cannot
+   silently redefine an already-approved tool is not.
 
 ---
 
@@ -185,8 +191,8 @@ request from how the client opens, so legacy clients see no change at all.
   validation against the body (`-32020` on mismatch, base64 sentinel decoded first), `404` for
   an unknown modern method, and `405` on `DELETE` as well as `GET`.
 
-Message Desk was upgraded to a modern client in the same change, so the stateless path is what
-the end-to-end test actually exercises.
+CI drives the stateless path end to end against the mock rig, so the modern era is exercised on
+every push rather than only unit-tested.
 
 Not adopted, deliberately: `2025-11-25` is not advertised — it is handshake-based like the
 older revisions but adds requirements we do not implement, and claiming it would be a lie.
@@ -195,7 +201,9 @@ older revisions but adds requirements we do not implement, and claiming it would
 - Prefix aggregated tool names per upstream, closing the shadowing gap.
 - Hash each tool's `(name, action, schema)` and re-prompt when an approved tool's
   definition changes. This closes the rug-pull gap and is a natural fit for the approval
-  queue we already have.
+  queue we already have. Pack import narrows the gap — it will not replace an existing name
+  without `--replace`, and it says what it changed — but editing `gatehound.toml` by hand
+  still moves a name out from under an approval nobody was asked about again.
 - OTLP export, using the `_meta` trace-context keys the 2026 spec standardises.
 - Circuit breaking on an upstream that is failing rather than merely down.
 

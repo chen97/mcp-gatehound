@@ -1,32 +1,24 @@
 # Test fixtures
 
-## `mock_server.py`
+## `mock_upstream.py`
 
-Stands in for **both** the Beeper Desktop API and the Anthropic Messages API on a single
-port, so the whole chain can be exercised without a Beeper account, a Claude subscription or
-a network connection.
+A small REST service the gateway can front, so `proxy` actions can be exercised without any
+real API. It holds three notes behind a bearer token and records what was written to
+`GET /__mock/writes`, which is how the idempotency test proves a replayed call reached the
+upstream exactly once.
 
 ```sh
-python3 tests_fixtures/mock_server.py 23399
+python3 tests_fixtures/mock_upstream.py 23399
 ```
 
-Its chat fixtures each pin down one behaviour that is easy to regress:
-
-| Chat | What it proves |
-|---|---|
-| Alice (WhatsApp) | An ordinary English thread produces an English draft |
-| Dana 小美 (Telegram) | A Chinese thread produces a Chinese draft — the model mirrors the language rather than translating |
-| Bob (Telegram) | The owner already replied, so the chat is not surfaced at all |
-| Glassnode (Telegram) | A network bot is filtered out |
-| Carol (WhatsApp) | A sticker-only message yields `[NO_REPLY]` and no draft |
-
-`GET /__mock/sent` reports what was actually sent and marked read, which is how the
-idempotency tests prove a replayed send reached the upstream exactly once.
+One of the note identifiers is `!odd:host.local`. Those characters are legal inside a URL
+path segment, and the gateway must pass them through without mangling or double-encoding
+them — a class of bug that only shows up against a real identifier scheme.
 
 ## `gatehound.mock.toml`
 
-The gateway configuration that points at the mock rig. See the repository README for the two
-commands that bring the whole thing up.
+The gateway configuration pointing at that service: one `http` upstream with three declared
+operations, four tools bound to them, and a seeded identity.
 
 ## `test_rsa.pem` and `test_jwks.json`
 

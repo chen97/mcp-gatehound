@@ -1,4 +1,4 @@
-// MCP Gatehound — the desktop shell (SPEC §5).
+// MCP Gatehound — the desktop shell.
 //
 // The lifecycle rule is the whole point of this crate: **the app running is the gateway
 // being up, and quitting the app is the gateway going down.** Closing the window hides it;
@@ -47,7 +47,6 @@ struct Snapshot {
     pending: usize,
     tools: Vec<serde_json::Value>,
     upstreams: Vec<String>,
-    drafter: String,
 }
 
 // ---- IPC commands ---------------------------------------------------------
@@ -76,7 +75,6 @@ fn snapshot(state: tauri::State<'_, AppState>) -> Result<Snapshot, String> {
             .into_iter()
             .map(str::to_string)
             .collect(),
-        drafter: gw.engine.drafter().provider_label(),
     })
 }
 
@@ -265,7 +263,7 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // macOS: menubar only, no Dock icon (SPEC §5.1).
+            // macOS: menubar only, no Dock icon.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 

@@ -1,4 +1,4 @@
-//! The tray is the primary surface (SPEC §5.2).
+//! The tray is the primary surface.
 //!
 //! Colour says what the gateway is doing — green listening, grey paused, red an upstream is
 //! not answering — and the badge counts approvals waiting for a decision. A native

@@ -48,64 +48,173 @@ jobs:
       - name: Build the headless gateway
         run: cargo build -p gatehound-headless
 
-      - name: Start the mock Beeper / Anthropic rig
+      - name: Start the mock upstream
         run: |
-          python3 tests_fixtures/mock_server.py 23399 &
+          python3 tests_fixtures/mock_upstream.py 23399 > "$RUNNER_TEMP/mock.log" 2>&1 &
           for i in $(seq 1 40); do
-            curl -sf -H 'authorization: Bearer tok' http://127.0.0.1:23399/v1/accounts >/dev/null && break
+            curl -sf http://127.0.0.1:23399/healthz >/dev/null && break
             sleep 0.25
           done
+
+      - name: Config and upstreams check out
+        env:
+          GATEHOUND_TOKEN: hubsecret-0123456789abcdef
+        run: ./target/debug/gatehound-headless --config tests_fixtures/gatehound.mock.toml check
 
       - name: Start the gateway
         env:
           GATEHOUND_TOKEN: hubsecret-0123456789abcdef
           DB_PATH: ${{ runner.temp }}/gatehound.db
         run: |
-          ./target/debug/gatehound-headless --config tests_fixtures/gatehound.mock.toml serve &
+          ./target/debug/gatehound-headless --config tests_fixtures/gatehound.mock.toml serve \
+            > "$RUNNER_TEMP/gateway.log" 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:8790/healthz >/dev/null && break
             sleep 0.25
           done
           curl -sf http://127.0.0.1:8790/healthz
 
-      - name: Drafting and idempotent send reach the mock upstream
+      - name: The current revision is served statelessly
         run: |
           set -eu
-          T=hubsecret-0123456789abcdef
-          rpc() {
+          # Under 2026-07-28 there is no handshake: every request carries its own _meta, and
+          # the matching headers must agree with the body.
+          mcp() {
+            method=$1; shift
             curl -sf -X POST http://127.0.0.1:8790/mcp \
-              -H "authorization: Bearer $T" -H 'content-type: application/json' -d "$1"
+              -H 'authorization: Bearer hubsecret-0123456789abcdef' \
+              -H 'content-type: application/json' \
+              -H 'MCP-Protocol-Version: 2026-07-28' \
+              -H "Mcp-Method: $method" "$@"
           }
+          META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"ci","version":"1"}}'
 
-          rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"draft_reply","arguments":{"chat_id":"!alice:ba_1.local-whatsapp.localhost"}}}' \
-            | tee /tmp/draft.json
+          mcp server/discover -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{$META}}" > /tmp/discover.json
+          mcp tools/list      -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{$META}}"      > /tmp/list.json
           python3 -c "
           import json
-          d = json.load(open('/tmp/draft.json'))['result']['structuredContent']
-          assert d['no_reply'] is False and '7pm' in d['draft'], d
-          print('draft ok:', d['draft'])
+          d = json.load(open('/tmp/discover.json'))['result']
+          assert '2026-07-28' in d['supportedVersions'], d
+          assert d['resultType'] == 'complete' and d['ttlMs'] > 0, d
+          assert d['_meta']['io.modelcontextprotocol/serverInfo']['name'], d
+          names = {t['name'] for t in json.load(open('/tmp/list.json'))['result']['tools']}
+          assert {'list_notes', 'read_note', 'append_note', 'disk_free'} <= names, names
+          print('discover ok:', sorted(names))
           "
 
-          SEND='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_message","arguments":{"chat_id":"!alice:ba_1.local-whatsapp.localhost","text":"ok see you 7pm","idempotency_key":"ci-key-1"}}}'
-          rpc "$SEND" > /tmp/send1.json
-          rpc "$SEND" > /tmp/send2.json
-          curl -sf -H 'authorization: Bearer tok' http://127.0.0.1:23399/__mock/sent > /tmp/sent.json
-          python3 -c "
-          import json
-          a = json.load(open('/tmp/send1.json'))['result']['structuredContent']
-          b = json.load(open('/tmp/send2.json'))['result']['structuredContent']
-          sent = json.load(open('/tmp/sent.json'))['sent']
-          assert a['duplicate'] is False and b['duplicate'] is True, (a, b)
-          assert a['message_id'] == b['message_id'], (a, b)
-          assert len(sent) == 1, sent
-          print('the upstream saw the message once, not twice')
-          "
-
-      - name: An unauthenticated call is refused
+      - name: A request whose headers disagree with its body is refused
         run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8790/mcp \
+          set -eu
+          # The header/body agreement rule is what stops a proxy rewriting one and not the other.
+          code=$(curl -s -o /tmp/mismatch.json -w '%{http_code}' -X POST http://127.0.0.1:8790/mcp \
+            -H 'authorization: Bearer hubsecret-0123456789abcdef' \
+            -H 'content-type: application/json' \
+            -H 'MCP-Protocol-Version: 2026-07-28' \
+            -H 'Mcp-Method: tools/list' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}')
+          [ "$code" = "400" ] || { echo "expected 400, got $code"; cat /tmp/mismatch.json; exit 1; }
+          python3 -c "
+          import json
+          e = json.load(open('/tmp/mismatch.json'))['error']
+          assert e['code'] == -32020, e
+          print('header mismatch refused:', e['message'])
+          "
+
+      - name: A legacy client still gets the handshake
+        run: |
+          set -eu
+          curl -sf -X POST http://127.0.0.1:8790/mcp \
+            -H 'authorization: Bearer hubsecret-0123456789abcdef' \
+            -H 'content-type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"ci"}}}' \
+            > /tmp/init.json
+          python3 -c "
+          import json
+          r = json.load(open('/tmp/init.json'))['result']
+          assert r['protocolVersion'] in ('2025-06-18', '2025-03-26', '2024-11-05'), r
+          print('legacy handshake ok:', r['protocolVersion'])
+          "
+
+      - name: A path argument reaches the upstream intact
+        run: |
+          set -eu
+          META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"ci","version":"1"}}'
+          # The odd identifier is the point: legal in a path segment, easy to mangle.
+          curl -sf -X POST http://127.0.0.1:8790/mcp \
+            -H 'authorization: Bearer hubsecret-0123456789abcdef' \
+            -H 'content-type: application/json' \
+            -H 'MCP-Protocol-Version: 2026-07-28' \
+            -H 'Mcp-Method: tools/call' -H 'Mcp-Name: read_note' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{$META,\"name\":\"read_note\",\"arguments\":{\"id\":\"!odd:host.local\"}}}" \
+            > /tmp/note.json
+          python3 -c "
+          import json
+          n = json.load(open('/tmp/note.json'))['result']['structuredContent']
+          assert n['id'] == '!odd:host.local', n
+          print('path round-trip ok:', n['id'])
+          "
+
+      - name: A replayed idempotency key reaches the upstream once
+        run: |
+          set -eu
+          META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"ci","version":"1"}}'
+          CALL="{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{$META,\"name\":\"append_note\",\"arguments\":{\"id\":\"shopping\",\"body\":\"coffee\",\"idempotency_key\":\"ci-key-1\"}}}"
+          for n in 1 2; do
+            curl -sf -X POST http://127.0.0.1:8790/mcp \
+              -H 'authorization: Bearer hubsecret-0123456789abcdef' \
+              -H 'content-type: application/json' \
+              -H 'MCP-Protocol-Version: 2026-07-28' \
+              -H 'Mcp-Method: tools/call' -H 'Mcp-Name: append_note' \
+              -d "$CALL" > "/tmp/append$n.json"
+          done
+          curl -sf http://127.0.0.1:23399/__mock/writes > /tmp/writes.json
+          python3 -c "
+          import json
+          a = json.load(open('/tmp/append1.json'))['result']['structuredContent']
+          b = json.load(open('/tmp/append2.json'))['result']['structuredContent']
+          writes = json.load(open('/tmp/writes.json'))['writes']
+          assert a['duplicate'] is False and b['duplicate'] is True, (a, b)
+          assert len(writes) == 1, writes
+          print('the upstream saw the write once, not twice')
+          "
+
+      - name: An unauthenticated call is refused with a challenge
+        run: |
+          set -eu
+          code=$(curl -s -o /tmp/denied.txt -D /tmp/denied.hdr -w '%{http_code}' \
+            -X POST http://127.0.0.1:8790/mcp \
             -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
           [ "$code" = "401" ] || { echo "expected 401, got $code"; exit 1; }
+          grep -iq '^www-authenticate:' /tmp/denied.hdr \
+            || { echo "401 without a WWW-Authenticate challenge"; cat /tmp/denied.hdr; exit 1; }
+
+      - name: A pack round-trips through export and import
+        env:
+          GATEHOUND_TOKEN: hubsecret-0123456789abcdef
+        run: |
+          set -eu
+          ./target/debug/gatehound-headless --config tests_fixtures/gatehound.mock.toml \
+            export notes-demo -o /tmp/notes.pack.toml
+          grep -q 'MOCK_UPSTREAM_TOKEN' /tmp/notes.pack.toml \
+            || { echo "export must name the credential variable"; cat /tmp/notes.pack.toml; exit 1; }
+          if grep -q 'tok"' /tmp/notes.pack.toml; then
+            echo "export leaked a credential"; cat /tmp/notes.pack.toml; exit 1
+          fi
+
+          # Importing into a config that already has these names must refuse rather than
+          # silently redefine them.
+          cp tests_fixtures/gatehound.mock.toml /tmp/target.toml
+          if ./target/debug/gatehound-headless --config /tmp/target.toml import /tmp/notes.pack.toml; then
+            echo "import overwrote an existing tool without --replace"; exit 1
+          fi
+          ./target/debug/gatehound-headless --config /tmp/target.toml import /tmp/notes.pack.toml --replace
+          ./target/debug/gatehound-headless --config /tmp/target.toml check
+
+      - name: Logs
+        if: failure()
+        run: |
+          echo "--- gateway ---"; cat "$RUNNER_TEMP/gateway.log" || true
+          echo "--- mock upstream ---"; cat "$RUNNER_TEMP/mock.log" || true
 
   desktop:
     name: Desktop shell
