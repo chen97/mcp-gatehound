@@ -242,11 +242,20 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev
 
-      - name: Build the frontend
+      - name: Frontend dependencies
         working-directory: crates/gatehound-app/ui
+        run: npm install --no-audit --no-fund
+
+      # Tauri runs beforeBuildCommand from the frontend directory, not from the directory
+      # holding tauri.conf.json. Running the exact string out of the config, from that
+      # directory, is what catches a hook that is only wrong at bundle time — which is a
+      # failure nobody sees until they try to produce an installable app.
+      - name: The frontend builds the way Tauri builds it
+        working-directory: crates/gatehound-app
         run: |
-          npm install --no-audit --no-fund
-          npm run build
+          hook=$(python3 -c "import json; print(json.load(open('tauri.conf.json'))['build']['beforeBuildCommand'])")
+          echo "beforeBuildCommand: $hook"
+          cd ui && sh -c "$hook"
 
       - name: Check the shell
         run: cargo clippy -p gatehound-app --all-targets -- -D warnings
