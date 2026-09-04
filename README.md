@@ -188,7 +188,9 @@ second, independent brake on a runaway agent.
 
 ### Packs: importing and exporting an integration
 
-Everything the gateway knows about a service is data, so it can travel:
+Everything the gateway knows about a service is data, so it can travel. In the desktop app,
+**Upstreams & actions → Import a pack** picks a file and shows what it would change before
+anything is written; on the command line:
 
 ```sh
 gatehound-headless export my-tracker -o tracker.pack.toml   # what this gateway fronts
@@ -210,6 +212,17 @@ accept from someone else:
 
 An import runs the same validation as startup, so a pack that references a missing upstream or
 an undeclared operation is rejected before it reaches your config.
+
+A pack travels but absolute paths do not: whoever wrote it had their own binaries and their own
+files, and an `exec` tool's command is pinned in config precisely so a caller cannot choose it.
+Both surfaces report the local paths a pack names that are not on this machine — the app offers
+a file picker for each, naming the flag it belongs to rather than an argv index, and the CLI
+prints them so you know which tools will fail when called. A tool with an unresolved path still
+imports; only that tool is affected.
+
+Importing changes the file, not the running process. The gateway builds its upstreams, tools and
+rate limiters once at startup, so the app offers a restart rather than swapping them under live
+requests.
 
 ### The desktop shell
 

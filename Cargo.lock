@@ -1322,6 +1322,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "tokio-util",
+ "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
 ]

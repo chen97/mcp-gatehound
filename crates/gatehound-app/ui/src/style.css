@@ -56,6 +56,14 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line
 th { color: var(--mut); font-weight: 600; position: sticky; top: 0; background: var(--bg); }
 tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--panel); }
+.notice {
+  margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+  background: var(--in); border: 1px solid var(--line);
+}
+.notice.warn { border-color: var(--am); }
+.notice strong { display: block; margin-bottom: 2px; }
+.notice .meta { margin-top: 2px; }
+
 .pill { border-radius: 999px; padding: 1px 8px; font-size: 11px; border: 1px solid var(--line); }
 .pill.ok { color: var(--ok); border-color: var(--ok); }
 .pill.error { color: var(--bad); border-color: var(--bad); }

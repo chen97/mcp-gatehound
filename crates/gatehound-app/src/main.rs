@@ -14,11 +14,14 @@ use anyhow::{Context, Result};
 use gatehound_core::approval::Resolution;
 use gatehound_core::config::{Config, Decision};
 use gatehound_core::events::{GatewayEvent, GatewayStatus};
+use gatehound_core::pack::{self, MissingFile, Pack};
 use gatehound_core::store::{IdentityRule, PendingRow, RequestLog};
 use gatehound_core::Gateway;
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri_plugin_dialog::DialogExt;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -29,6 +32,9 @@ pub struct AppState {
     /// Cancels the running listener. `None` while paused.
     listener: Mutex<Option<CancellationToken>>,
     sidecar: sidecar::Sidecar,
+    /// The file the running configuration came from, and the file an import writes back to.
+    /// Held because importing a pack has to change the same file the next start will read.
+    config_path: PathBuf,
 }
 
 impl AppState {
@@ -159,6 +165,187 @@ async fn set_paused(app: AppHandle, paused: bool) -> Result<(), String> {
     Ok(())
 }
 
+// ---- Packs ----------------------------------------------------------------
+// A pack is upstreams, tools and identity seeds in one portable file. Importing one is an
+// operator action, so it belongs here rather than only in the CLI — and the GUI can do the
+// part the CLI cannot: show the consequences first, and let someone point at a local file
+// with a picker instead of hand-editing an absolute path into TOML.
+
+/// What importing a pack would do, for the operator to look at before committing.
+#[derive(Serialize)]
+struct PackPlan {
+    name: String,
+    description: String,
+    version: String,
+    /// What a plain import would add. Absent when it would be refused.
+    adds: Option<Applied>,
+    /// Why a plain import would be refused — a name that already exists.
+    collision: Option<String>,
+    /// What importing with replace would do. Absent when that too would fail.
+    replaces: Option<Applied>,
+    /// Environment variables the pack names that are not set here.
+    missing_env: Vec<String>,
+    /// Local files the pack names that are not on this machine.
+    missing_files: Vec<MissingFile>,
+    /// Human-readable prompt per missing file, parallel to `missing_files`.
+    purposes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct Applied {
+    upstreams: Vec<String>,
+    tools: Vec<String>,
+    identities: Vec<String>,
+    replaced: Vec<String>,
+}
+
+impl From<pack::Applied> for Applied {
+    fn from(a: pack::Applied) -> Self {
+        Self {
+            upstreams: a.upstreams,
+            tools: a.tools,
+            identities: a.identities,
+            replaced: a.replaced,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ApplyResult {
+    applied: Applied,
+    config_path: String,
+    missing_env: Vec<String>,
+}
+
+/// Where the running configuration came from, so the operator can see what an import edits.
+#[tauri::command]
+fn config_path(state: tauri::State<'_, AppState>) -> String {
+    state.config_path.display().to_string()
+}
+
+#[tauri::command]
+async fn choose_pack(app: AppHandle) -> Option<String> {
+    app.dialog()
+        .file()
+        .set_title("Choose a pack")
+        .add_filter("Pack", &["toml"])
+        .blocking_pick_file()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.display().to_string())
+}
+
+/// Pick a local file to stand in for one a pack names but this machine does not have.
+#[tauri::command]
+async fn choose_file(app: AppHandle, purpose: String) -> Option<String> {
+    app.dialog()
+        .file()
+        .set_title(format!("Choose {purpose}"))
+        .blocking_pick_file()
+        .and_then(|p| p.into_path().ok())
+        .map(|p| p.display().to_string())
+}
+
+#[tauri::command]
+fn inspect_pack(state: tauri::State<'_, AppState>, path: String) -> Result<PackPlan, String> {
+    let loaded = Pack::load(Path::new(&path)).map_err(err)?;
+    let cfg = &state.gateway.cfg;
+
+    // Both answers, because the operator is choosing between them: a plain import, and one
+    // that overwrites what is already there.
+    let (adds, collision) = match pack::plan(cfg, &loaded, false) {
+        Ok(a) => (Some(a.into()), None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    let replaces = pack::plan(cfg, &loaded, true).ok().map(Into::into);
+    let missing_files = pack::missing_files(&loaded);
+    let purposes = missing_files.iter().map(|m| m.purpose()).collect();
+
+    Ok(PackPlan {
+        name: loaded.pack.name.clone(),
+        description: loaded.pack.description.clone(),
+        version: loaded.pack.version.clone(),
+        adds,
+        collision,
+        replaces,
+        missing_env: loaded.missing_env(),
+        missing_files,
+        purposes,
+    })
+}
+
+/// Merge the pack into the configuration file the app reads, after pointing any local files it
+/// names at where they actually are.
+///
+/// `resolutions` is parallel to the `missing_files` of the matching `inspect_pack` call: one
+/// chosen path per entry, or an empty string to leave the pack's own value alone. Leaving one
+/// alone is allowed on purpose — a tool whose command is missing still imports, and fails only
+/// when something calls it, which beats blocking the whole pack on one unused tool.
+#[tauri::command]
+fn apply_pack(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    replace: bool,
+    resolutions: Vec<String>,
+) -> Result<ApplyResult, String> {
+    let mut loaded = Pack::load(Path::new(&path)).map_err(err)?;
+
+    let missing = pack::missing_files(&loaded);
+    if !resolutions.is_empty() && resolutions.len() != missing.len() {
+        return Err(format!(
+            "expected {} file choices, got {} — the pack changed on disk since it was inspected",
+            missing.len(),
+            resolutions.len()
+        ));
+    }
+    for (m, chosen) in missing.iter().zip(resolutions.iter()) {
+        if !chosen.trim().is_empty() {
+            pack::resolve_file(&mut loaded, m, chosen).map_err(err)?;
+        }
+    }
+
+    // Merge into a copy of the running configuration and write that. The gateway keeps serving
+    // the configuration it started with until the app restarts, which is what the UI says.
+    let mut cfg = (*state.gateway.cfg).clone();
+    let applied = pack::merge(&mut cfg, &loaded, replace).map_err(err)?;
+
+    let body = toml::to_string_pretty(&cfg)
+        .context("serializing the merged configuration")
+        .map_err(err)?;
+    if let Some(dir) = state.config_path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating {}", dir.display()))
+            .map_err(err)?;
+    }
+    std::fs::write(&state.config_path, body)
+        .with_context(|| format!("writing {}", state.config_path.display()))
+        .map_err(err)?;
+
+    tracing::info!(
+        pack = %loaded.pack.name,
+        config = %state.config_path.display(),
+        "imported a pack"
+    );
+    Ok(ApplyResult {
+        applied: applied.into(),
+        config_path: state.config_path.display().to_string(),
+        missing_env: loaded.missing_env(),
+    })
+}
+
+/// Restart so the merged configuration is the one being served. The gateway builds its
+/// upstreams, tools and limiters once at startup; restarting is honest and cheap, where
+/// swapping them under live requests would not be either.
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    let state = app.state::<AppState>();
+    if let Some(token) = state.listener.lock().unwrap().take() {
+        token.cancel();
+    }
+    state.gateway.approvals.cancel_all();
+    state.sidecar.stop();
+    app.restart();
+}
+
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
@@ -259,6 +446,12 @@ fn main() {
             set_identity,
             forget_identity,
             set_paused,
+            config_path,
+            choose_pack,
+            inspect_pack,
+            choose_file,
+            apply_pack,
+            restart_app,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -268,7 +461,7 @@ fn main() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            let cfg = load_config()?;
+            let (cfg, config_path) = load_config()?;
             let db_path = app
                 .path()
                 .app_data_dir()
@@ -280,6 +473,7 @@ fn main() {
                 gateway,
                 listener: Mutex::new(None),
                 sidecar: sidecar::Sidecar::new(),
+                config_path,
             });
 
             tray::build(&handle)?;
@@ -332,7 +526,10 @@ fn main() {
 
 /// `gatehound.toml` next to the executable, in the app's config directory, or the working
 /// directory — whichever exists first.
-fn load_config() -> Result<Config> {
+/// Returns the configuration and the file it came from. When no file exists yet, the path is
+/// still returned — it is where an import will create one, which is the only way importing a
+/// pack can work on a first run.
+fn load_config() -> Result<(Config, PathBuf)> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -342,16 +539,25 @@ fn load_config() -> Result<Config> {
     if let Some(dir) = dirs_config() {
         candidates.push(dir.join("MCP Gatehound").join("gatehound.toml"));
     }
-    candidates.push(std::path::PathBuf::from("gatehound.toml"));
+    candidates.push(PathBuf::from("gatehound.toml"));
 
-    for path in candidates {
+    for path in &candidates {
         if path.exists() {
             tracing::info!(config = %path.display(), "loading configuration");
-            return Config::load(Some(&path));
+            return Ok((Config::load(Some(path))?, path.clone()));
         }
     }
-    tracing::info!("no gatehound.toml found; using defaults plus the environment");
-    Config::load(None)
+
+    // Prefer the per-user config directory for a file we are about to create; the executable's
+    // own directory is read-only in a signed .app bundle.
+    let target = dirs_config()
+        .map(|d| d.join("MCP Gatehound").join("gatehound.toml"))
+        .unwrap_or_else(|| PathBuf::from("gatehound.toml"));
+    tracing::info!(
+        will_write = %target.display(),
+        "no gatehound.toml found; using defaults plus the environment"
+    );
+    Ok((Config::load(None)?, target))
 }
 
 fn dirs_config() -> Option<std::path::PathBuf> {

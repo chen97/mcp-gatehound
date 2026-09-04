@@ -31,6 +31,37 @@ interface ToolInfo {
   idempotent: boolean;
 }
 
+interface Applied {
+  upstreams: string[];
+  tools: string[];
+  identities: string[];
+  replaced: string[];
+}
+
+interface MissingFile {
+  tool: string;
+  kind: "command" | { argument: number } | "working_directory";
+  declared: string;
+}
+
+interface PackPlan {
+  name: string;
+  description: string;
+  version: string;
+  adds: Applied | null;
+  collision: string | null;
+  replaces: Applied | null;
+  missing_env: string[];
+  missing_files: MissingFile[];
+  purposes: string[];
+}
+
+interface ApplyResult {
+  applied: Applied;
+  config_path: string;
+  missing_env: string[];
+}
+
 interface Pending {
   id: string;
   ts: string;
@@ -234,10 +265,13 @@ async function renderLog(): Promise<void> {
 // ---- Upstreams & actions ---------------------------------------------------
 
 async function renderActions(snap: Snapshot): Promise<void> {
-  $("#actions").innerHTML = `
+  const configFile = await invoke<string>("config_path");
+  $("#actions").innerHTML =
+    renderPackPanel() +
+    `
     <div class="card">
       <h3>Upstreams</h3>
-      <div class="meta">Declared in <code>gatehound.toml</code>. Editing the file and restarting the app applies changes.</div>
+      <div class="meta">Declared in <code>${esc(configFile)}</code>. Importing a pack or editing that file and restarting applies changes.</div>
       <table><tbody>${snap.upstreams
         .map((u) => `<tr><td><code>${esc(u)}</code></td></tr>`)
         .join("")}</tbody></table>
@@ -266,6 +300,203 @@ async function renderActions(snap: Snapshot): Promise<void> {
           .join("")}</tbody>
       </table>
     </div>`;
+  wirePackPanel();
+}
+
+// ---- Importing a pack ------------------------------------------------------
+// A pack is upstreams, tools and identity seeds in one file. Nothing is written until the
+// operator has seen what it would change, because a pack can come from someone else.
+
+// The pack under consideration, and one chosen path per missing file. Reset on every pick, so
+// a stale choice can never be applied to a different pack.
+let packPath: string | null = null;
+let packPlan: PackPlan | null = null;
+let packChoices: string[] = [];
+
+function appliedList(a: Applied): string {
+  const rows: [string, string[]][] = [
+    ["Upstreams", a.upstreams],
+    ["Tools", a.tools],
+    ["Identity seeds", a.identities],
+    ["Replaced", a.replaced],
+  ];
+  const shown = rows.filter(([, v]) => v.length > 0);
+  if (shown.length === 0) return `<div class="meta">Nothing — everything in it is already here.</div>`;
+  return `<table><tbody>${shown
+    .map(
+      ([label, v]) =>
+        `<tr><td class="meta">${label}</td><td>${v
+          .map((x) => `<code>${esc(x)}</code>`)
+          .join(", ")}</td></tr>`,
+    )
+    .join("")}</tbody></table>`;
+}
+
+function renderPackPanel(): string {
+  if (!packPath || !packPlan) {
+    return `
+      <div class="card">
+        <h3>Import a pack</h3>
+        <div class="meta">
+          A pack carries an upstream, the tools bound to it, and identity seeds — one file
+          instead of hand-written TOML. It never carries a credential.
+        </div>
+        <div class="row"><button id="pack-pick" class="primary">Choose a pack…</button></div>
+      </div>`;
+  }
+
+  const p = packPlan;
+  const blocked = p.adds === null && p.replaces === null;
+
+  return `
+    <div class="card">
+      <h3>Import a pack</h3>
+      <div class="meta">Nothing is written until you press Import.</div>
+
+      <table><tbody>
+        <tr><td class="meta">Pack</td><td><code>${esc(p.name)}</code>${
+          p.version ? ` <span class="pill">v${esc(p.version)}</span>` : ""
+        }</td></tr>
+        ${p.description ? `<tr><td class="meta">What it is</td><td>${esc(p.description)}</td></tr>` : ""}
+        <tr><td class="meta">File</td><td class="meta"><code>${esc(packPath)}</code></td></tr>
+      </tbody></table>
+
+      ${
+        p.adds
+          ? `<h3 style="margin-top:12px">This would add</h3>${appliedList(p.adds)}`
+          : `<div class="notice warn">
+               <strong>A name in this pack already exists here.</strong>
+               <div class="meta">${esc(p.collision ?? "")}</div>
+               <div class="meta">
+                 Importing with replace overwrites it. A pack quietly redefining a tool you
+                 already approved is the "rug pull" this refusal exists to stop, so read the
+                 list below before choosing it.
+               </div>
+             </div>
+             ${p.replaces ? `<h3 style="margin-top:12px">Replacing would change</h3>${appliedList(p.replaces)}` : ""}`
+      }
+
+      ${
+        p.missing_files.length > 0
+          ? `<h3 style="margin-top:12px">Files this pack expects</h3>
+             <div class="meta">
+               These paths are pinned in configuration and no caller can choose them, so they
+               have to be set for this machine. Leave one unset and its tool imports but fails
+               when called.
+             </div>
+             <table><tbody>${p.missing_files
+               .map(
+                 (m, i) => `<tr>
+                   <td class="meta">${esc(p.purposes[i] ?? m.tool)}</td>
+                   <td class="meta"><code>${esc(m.declared)}</code> is not here</td>
+                   <td>${
+                     packChoices[i]
+                       ? `<code>${esc(packChoices[i])}</code>`
+                       : `<span class="meta">not set</span>`
+                   }</td>
+                   <td><button class="ghost pack-file" data-index="${i}">Choose…</button></td>
+                 </tr>`,
+               )
+               .join("")}</tbody></table>`
+          : ""
+      }
+
+      ${
+        p.missing_env.length > 0
+          ? `<div class="notice">
+               <strong>Set these before the gateway can reach the upstream:</strong>
+               <div class="meta">${p.missing_env.map((k) => `<code>${esc(k)}</code>`).join(" ")}</div>
+               <div class="meta">
+                 The pack names the variables; it does not carry their values. Put them where
+                 whatever launches the app can see them.
+               </div>
+             </div>`
+          : ""
+      }
+
+      <div class="row">
+        ${
+          p.adds
+            ? `<button id="pack-import" class="primary">Import</button>`
+            : p.replaces
+              ? `<button id="pack-replace" class="danger">Import, replacing what collides</button>`
+              : ""
+        }
+        <button id="pack-cancel" class="ghost">Cancel</button>
+        ${blocked ? `<span class="meta">This pack cannot be imported as it stands.</span>` : ""}
+      </div>
+    </div>`;
+}
+
+function wirePackPanel(): void {
+  $("#pack-pick")?.addEventListener("click", async () => {
+    const chosen = await invoke<string | null>("choose_pack");
+    if (!chosen) return;
+    try {
+      packPlan = await invoke<PackPlan>("inspect_pack", { path: chosen });
+      packPath = chosen;
+      packChoices = packPlan.missing_files.map(() => "");
+    } catch (e) {
+      alert(String(e));
+      return;
+    }
+    await refresh();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>(".pack-file").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const i = Number(b.dataset.index);
+      const purpose = packPlan?.purposes[i] ?? "the file";
+      const chosen = await invoke<string | null>("choose_file", { purpose });
+      if (!chosen) return;
+      packChoices[i] = chosen;
+      await refresh();
+    });
+  });
+
+  $("#pack-cancel")?.addEventListener("click", () => {
+    packPath = null;
+    packPlan = null;
+    packChoices = [];
+    void refresh();
+  });
+
+  for (const [id, replace] of [
+    ["#pack-import", false],
+    ["#pack-replace", true],
+  ] as const) {
+    $(id)?.addEventListener("click", async () => {
+      if (!packPath) return;
+      let result: ApplyResult;
+      try {
+        result = await invoke<ApplyResult>("apply_pack", {
+          path: packPath,
+          replace,
+          resolutions: packChoices,
+        });
+      } catch (e) {
+        alert(String(e));
+        return;
+      }
+      packPath = null;
+      packPlan = null;
+      packChoices = [];
+
+      const env = result.missing_env.length
+        ? `\n\nStill to set: ${result.missing_env.join(", ")}`
+        : "";
+      const restart = confirm(
+        `Imported into ${result.config_path}.\n\n` +
+          `The gateway is still serving the configuration it started with. ` +
+          `Restart now to apply?${env}`,
+      );
+      if (restart) {
+        await invoke("restart_app");
+      } else {
+        await refresh();
+      }
+    });
+  }
 }
 
 // ---- Identities ------------------------------------------------------------

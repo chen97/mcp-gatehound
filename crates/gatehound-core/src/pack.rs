@@ -12,8 +12,8 @@
 //!   operator says otherwise, so a pack cannot quietly redefine a tool that already exists —
 //!   which is the shape of the "rug pull" the MCP threat literature warns about.
 
-use crate::config::{Config, IdentitySeed, ToolConfig, UpstreamConfig, UpstreamKind};
-use anyhow::{bail, Context, Result};
+use crate::config::{Action, Config, IdentitySeed, ToolConfig, UpstreamConfig, UpstreamKind};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -42,7 +42,7 @@ pub struct Pack {
 }
 
 /// What an import would change, so it can be reported before or after the fact.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Applied {
     pub upstreams: Vec<String>,
     pub tools: Vec<String>,
@@ -100,6 +100,136 @@ impl Pack {
             .cloned()
             .collect()
     }
+}
+
+/// What importing this pack *would* change, without changing anything.
+///
+/// The GUI needs to show an operator the consequences before they commit to them, and a pack
+/// from elsewhere is exactly the case where "show me first" matters. This runs the real merge
+/// against a copy, so the answer — including a refusal — is the one the real import gives.
+pub fn plan(cfg: &Config, pack: &Pack, replace: bool) -> Result<Applied> {
+    let mut copy = cfg.clone();
+    merge(&mut copy, pack, replace)
+}
+
+/// A local file a pack's `exec` tool names that is not present on this machine.
+///
+/// A pack travels; absolute paths do not. Whoever wrote it had their own `claude` binary and
+/// their own prompt file, and those paths are pinned in config precisely so a caller cannot
+/// choose them — which means the importing operator has to supply them once, here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MissingFile {
+    /// The tool whose action names it.
+    pub tool: String,
+    pub kind: MissingFileKind,
+    /// The path the pack declared, kept so the operator can see what was expected.
+    pub declared: String,
+    /// The flag this path belongs to, when it follows one. "argument 8" means nothing to
+    /// somebody looking at a file picker; "--system-prompt-file" tells them what to choose.
+    #[serde(default)]
+    pub flag: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingFileKind {
+    /// The command itself.
+    Command,
+    /// An argv element, by index.
+    Argument(usize),
+    /// The working directory.
+    WorkingDirectory,
+}
+
+impl MissingFile {
+    /// What to tell the operator they are choosing.
+    pub fn purpose(&self) -> String {
+        match self.kind {
+            MissingFileKind::Command => format!("the command '{}' runs", self.tool),
+            MissingFileKind::Argument(i) => match &self.flag {
+                Some(flag) => format!("the file for {flag} in '{}'", self.tool),
+                None => format!("argument {i} of '{}'", self.tool),
+            },
+            MissingFileKind::WorkingDirectory => {
+                format!("the working directory for '{}'", self.tool)
+            }
+        }
+    }
+}
+
+/// Local paths this pack names that do not exist here.
+///
+/// Only paths are reported. A bare command name resolves through PATH and is not something an
+/// operator can usefully be asked to locate, and a template argument is not a path at all.
+pub fn missing_files(pack: &Pack) -> Vec<MissingFile> {
+    let mut out = Vec::new();
+    for tool in &pack.tools {
+        let Action::Exec(spec) = &tool.action else {
+            continue;
+        };
+        if looks_like_path(&spec.cmd) && !Path::new(&spec.cmd).exists() {
+            out.push(MissingFile {
+                tool: tool.name.clone(),
+                kind: MissingFileKind::Command,
+                declared: spec.cmd.clone(),
+                flag: None,
+            });
+        }
+        for (i, arg) in spec.args.iter().enumerate() {
+            // Absolute only: a relative argument is far more likely to be data than a file.
+            if arg.starts_with('/') && !arg.contains('{') && !Path::new(arg).exists() {
+                out.push(MissingFile {
+                    tool: tool.name.clone(),
+                    kind: MissingFileKind::Argument(i),
+                    declared: arg.clone(),
+                    flag: i
+                        .checked_sub(1)
+                        .and_then(|prev| spec.args.get(prev))
+                        .filter(|prev| prev.starts_with('-'))
+                        .cloned(),
+                });
+            }
+        }
+        if let Some(cwd) = &spec.cwd {
+            if !Path::new(cwd).exists() {
+                out.push(MissingFile {
+                    tool: tool.name.clone(),
+                    kind: MissingFileKind::WorkingDirectory,
+                    declared: cwd.clone(),
+                    flag: None,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn looks_like_path(cmd: &str) -> bool {
+    cmd.contains('/') || cmd.contains('\\')
+}
+
+/// Point a missing file at somewhere it actually is.
+pub fn resolve_file(pack: &mut Pack, missing: &MissingFile, replacement: &str) -> Result<()> {
+    let tool = pack
+        .tools
+        .iter_mut()
+        .find(|t| t.name == missing.tool)
+        .ok_or_else(|| anyhow!("this pack has no tool named '{}'", missing.tool))?;
+    let Action::Exec(spec) = &mut tool.action else {
+        bail!("'{}' is not an exec tool", missing.tool);
+    };
+    match missing.kind {
+        MissingFileKind::Command => spec.cmd = replacement.to_string(),
+        MissingFileKind::Argument(i) => {
+            let slot = spec
+                .args
+                .get_mut(i)
+                .ok_or_else(|| anyhow!("'{}' has no argument {i}", missing.tool))?;
+            *slot = replacement.to_string();
+        }
+        MissingFileKind::WorkingDirectory => spec.cwd = Some(replacement.to_string()),
+    }
+    Ok(())
 }
 
 /// Merge a pack into a config. Returns what changed, or refuses on the first collision.
@@ -390,6 +520,109 @@ decision = "allow"
                 .contains(&"GATEHOUND_LEGACY_API_TOKEN".to_string()),
             "an importer must be told what to set: {:?}",
             exported.pack.requires_env
+        );
+    }
+
+    #[test]
+    fn planning_reports_the_same_answer_as_importing_but_changes_nothing() {
+        let mut cfg = base();
+        let before = cfg.tools.len();
+
+        let planned = plan(&cfg, &pack(), false).unwrap();
+        assert_eq!(cfg.tools.len(), before, "a plan must not touch the config");
+
+        let applied = merge(&mut cfg, &pack(), false).unwrap();
+        assert_eq!(
+            planned, applied,
+            "the preview must be what actually happens"
+        );
+        assert!(cfg.tools.len() > before);
+
+        // A refusal has to show up in the preview too, or the GUI would offer an import that
+        // then fails.
+        let err = plan(&cfg, &pack(), false).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        assert!(plan(&cfg, &pack(), true).is_ok());
+    }
+
+    #[test]
+    fn a_pack_naming_local_files_that_are_not_here_says_which() {
+        let with_exec = format!(
+            "{SAMPLE}\n{}",
+            r#"
+[[tool]]
+name = "draft"
+description = "Draft something locally."
+action = { type = "exec", cmd = "/nowhere/bin/claude", args = ["-p", "--system-prompt-file", "/nowhere/prompt.md", "--max-turns", "1"], stdin = "{prompt}" }
+"#
+        );
+        let pack: Pack = toml::from_str(&with_exec).unwrap();
+        let missing = missing_files(&pack);
+
+        assert_eq!(
+            missing.len(),
+            2,
+            "the command and the prompt file: {missing:?}"
+        );
+        assert_eq!(missing[0].kind, MissingFileKind::Command);
+        assert_eq!(missing[0].declared, "/nowhere/bin/claude");
+        assert_eq!(missing[1].kind, MissingFileKind::Argument(2));
+        assert_eq!(missing[1].flag.as_deref(), Some("--system-prompt-file"));
+        assert!(
+            missing[1].purpose().contains("--system-prompt-file"),
+            "the picker must name the flag, not an argv index: {}",
+            missing[1].purpose()
+        );
+
+        // "-p" and "1" are data, not paths, and must not be offered as files to locate.
+        assert!(!missing
+            .iter()
+            .any(|m| m.declared == "-p" || m.declared == "1"));
+    }
+
+    #[test]
+    fn a_command_that_exists_here_is_not_reported_missing() {
+        let with_exec = format!(
+            "{SAMPLE}\n{}",
+            r#"
+[[tool]]
+name = "disk"
+description = "Free space."
+action = { type = "exec", cmd = "/bin/sh", args = ["-c", "df -h"] }
+"#
+        );
+        let pack: Pack = toml::from_str(&with_exec).unwrap();
+        assert!(missing_files(&pack).is_empty());
+    }
+
+    #[test]
+    fn resolving_a_missing_file_rewrites_exactly_that_slot() {
+        let with_exec = format!(
+            "{SAMPLE}\n{}",
+            r#"
+[[tool]]
+name = "draft"
+description = "Draft something locally."
+action = { type = "exec", cmd = "/nowhere/bin/claude", args = ["-p", "--system-prompt-file", "/nowhere/prompt.md"], stdin = "{prompt}" }
+"#
+        );
+        let mut pack: Pack = toml::from_str(&with_exec).unwrap();
+        let missing = missing_files(&pack);
+
+        resolve_file(&mut pack, &missing[0], "/bin/sh").unwrap();
+        resolve_file(&mut pack, &missing[1], "/etc/hostname").unwrap();
+
+        let Action::Exec(spec) = &pack.tools.last().unwrap().action else {
+            panic!("action changed shape")
+        };
+        assert_eq!(spec.cmd, "/bin/sh");
+        assert_eq!(
+            spec.args,
+            vec!["-p", "--system-prompt-file", "/etc/hostname"]
+        );
+        assert!(
+            missing_files(&pack).is_empty(),
+            "nothing should still be missing"
         );
     }
 

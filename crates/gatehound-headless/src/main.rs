@@ -369,6 +369,23 @@ fn import_pack(mut cfg: Config, args: &Args) -> Result<()> {
             println!("  {k}");
         }
     }
+
+    // A pack travels; absolute paths do not. Whoever wrote it had their own binary and their
+    // own prompt file, and the gateway pins both so a caller cannot choose them — which leaves
+    // the importing operator to point them somewhere real, once.
+    let absent = pack::missing_files(&pack);
+    if !absent.is_empty() {
+        println!(
+            "\nThese local files are not on this machine, so their tools will fail when called:"
+        );
+        for m in &absent {
+            println!("  {} — {} is not here", m.purpose(), m.declared);
+        }
+        println!(
+            "Edit them in {}, or re-import an adjusted pack.",
+            target.display()
+        );
+    }
     Ok(())
 }
 
