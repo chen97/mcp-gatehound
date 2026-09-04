@@ -76,12 +76,38 @@ cargo run --release -p gatehound-app
 **`--release` matters.** A debug build loads the frontend from the Vite dev server, so
 `cargo run -p gatehound-app` on its own opens a blank window — nothing is serving
 `localhost:5173`. A release build embeds `ui/dist` instead and needs nothing else running.
-For an actual dev loop, install the Tauri CLI (`cargo install tauri-cli --version "^2"`) and
-use `cargo tauri dev`, which starts Vite for you and hot-reloads the UI.
 
 Prerequisites: macOS needs the Xcode command line tools; Windows needs the WebView2 runtime;
 Linux needs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev` and `libayatana-appindicator3-dev` (GNOME
 also needs an AppIndicator extension for the tray to appear at all).
+
+The tunnel is optional. With no Cloudflare Tunnel configured on the machine, cloudflared exits
+immediately, the log says so, and the gateway serves on loopback — which is what a development
+machine wants.
+
+#### An installable app, not just a binary
+
+`cargo build` compiles an executable. Wrapping that into a `MCP Gatehound.app` — Info.plist,
+icons, the frontend, the cloudflared sidecar — is the Tauri CLI's job, because bundling is not
+something Cargo does:
+
+```sh
+cargo install tauri-cli --version "^2"          # once
+cd crates/gatehound-app
+sh ../../scripts/fetch-cloudflared.sh           # only if the app should carry its own tunnel
+cargo tauri build
+```
+
+Output lands in `target/release/bundle/`: `macos/MCP Gatehound.app` and a `.dmg` on macOS, an
+`.msi`/`.exe` on Windows, `.deb`/`.AppImage` on Linux. Drag the `.app` to `/Applications` and
+launch it like anything else — which is the form you want for something that lives in the
+menubar and starts at login.
+
+Builds are unsigned, so the first launch is refused: right-click the app and choose **Open**,
+or `xattr -d com.apple.quarantine "/Applications/MCP Gatehound.app"`. Proper signing needs an
+Apple Developer account.
+
+For a dev loop on the UI, `cargo tauri dev` starts Vite and hot-reloads it.
 
 The tunnel is optional. With no Cloudflare Tunnel configured on the machine, cloudflared exits
 immediately, the log says so, and the gateway serves on loopback — which is what a development
