@@ -14,8 +14,34 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 DEST="$ROOT/crates/gatehound-app/binaries"
 CONF="$ROOT/crates/gatehound-app/tauri.conf.json"
 
-TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
-[ -n "$TRIPLE" ] || { echo "could not determine the host target triple" >&2; exit 1; }
+# Tauri names a sidecar with the Rust target triple, so that is what the file has to be called.
+# rustc knows it authoritatively, but this script only downloads a binary — needing a Rust
+# toolchain to do that would make it fail before you have one, which is exactly when you run it.
+if [ -n "${TRIPLE:-}" ]; then
+  :
+elif command -v rustc >/dev/null 2>&1; then
+  TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+else
+  case "$(uname -s)" in
+    Darwin) OS=apple-darwin ;;
+    Linux)  OS=unknown-linux-gnu ;;
+    MINGW*|MSYS*|CYGWIN*) OS=pc-windows-msvc ;;
+    *) OS="" ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) ARCH=aarch64 ;;
+    x86_64|amd64)  ARCH=x86_64 ;;
+    *) ARCH="" ;;
+  esac
+  [ -n "$OS" ] && [ -n "$ARCH" ] && TRIPLE="$ARCH-$OS" || TRIPLE=""
+fi
+
+if [ -z "${TRIPLE:-}" ]; then
+  echo "could not determine the host target triple from $(uname -s)/$(uname -m)" >&2
+  echo "pass it explicitly:  TRIPLE=aarch64-apple-darwin sh scripts/fetch-cloudflared.sh" >&2
+  exit 1
+fi
+echo "host target: $TRIPLE"
 
 case "$TRIPLE" in
   x86_64-apple-darwin)          ASSET=cloudflared-darwin-amd64.tgz ;;
