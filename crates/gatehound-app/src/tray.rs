@@ -109,14 +109,10 @@ pub fn refresh(app: &AppHandle) {
         let _ = tray.set_tooltip(Some(&tooltip));
         // The badge: platforms with tray text show the count next to the icon.
         #[cfg(target_os = "macos")]
-        let _ = tray.set_title(
-            if count > 0 {
-                Some(count.to_string())
-            } else {
-                None
-            },
-            true,
-        );
+        {
+            let badge = (count > 0).then(|| count.to_string());
+            let _ = tray.set_title(badge);
+        }
     }
 
     if let Some(items) = app.try_state::<TrayItems>() {

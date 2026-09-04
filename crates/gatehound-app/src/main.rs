@@ -263,9 +263,10 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // macOS: menubar only, no Dock icon.
+            // macOS: menubar only, no Dock icon. `let _` because the return type has changed
+            // between Tauri releases and this is not worth failing a build over.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let cfg = load_config()?;
             let db_path = app
