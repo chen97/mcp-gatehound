@@ -263,10 +263,10 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // macOS: menubar only, no Dock icon. `let _` because the return type has changed
-            // between Tauri releases and this is not worth failing a build over.
+            // macOS: menubar only, no Dock icon. Returns unit on `App`, so no `let _` — clippy
+            // rejects binding a unit value, and CI now compiles this path.
             #[cfg(target_os = "macos")]
-            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let cfg = load_config()?;
             let db_path = app
