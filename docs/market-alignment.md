@@ -46,7 +46,7 @@ nobody can tell what we do from the README.
 | **Audit log** | The record of every call | we call it the "request log" | **Rename in docs.** The table can stay `requests` |
 | **Interceptor / plugin / guardrail** | Middleware inspecting traffic in flight | none | Gap — see §4 |
 | **Identity propagation / passthrough auth** | Forwarding the caller's identity to the upstream | we deliberately do not | Document as a **non-goal**, not an omission |
-| **Scoped virtual key** | Per-consumer credential carrying its own permissions | one shared bearer token | Gap, and the honest framing is "single-user system" |
+| **Scoped virtual key** | Per-consumer credential carrying its own permissions | issued tokens, each authenticating as its own identity | **Adopted.** A token supplies the identity half of `(identity, tool)`; the policy that already existed supplies the rest, so this needed no second permission model |
 | **RBAC** | Permissions attached to roles | per-identity ACL, no roles | Say "per-identity policy", not RBAC. We do not have roles and should not claim them |
 
 ### Threat vocabulary
@@ -126,6 +126,7 @@ Two specifics:
 | Audit log including denials | Yes | **Yes**, with redaction and retention |
 | Per-tool rate limiting | Common | **Yes** |
 | OAuth / IdP integration | Yes | **No** — Access JWT only |
+| Per-consumer credentials with their own scope | Common | **Yes.** Issue a token per client, deny by default, revoke without touching anything else |
 | OpenTelemetry export | Increasingly expected; the 2026 spec standardises `traceparent` in `_meta` | **No.** We use `tracing` but export nothing |
 | Server catalog and self-service discovery | Yes | **Partial.** Packs make an integration portable — export it, import it elsewhere — but there is no registry to browse and nothing is installed automatically |
 | Guardrail / interceptor plugins | Emerging (Lasso, ContextForge) | **No** |

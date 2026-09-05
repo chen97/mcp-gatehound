@@ -16,6 +16,7 @@ use gatehound_core::config::{Config, Decision};
 use gatehound_core::events::{GatewayEvent, GatewayStatus};
 use gatehound_core::pack::{self, MissingFile, Pack};
 use gatehound_core::store::{IdentityRule, PendingRow, RequestLog};
+use gatehound_core::tokens::TokenInfo;
 use gatehound_core::Gateway;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -163,6 +164,136 @@ async fn set_paused(app: AppHandle, paused: bool) -> Result<(), String> {
     tray::refresh(&app);
     let _ = app.emit("gateway", serde_json::json!({ "event": "status_changed" }));
     Ok(())
+}
+
+// ---- Access tokens --------------------------------------------------------
+// The configured bearer is the super token: it authenticates as the owner and can call
+// everything. A token issued here authenticates as an identity of its own, and the policy
+// rules on the Identities screen decide what it may do — so "a token with narrower
+// permissions" is the existing mechanism, not a second one.
+
+#[derive(Serialize)]
+struct Access {
+    /// The super token, so it can be copied rather than grepped out of a file.
+    super_token: String,
+    /// The identity it authenticates as.
+    owner: String,
+    /// Where a client should point, including the scheme.
+    endpoint: String,
+    tokens: Vec<TokenInfo>,
+}
+
+#[derive(Serialize)]
+struct Issued {
+    /// Shown once. Never stored, never recoverable.
+    secret: String,
+    identity: String,
+    allowed: Vec<String>,
+}
+
+#[tauri::command]
+fn access(state: tauri::State<'_, AppState>) -> Result<Access, String> {
+    Ok(Access {
+        super_token: state
+            .gateway
+            .cfg
+            .auth
+            .bearer_token
+            .clone()
+            .unwrap_or_default(),
+        owner: state.gateway.cfg.auth.bearer_identity.clone(),
+        endpoint: format!("http://{}/mcp", state.gateway.cfg.listen_addr),
+        tokens: state.gateway.store.list_tokens().map_err(err)?,
+    })
+}
+
+/// Mint a token for one client, allowing exactly the tools chosen for it.
+#[tauri::command]
+fn issue_token(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    tools: Vec<String>,
+) -> Result<Issued, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("give the token a name, so it can be recognised later".into());
+    }
+    for tool in &tools {
+        if state.gateway.cfg.tool(tool).is_none() {
+            return Err(format!("no tool named '{tool}' is configured"));
+        }
+    }
+
+    let identity = identity_for(&name, &state);
+    let minted = gatehound_core::tokens::mint();
+    state
+        .gateway
+        .store
+        .issue_token(&minted.id, &name, &identity, &minted.digest)
+        .map_err(err)?;
+    // Issuing already wrote a deny-all rule; these are the exceptions to it.
+    for tool in &tools {
+        state
+            .gateway
+            .store
+            .set_decision(&identity, tool, Decision::Allow)
+            .map_err(err)?;
+    }
+    tracing::info!(%identity, tools = tools.len(), "issued an access token");
+    Ok(Issued {
+        secret: minted.secret,
+        identity,
+        allowed: tools,
+    })
+}
+
+#[tauri::command]
+fn revoke_token(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    if state.gateway.store.revoke_token(&id).map_err(err)? {
+        tracing::info!(token = %id, "revoked an access token");
+        Ok(())
+    } else {
+        Err("that token is already revoked, or was never issued".into())
+    }
+}
+
+/// A readable identity from the token's name, kept unique so two clients called the same thing
+/// do not silently share one set of permissions.
+fn identity_for(name: &str, state: &AppState) -> String {
+    let base: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let base = base
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let base = if base.is_empty() {
+        "client".to_string()
+    } else {
+        base
+    };
+
+    let taken: Vec<String> = state
+        .gateway
+        .store
+        .list_tokens()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| t.identity)
+        .collect();
+    if !taken.contains(&base) {
+        return base;
+    }
+    for n in 2..1000 {
+        let candidate = format!("{base}-{n}");
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{base}-{}", uuid::Uuid::new_v4().simple())
 }
 
 // ---- Packs ----------------------------------------------------------------
@@ -494,6 +625,9 @@ fn main() {
             choose_file,
             apply_pack,
             restart_app,
+            access,
+            issue_token,
+            revoke_token,
         ])
         .setup(|app| {
             // An accessory app that dies in setup leaves no Dock icon, no window and no

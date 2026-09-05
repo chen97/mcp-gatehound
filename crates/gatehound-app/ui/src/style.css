@@ -56,6 +56,16 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line
 th { color: var(--mut); font-weight: 600; position: sticky; top: 0; background: var(--bg); }
 tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--panel); }
+.secret {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  background: var(--in); border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 8px; word-break: break-all; display: inline-block; max-width: 100%;
+}
+.checks { display: grid; gap: 6px; margin-top: 10px; }
+.check { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
+.check input { margin: 0; flex: none; }
+.check .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .notice {
   margin-top: 10px; padding: 10px 12px; border-radius: 8px;
   background: var(--in); border: 1px solid var(--line);

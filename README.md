@@ -173,15 +173,38 @@ cloudflared's job.
 
 ### Two auth factors, both required
 
-1. **A Cloudflare Access JWT** (`Cf-Access-Jwt-Assertion` or the `CF_Authorization` cookie),
+1. **A bearer token.** Either the **super token** from configuration, which authenticates as
+   the owner and can call everything, or a token **issued** to one client, which authenticates
+   as an identity of its own. Both are compared in constant time.
+2. **A Cloudflare Access JWT** (`Cf-Access-Jwt-Assertion` or the `CF_Authorization` cookie),
    verified RS256 against the team's JWKS — cached an hour, refetched on an unknown `kid` —
    with `aud`, `iss` and expiry checked and 30s of leeway.
-2. **A shared bearer token**, compared in constant time.
-
 A misrouted or misconfigured tunnel therefore still yields nothing. Access issues human logins
 with an `email` claim and **service tokens with `common_name` instead**; both are handled, and
 the identity string is derived `email` → `common_name` → `sub`. That string is what policy and
 the log key off.
+
+### Tokens, and telling one client from another
+
+A shared secret makes every caller the same caller. Issue a token per client instead — in the
+app's **Access** screen, or `gatehound-headless token issue "Claude Desktop" read_note` — and
+each one authenticates as its own identity, which is what the policy below already decides
+against. There is no second permission model: a token is just the half of `(identity, tool)`
+that was previously fixed.
+
+- **A new token can do nothing.** Issuing writes a deny-all rule, so it sees an empty
+  `tools/list` until you grant something. A token that arrived with access to everything would
+  be an audit label, not a permission boundary.
+- **The secret is shown once.** Only a SHA-256 digest is stored, so a copy of the database
+  yields no working credential, and a lost token is replaced rather than recovered.
+- **Revoking takes effect on the next request** and keeps the row — the audit log names the
+  identity, and deleting it would orphan every entry that mentions it.
+- **A token that looks like ours but is unknown, revoked or wrong is refused**, never quietly
+  compared against the super token instead.
+
+Behind Cloudflare Access the issued identity wins, which is what lets one service token front
+the tunnel while many issued tokens distinguish the clients behind it. Access stays a gate that
+must still pass.
 
 ### Tool filtering, and what a caller can see
 

@@ -62,6 +62,28 @@ interface ApplyResult {
   missing_env: string[];
 }
 
+interface TokenInfo {
+  id: string;
+  name: string;
+  identity: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+interface Access {
+  super_token: string;
+  owner: string;
+  endpoint: string;
+  tokens: TokenInfo[];
+}
+
+interface Issued {
+  secret: string;
+  identity: string;
+  allowed: string[];
+}
+
 interface Pending {
   id: string;
   ts: string;
@@ -568,6 +590,176 @@ async function renderIdentities(snap: Snapshot): Promise<void> {
   });
 }
 
+// ---- Access ----------------------------------------------------------------
+// The super token can call everything. An issued token authenticates as an identity of its
+// own, and the rules on Identities decide what it may do — so this screen mints and revokes,
+// and permissions live where permissions already live.
+
+// A freshly issued secret, held only until the operator dismisses it. It cannot be recovered
+// afterwards, so it is never re-fetched and never stored.
+let justIssued: Issued | null = null;
+let revealSuper = false;
+
+async function copy(text: string, button: HTMLElement): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    const was = button.textContent;
+    button.textContent = "Copied";
+    setTimeout(() => (button.textContent = was), 1200);
+  } catch {
+    alert("Could not reach the clipboard. Select the text and copy it by hand.");
+  }
+}
+
+function tokenRow(t: TokenInfo): string {
+  const state = t.revoked_at
+    ? `<span class="pill error">revoked</span>`
+    : `<span class="pill ok">active</span>`;
+  return `<tr>
+    <td><code>ghd_${esc(t.id)}…</code></td>
+    <td>${esc(t.name)}</td>
+    <td><code>${esc(t.identity)}</code></td>
+    <td class="meta">${t.last_used_at ? when(t.last_used_at) : "never used"}</td>
+    <td>${state}</td>
+    <td>${
+      t.revoked_at
+        ? ""
+        : `<button class="ghost revoke" data-id="${esc(t.id)}" data-name="${esc(t.name)}">Revoke</button>`
+    }</td>
+  </tr>`;
+}
+
+async function renderAccess(snap: Snapshot): Promise<void> {
+  const a = await invoke<Access>("access");
+
+  const issuedPanel = justIssued
+    ? `<div class="card">
+         <h3>Token issued</h3>
+         <div class="notice warn">
+           <strong>Copy it now — this is the only time it is shown.</strong>
+           <div class="meta">
+             Only a digest is stored, so it cannot be recovered. If it is lost, revoke it and
+             issue another.
+           </div>
+         </div>
+         <div class="row">
+           <code id="new-secret" class="secret">${esc(justIssued.secret)}</code>
+           <button id="copy-new" class="primary">Copy</button>
+         </div>
+         <div class="meta" style="margin-top:8px">
+           Authenticates as <code>${esc(justIssued.identity)}</code>.
+           ${
+             justIssued.allowed.length
+               ? `It may call ${justIssued.allowed.map((t) => `<code>${esc(t)}</code>`).join(", ")}.`
+               : `It can call nothing yet — grant tools on the Identities screen.`
+           }
+         </div>
+         <div class="row"><button id="dismiss-new" class="ghost">Done</button></div>
+       </div>`
+    : "";
+
+  const toolChecks = snap.tools.length
+    ? snap.tools
+        .map(
+          (t) => `<label class="check">
+            <input type="checkbox" class="grant" value="${esc(t.name)}" />
+            <code>${esc(t.name)}</code>
+            <span class="meta">${esc(t.description)}</span>
+          </label>`,
+        )
+        .join("")
+    : `<div class="meta">No tools are configured yet. Import a pack first, then issue tokens for it.</div>`;
+
+  $("#access").innerHTML =
+    issuedPanel +
+    `
+    <div class="card">
+      <h3>This gateway</h3>
+      <table><tbody>
+        <tr><td class="meta">Endpoint</td><td><code>${esc(a.endpoint)}</code></td></tr>
+        <tr>
+          <td class="meta">Super token</td>
+          <td>
+            <code class="secret">${revealSuper ? esc(a.super_token) : "•".repeat(24)}</code>
+            <button id="reveal" class="ghost">${revealSuper ? "Hide" : "Reveal"}</button>
+            <button id="copy-super" class="ghost">Copy</button>
+          </td>
+        </tr>
+        <tr><td class="meta">Authenticates as</td><td><code>${esc(a.owner)}</code></td></tr>
+      </tbody></table>
+      <div class="meta" style="margin-top:8px">
+        The super token can call every tool. Give a client its own token instead, so you can see
+        what it did and take it away without changing anything else.
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Issue a token</h3>
+      <div class="meta">
+        A new token starts able to do nothing. Tick what this client may call; you can change it
+        later on Identities.
+      </div>
+      <div class="row">
+        <input id="token-name" type="text" placeholder="What is it for? e.g. Claude Desktop" />
+        <button id="issue" class="primary">Issue</button>
+      </div>
+      <div class="checks">${toolChecks}</div>
+    </div>
+
+    <div class="card">
+      <h3>Issued tokens</h3>
+      ${
+        a.tokens.length
+          ? `<table>
+               <thead><tr><th>Token</th><th>Name</th><th>Identity</th><th>Last used</th><th></th><th></th></tr></thead>
+               <tbody>${a.tokens.map(tokenRow).join("")}</tbody>
+             </table>`
+          : `<div class="meta">None yet. Only the super token can reach this gateway.</div>`
+      }
+    </div>`;
+
+  $("#reveal")?.addEventListener("click", () => {
+    revealSuper = !revealSuper;
+    void refresh();
+  });
+  $("#copy-super")?.addEventListener("click", (e) =>
+    copy(a.super_token, e.currentTarget as HTMLElement),
+  );
+  $("#copy-new")?.addEventListener("click", (e) => {
+    if (justIssued) void copy(justIssued.secret, e.currentTarget as HTMLElement);
+  });
+  $("#dismiss-new")?.addEventListener("click", () => {
+    justIssued = null;
+    void refresh();
+  });
+
+  $("#issue")?.addEventListener("click", async () => {
+    const name = ($("#token-name") as HTMLInputElement).value;
+    const tools = Array.from(
+      document.querySelectorAll<HTMLInputElement>(".grant:checked"),
+    ).map((c) => c.value);
+    try {
+      justIssued = await invoke<Issued>("issue_token", { name, tools });
+    } catch (e) {
+      alert(String(e));
+      return;
+    }
+    await refresh();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>(".revoke").forEach((b) => {
+    b.addEventListener("click", async () => {
+      if (!confirm(`Revoke "${b.dataset.name}"? Its next request is refused.`)) return;
+      try {
+        await invoke("revoke_token", { id: b.dataset.id });
+      } catch (e) {
+        alert(String(e));
+      }
+      await refresh();
+    });
+  });
+}
+
 // ---- wiring ----------------------------------------------------------------
 
 function show(next: string): void {
@@ -590,6 +782,7 @@ async function refresh(): Promise<void> {
     else if (screen === "log") await renderLog();
     else if (screen === "actions") await renderActions(snap);
     else if (screen === "identities") await renderIdentities(snap);
+    else if (screen === "access") await renderAccess(snap);
   } catch (e) {
     console.error(e);
   } finally {
