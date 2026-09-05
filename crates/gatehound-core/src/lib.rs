@@ -17,6 +17,7 @@ pub mod policy;
 pub mod protocol;
 pub mod redact;
 pub mod store;
+pub mod tokens;
 pub mod upstreams;
 
 use crate::actions::ActionEngine;
@@ -88,7 +89,7 @@ impl Gateway {
 
         let cfg = Arc::new(cfg);
         let events = EventBus::new();
-        let auth = Arc::new(Authenticator::new(&cfg.auth)?);
+        let auth = Arc::new(Authenticator::new(&cfg.auth)?.with_tokens(store.clone()));
         let policy = Arc::new(Policy::new(store.clone()));
         let approvals = Arc::new(ApprovalQueue::new(
             store.clone(),

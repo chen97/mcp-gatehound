@@ -10,10 +10,12 @@
 //! key off.
 
 use crate::config::AuthConfig;
+use crate::store::Store;
 use anyhow::{anyhow, Context, Result};
 use axum::http::{header, HeaderMap};
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -212,6 +214,8 @@ pub struct Authenticator {
     bearer_identity: String,
     allowed: Vec<String>,
     access: Option<CfAccessVerifier>,
+    /// Where issued tokens live. Absent in unit tests that only exercise the super token.
+    tokens: Option<Arc<Store>>,
 }
 
 impl Authenticator {
@@ -226,6 +230,7 @@ impl Authenticator {
         };
         Ok(Self {
             bearer,
+            tokens: None,
             bearer_identity: cfg.bearer_identity.clone(),
             allowed: cfg
                 .allowed_identities
@@ -235,6 +240,12 @@ impl Authenticator {
                 .collect(),
             access,
         })
+    }
+
+    /// Give the authenticator the store that holds issued tokens.
+    pub fn with_tokens(mut self, store: Arc<Store>) -> Self {
+        self.tokens = Some(store);
+        self
     }
 
     pub fn access_required(&self) -> bool {
@@ -254,13 +265,19 @@ impl Authenticator {
         let Some(token) = bearer(headers) else {
             return Err(AuthError::MissingBearer);
         };
-        if !eq_secret(&token, &self.bearer) {
+
+        // Two kinds of bearer are accepted: the super token from configuration, which
+        // authenticates as the owner, and a token issued at runtime, which authenticates as
+        // whatever identity it was issued for. Everything after this point is the same for
+        // both — the identity is what policy, the approval queue and the log all key off.
+        let issued = self.resolve_issued(&token)?;
+        if issued.is_none() && !eq_secret(&token, &self.bearer) {
             return Err(AuthError::BadBearer);
         }
 
         let Some(verifier) = self.access.as_ref() else {
             // No Access configured: loopback development. The bearer alone got us here.
-            return Ok(self.bearer_identity.clone());
+            return Ok(issued.unwrap_or_else(|| self.bearer_identity.clone()));
         };
 
         let Some(jwt) = access_token(headers) else {
@@ -279,7 +296,38 @@ impl Authenticator {
         {
             return Err(AuthError::NotAllowed(identity));
         }
-        Ok(identity)
+
+        // An issued token names the caller more precisely than the Access JWT does: one
+        // service token can front the tunnel while many issued tokens distinguish the clients
+        // behind it. Access stays a gate that had to pass; it is no longer the only source of
+        // identity once a caller has a token of its own.
+        Ok(issued.unwrap_or(identity))
+    }
+
+    /// The identity behind a presented token, or `None` when it is not an issued token at all.
+    /// A token that looks like ours but is unknown, revoked or wrong is an error, never a
+    /// fallthrough to the super-token comparison.
+    fn resolve_issued(&self, presented: &str) -> Result<Option<String>, AuthError> {
+        let Some((id, secret)) = crate::tokens::split(presented) else {
+            return Ok(None);
+        };
+        let Some(store) = self.tokens.as_ref() else {
+            return Err(AuthError::BadBearer);
+        };
+        let Some((digest, identity)) = store.active_token(id).map_err(|e| {
+            tracing::warn!(error = %e, "could not read the token store");
+            AuthError::BadBearer
+        })?
+        else {
+            return Err(AuthError::BadBearer);
+        };
+        if !crate::tokens::matches(secret, &digest) {
+            return Err(AuthError::BadBearer);
+        }
+        if let Err(e) = store.touch_token(id) {
+            tracing::warn!(error = %e, "could not record token use");
+        }
+        Ok(Some(identity))
     }
 }
 
@@ -475,6 +523,176 @@ mod tests {
             h.insert("cf-access-jwt-assertion", j.parse().unwrap());
         }
         h
+    }
+
+    // ---- issued tokens -----------------------------------------------------
+
+    fn with_store() -> (Authenticator, Arc<Store>) {
+        let store = Arc::new(Store::open_memory().unwrap());
+        let a = Authenticator::new(&cfg(false))
+            .unwrap()
+            .with_tokens(store.clone());
+        (a, store)
+    }
+
+    #[tokio::test]
+    async fn an_issued_token_authenticates_as_its_own_identity() {
+        let (a, store) = with_store();
+        let minted = crate::tokens::mint();
+        store
+            .issue_token(
+                &minted.id,
+                "Claude Desktop",
+                "claude-desktop",
+                &minted.digest,
+            )
+            .unwrap();
+
+        assert_eq!(
+            a.authenticate(&headers(Some(&minted.secret), None))
+                .await
+                .unwrap(),
+            "claude-desktop"
+        );
+        // The super token still works, and is still the owner.
+        assert_eq!(
+            a.authenticate(&headers(Some("0123456789abcdef0123"), None))
+                .await
+                .unwrap(),
+            "bearer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_token_can_do_nothing_until_something_is_allowed() {
+        // Issuing writes a deny-all rule, so the token authenticates but sees no tools. A
+        // token that arrived with access to everything would be an audit label, not a
+        // permission boundary.
+        let (_, store) = with_store();
+        let minted = crate::tokens::mint();
+        store
+            .issue_token(&minted.id, "Some client", "some-client", &minted.digest)
+            .unwrap();
+
+        let policy = crate::policy::Policy::new(store.clone());
+        assert_eq!(
+            policy.resolve("some-client", "anything"),
+            crate::config::Decision::Deny
+        );
+        store
+            .set_decision("some-client", "read_note", crate::config::Decision::Allow)
+            .unwrap();
+        assert_eq!(
+            policy.resolve("some-client", "read_note"),
+            crate::config::Decision::Allow
+        );
+        assert_eq!(
+            policy.resolve("some-client", "send_message"),
+            crate::config::Decision::Deny,
+            "granting one tool must not grant the rest"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revoked_token_stops_working_immediately() {
+        let (a, store) = with_store();
+        let minted = crate::tokens::mint();
+        store
+            .issue_token(&minted.id, "Retired", "retired", &minted.digest)
+            .unwrap();
+        assert!(a
+            .authenticate(&headers(Some(&minted.secret), None))
+            .await
+            .is_ok());
+
+        assert!(store.revoke_token(&minted.id).unwrap());
+        assert!(matches!(
+            a.authenticate(&headers(Some(&minted.secret), None)).await,
+            Err(AuthError::BadBearer)
+        ));
+        assert!(
+            !store.revoke_token(&minted.id).unwrap(),
+            "revoking twice is not a second revocation"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_or_tampered_token_is_refused_rather_than_falling_through() {
+        let (a, store) = with_store();
+        let minted = crate::tokens::mint();
+        store
+            .issue_token(&minted.id, "Real", "real", &minted.digest)
+            .unwrap();
+
+        // A well-formed token for an id nobody issued.
+        let stranger = crate::tokens::mint();
+        assert!(matches!(
+            a.authenticate(&headers(Some(&stranger.secret), None)).await,
+            Err(AuthError::BadBearer)
+        ));
+
+        // The right id with the wrong secret must not be accepted, and must not fall back to
+        // being compared against the super token either.
+        let (id, _) = crate::tokens::split(&minted.secret).unwrap();
+        let forged = format!("{}{id}_{}", crate::tokens::PREFIX, "0".repeat(64));
+        assert!(matches!(
+            a.authenticate(&headers(Some(&forged), None)).await,
+            Err(AuthError::BadBearer)
+        ));
+    }
+
+    #[tokio::test]
+    async fn using_a_token_records_that_it_was_used() {
+        let (a, store) = with_store();
+        let minted = crate::tokens::mint();
+        store
+            .issue_token(&minted.id, "Watched", "watched", &minted.digest)
+            .unwrap();
+
+        let before = store.list_tokens().unwrap().pop().unwrap();
+        assert!(before.last_used_at.is_none());
+        assert!(before.active());
+        assert_eq!(before.display(), format!("ghd_{}…", minted.id));
+
+        a.authenticate(&headers(Some(&minted.secret), None))
+            .await
+            .unwrap();
+        let after = store.list_tokens().unwrap().pop().unwrap();
+        assert!(
+            after.last_used_at.is_some(),
+            "a stale token must be visible as stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_issued_token_names_the_caller_even_behind_access() {
+        // One Access service token can front the tunnel while issued tokens distinguish the
+        // clients behind it, so the issued identity wins — but Access must still have passed.
+        let store = Arc::new(Store::open_memory().unwrap());
+        let mut a = Authenticator::new(&cfg(true))
+            .unwrap()
+            .with_tokens(store.clone());
+        a.access = Some(verifier().await);
+
+        let minted = crate::tokens::mint();
+        store
+            .issue_token(&minted.id, "Worker", "edge-worker", &minted.digest)
+            .unwrap();
+
+        // Without the JWT the issued token is not enough.
+        assert!(matches!(
+            a.authenticate(&headers(Some(&minted.secret), None)).await,
+            Err(AuthError::MissingAccessToken)
+        ));
+
+        let jwt = sign("aud123", ISS, Some("me@example.com"), None, None, 600);
+        assert_eq!(
+            a.authenticate(&headers(Some(&minted.secret), Some(&jwt)))
+                .await
+                .unwrap(),
+            "edge-worker",
+            "the token names the client more precisely than the shared Access identity"
+        );
     }
 
     #[tokio::test]

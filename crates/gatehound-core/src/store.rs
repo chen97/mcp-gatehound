@@ -3,6 +3,7 @@
 //! Bundled SQLite (no system dependency). WAL so the GUI can read while the listener writes.
 
 use crate::config::Decision;
+use crate::tokens::TokenInfo;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -57,6 +58,19 @@ CREATE TABLE IF NOT EXISTS sends (
   -- "still in flight" on the next attempt with the same key.
   completed_at TEXT,
   response_json TEXT
+);
+
+-- Tokens issued at runtime. The secret is never here: only a digest of it, so a copy of this
+-- file yields no working credential. `identity` is what the token authenticates as, which is
+-- how one token can be allowed more or less than another under the policy that already exists.
+CREATE TABLE IF NOT EXISTS tokens (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  identity TEXT NOT NULL,
+  digest TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
@@ -273,6 +287,80 @@ impl Store {
             return Ok(Some(d));
         }
         lookup("*")
+    }
+
+    // ---- issued tokens ----------------------------------------------------
+
+    /// Record a newly minted token. The caller holds the secret; this only ever sees a digest.
+    ///
+    /// A token starts denied: the `(identity, "*")` deny rule means it sees an empty
+    /// `tools/list` until something is explicitly allowed. Granting is a separate, deliberate
+    /// act — which is the whole reason to issue a token instead of handing out the super one.
+    pub fn issue_token(&self, id: &str, name: &str, identity: &str, digest: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO tokens(id, name, identity, digest, created_at) VALUES (?1,?2,?3,?4,?5)",
+            params![id, name, identity, digest, now()],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO identities(identity, tool, decision, created_at, updated_at)
+             VALUES (?1, '*', 'deny', ?2, ?2)",
+            params![identity, now()],
+        )?;
+        Ok(())
+    }
+
+    /// The digest and identity behind a token id, for the authenticator to check against.
+    /// A revoked token is not returned at all, so revocation takes effect on the next request.
+    pub fn active_token(&self, id: &str) -> Result<Option<(String, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT digest, identity FROM tokens WHERE id = ?1 AND revoked_at IS NULL")?;
+        let mut rows = stmt.query(params![id])?;
+        match rows.next()? {
+            Some(r) => Ok(Some((r.get(0)?, r.get(1)?))),
+            None => Ok(None),
+        }
+    }
+
+    /// Note that a token was just used, so a stale one is visible as such in the app.
+    pub fn touch_token(&self, id: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tokens SET last_used_at = ?2 WHERE id = ?1",
+            params![id, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_tokens(&self) -> Result<Vec<TokenInfo>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, identity, created_at, last_used_at, revoked_at
+             FROM tokens ORDER BY revoked_at IS NOT NULL, created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(TokenInfo {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                identity: r.get(2)?,
+                created_at: r.get(3)?,
+                last_used_at: r.get(4)?,
+                revoked_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Revoke, keeping the row: the audit log names the identity, and a deleted token would
+    /// leave those entries pointing at something nobody can identify afterwards.
+    pub fn revoke_token(&self, id: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE tokens SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
+            params![id, now()],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn set_decision(&self, identity: &str, tool: &str, decision: Decision) -> Result<()> {

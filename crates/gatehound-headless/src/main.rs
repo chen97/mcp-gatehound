@@ -11,6 +11,7 @@
 //!   gatehound-headless deny  <id> [tool]  persist a deny rule
 //!   gatehound-headless import <pack.toml> merge a pack of upstreams and tools into the config
 //!   gatehound-headless export <name>      write the current setup out as a pack
+//!   gatehound-headless token <sub>        issue, list or revoke an access token
 //!
 //! Options:
 //!   --config <path>     gatehound.toml (default: ./gatehound.toml when it exists)
@@ -26,6 +27,7 @@ use gatehound_core::approval::Resolution;
 use gatehound_core::config::{Config, Decision};
 use gatehound_core::events::GatewayEvent;
 use gatehound_core::pack::{self, Pack};
+use gatehound_core::tokens;
 use gatehound_core::{default_db_path, Gateway};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -92,7 +94,10 @@ fn print_help() {
          allow <identity> [tool]   persist an allow rule (tool defaults to *)\n  \
          deny  <identity> [tool]   persist a deny rule\n  \
          import <pack.toml>        merge a pack of upstreams and tools into the config\n  \
-         export <name>             write the current setup out as a pack\n\n\
+         export <name>             write the current setup out as a pack\n  \
+         token issue <name> [tools]  mint a token; tools it may call, or none\n  \
+         token list                list issued tokens\n  \
+         token revoke <id>         stop a token working\n\n\
          OPTIONS\n  \
          --config <path>           gatehound.toml\n  \
          --db <path>               database file\n  \
@@ -147,6 +152,7 @@ async fn main() -> Result<()> {
         "identities" => identities(cfg, db_path),
         "allow" => set_rule(cfg, db_path, &args.rest, Decision::Allow),
         "deny" => set_rule(cfg, db_path, &args.rest, Decision::Deny),
+        "token" => token(cfg, db_path, &args.rest),
         "import" => import_pack(cfg, &args),
         "export" => export_pack(cfg, &args),
         other => {
@@ -330,6 +336,119 @@ fn set_rule(
     gateway.set_identity(identity, tool, decision)?;
     println!("{identity} → {tool}: {}", decision.as_str());
     Ok(())
+}
+
+/// Issue, list and revoke the tokens that let a specific client in.
+///
+/// A token carries an identity, and the identity is what the existing policy decides against —
+/// so "a token with narrower permissions" needs no separate permission model. Issuing writes a
+/// deny-all rule for the new identity, and each tool named on the command line is allowed
+/// explicitly, which means a token is never live with access nobody chose.
+fn token(cfg: Config, db_path: Option<PathBuf>, rest: &[String]) -> Result<()> {
+    let gateway = Gateway::build(cfg, db_path)?;
+    match rest.first().map(String::as_str) {
+        Some("issue") => {
+            let Some(name) = rest.get(1) else {
+                bail!("usage: gatehound-headless token issue <name> [tool ...]");
+            };
+            let tools = &rest[2.min(rest.len())..];
+            for tool in tools {
+                if gateway.cfg.tool(tool).is_none() {
+                    bail!("no tool named '{tool}' is configured");
+                }
+            }
+            // An identity derived from the name, so the audit log reads as the thing rather
+            // than as an opaque id.
+            let identity = slug(name);
+            let minted = tokens::mint();
+            gateway
+                .store
+                .issue_token(&minted.id, name, &identity, &minted.digest)?;
+            for tool in tools {
+                gateway
+                    .store
+                    .set_decision(&identity, tool, Decision::Allow)?;
+            }
+
+            println!("issued '{name}' as identity '{identity}'\n");
+            println!("  {}\n", minted.secret);
+            println!("This is the only time it is shown. Only a digest of it is stored, so it");
+            println!("cannot be recovered — issue another if it is lost.\n");
+            if tools.is_empty() {
+                println!("It can call nothing yet. Allow tools with:");
+                println!("  gatehound-headless allow {identity} <tool>");
+            } else {
+                println!("It may call: {}", tools.join(", "));
+            }
+            Ok(())
+        }
+        Some("list") => {
+            let rows = gateway.store.list_tokens()?;
+            if rows.is_empty() {
+                println!("No tokens issued. The configured bearer token is the only way in.");
+                return Ok(());
+            }
+            println!(
+                "{:<18} {:<22} {:<20} {:<20} STATE",
+                "TOKEN", "NAME", "IDENTITY", "LAST USED"
+            );
+            for t in rows {
+                println!(
+                    "{:<18} {:<22} {:<20} {:<20} {}",
+                    t.display(),
+                    t.name,
+                    t.identity,
+                    t.last_used_at.as_deref().unwrap_or("never"),
+                    match &t.revoked_at {
+                        Some(when) => format!("revoked {when}"),
+                        None => "active".to_string(),
+                    }
+                );
+            }
+            Ok(())
+        }
+        Some("revoke") => {
+            let Some(id) = rest.get(1) else {
+                bail!("usage: gatehound-headless token revoke <id>");
+            };
+            // Accept what `list` prints as well as the bare id.
+            let id = id
+                .trim_start_matches(tokens::PREFIX)
+                .trim_end_matches('…')
+                .split('_')
+                .next()
+                .unwrap_or(id);
+            if gateway.store.revoke_token(id)? {
+                println!("revoked {}{id}", tokens::PREFIX);
+                println!("Its policy rules are left in place, and the audit log still names it.");
+            } else {
+                bail!("no active token with id '{id}'");
+            }
+            Ok(())
+        }
+        _ => bail!("usage: gatehound-headless token <issue|list|revoke> ..."),
+    }
+}
+
+/// A readable identity from a token's name: what the audit log and the Identities screen show.
+fn slug(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    let collapsed = s
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if collapsed.is_empty() {
+        format!("token-{}", uuid::Uuid::new_v4().simple())
+    } else {
+        collapsed
+    }
 }
 
 /// Merge a pack into `gatehound.toml`. Refuses on a collision unless `--replace` is given, so
