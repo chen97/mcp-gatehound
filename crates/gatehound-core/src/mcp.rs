@@ -45,14 +45,16 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+/// Unauthenticated on purpose, so a tunnel or a load balancer can probe it — which is exactly
+/// why it says as little as possible. What this gateway fronts, which auth factors are on and
+/// how long it has been up are all useful to somebody deciding whether to keep attacking it,
+/// and none of it is useful to a health check. An authenticated caller gets the full picture
+/// from `server/discover`.
 async fn version(State(gw): State<Arc<Gateway>>) -> Json<Value> {
     Json(json!({
         "name": gw.cfg.server_name,
         "version": env!("CARGO_PKG_VERSION"),
         "protocol_versions": protocol::all_versions(),
-        "auth": gw.auth.label(),
-        "upstreams": gw.engine.upstreams().names(),
-        "started_at": gw.started_at.to_rfc3339(),
     }))
 }
 

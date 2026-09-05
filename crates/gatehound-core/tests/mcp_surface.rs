@@ -207,6 +207,33 @@ impl Drop for Harness {
 }
 
 #[tokio::test]
+async fn the_unauthenticated_endpoints_give_nothing_away() {
+    // /healthz and /version answer without credentials so a tunnel or a load balancer can
+    // probe them. Anything they disclose is disclosed to whoever reaches the hostname, so
+    // what this gateway fronts and which auth factors are on must not be in there.
+    let h = start(allow_all("bearer")).await;
+
+    let health = reqwest::get(format!("{}/healthz", h.base)).await.unwrap();
+    assert_eq!(health.status(), 200);
+    assert_eq!(health.text().await.unwrap(), "ok");
+
+    let body: serde_json::Value = reqwest::get(format!("{}/version", h.base))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body["name"].is_string());
+    assert!(body["protocol_versions"].is_array());
+    for leaked in ["upstreams", "auth", "started_at"] {
+        assert!(
+            body.get(leaked).is_none(),
+            "/version must not disclose {leaked} to an unauthenticated caller: {body}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn healthz_and_version_answer_without_a_token() {
     let h = start(allow_all("bearer")).await;
     let ok = h
