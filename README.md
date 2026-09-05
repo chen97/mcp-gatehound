@@ -283,9 +283,16 @@ re-reads whenever the core pushes an event.
 ## Configuration
 
 `gatehound.toml` plus environment overrides — see [`gatehound.example.toml`](gatehound.example.toml)
-and [`.env.example`](.env.example). Credentials are read from the environment only, so the
-config file stays safe to keep in version control: each upstream names the variable that
+and [`.env.example`](.env.example). Upstream credentials are read from the environment only, so
+the config file stays safe to keep in version control: each upstream names the variable that
 carries its own via `token_env`.
+
+The desktop app writes a configuration on its first run — with a bearer token of its own, since
+a double-clicked app inherits none of a shell's environment and would otherwise have nothing to
+authenticate callers with. It lands in the per-user config directory (`~/Library/Application
+Support/MCP Gatehound/gatehound.toml` on macOS), has no upstreams or tools until you import a
+pack, and the log line on startup says where it went. Read the token out of it when a client
+needs to present it. Setting `GATEHOUND_TOKEN` still wins if you prefer to supply your own.
 
 Environment keys: `GATEHOUND_TOKEN`, `LISTEN_ADDR`, `DB_PATH`, `APPROVAL_TIMEOUT_SECS`,
 `LOG_RETENTION_DAYS`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `ALLOWED_EMAILS`,

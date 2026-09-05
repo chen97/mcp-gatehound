@@ -459,6 +459,23 @@ impl Config {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_freshly_generated_configuration_writes_and_reads_back() {
+        // The desktop app writes one of these on first run, because a double-clicked app
+        // inherits no shell environment and would otherwise have no bearer token at all.
+        // If what it writes did not parse back, the app would start once and never again.
+        let mut cfg = Config::default();
+        cfg.auth.bearer_token = Some("0123456789abcdef0123456789abcdef".into());
+        cfg.validate().expect("a generated config must be valid");
+
+        let body = toml::to_string_pretty(&cfg).expect("serializing");
+        let round: Config = toml::from_str(&body).expect("what we write must parse back");
+        round.validate().expect("and must still be valid");
+        assert_eq!(round.auth.bearer_token, cfg.auth.bearer_token);
+        assert_eq!(round.listen_addr, cfg.listen_addr);
+        assert!(round.tools.is_empty() && round.upstreams.is_empty());
+    }
+
     fn sample() -> &'static str {
         r#"
 listen_addr = "127.0.0.1:9999"

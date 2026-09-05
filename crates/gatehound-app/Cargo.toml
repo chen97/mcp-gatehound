@@ -32,6 +32,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
 toml.workspace = true
+uuid.workspace = true
 
 anyhow.workspace = true
 dotenvy.workspace = true

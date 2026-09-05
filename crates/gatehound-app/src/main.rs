@@ -414,6 +414,48 @@ pub fn show_window(app: &AppHandle) {
 
 // ---- entry point ----------------------------------------------------------
 
+/// Everything that can fail while bringing the app up. Split out so a failure can be reported
+/// rather than ending the process without a word.
+fn setup_app(app: &mut tauri::App) -> Result<()> {
+    let handle = app.handle().clone();
+
+    // macOS: menubar only, no Dock icon. Returns unit on `App`, so no `let _` — clippy
+    // rejects binding a unit value, and CI now compiles this path.
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+    let (cfg, config_path) = load_config()?;
+    let db_path = app
+        .path()
+        .app_data_dir()
+        .context("no application data directory")?
+        .join("gatehound.db");
+    let gateway = Gateway::build(cfg, Some(db_path))?;
+
+    app.manage(AppState {
+        gateway,
+        listener: Mutex::new(None),
+        sidecar: sidecar::Sidecar::new(),
+        config_path,
+    });
+
+    tray::build(&handle)?;
+    forward_events(&handle);
+    start_listener(&handle)?;
+
+    // cloudflared publishes the loopback listener. It is started with the app and
+    // killed explicitly on exit — never orphaned.
+    let state = handle.state::<AppState>();
+    state.sidecar.start(&handle);
+
+    // `--hidden` is what the autostart entry passes: come up in the tray, silently.
+    let hidden = std::env::args().any(|a| a == "--hidden");
+    if !hidden {
+        show_window(&handle);
+    }
+    Ok(())
+}
+
 fn main() {
     let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()
@@ -454,41 +496,22 @@ fn main() {
             restart_app,
         ])
         .setup(|app| {
-            let handle = app.handle().clone();
-
-            // macOS: menubar only, no Dock icon. Returns unit on `App`, so no `let _` — clippy
-            // rejects binding a unit value, and CI now compiles this path.
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
-            let (cfg, config_path) = load_config()?;
-            let db_path = app
-                .path()
-                .app_data_dir()
-                .context("no application data directory")?
-                .join("gatehound.db");
-            let gateway = Gateway::build(cfg, Some(db_path))?;
-
-            app.manage(AppState {
-                gateway,
-                listener: Mutex::new(None),
-                sidecar: sidecar::Sidecar::new(),
-                config_path,
-            });
-
-            tray::build(&handle)?;
-            forward_events(&handle);
-            start_listener(&handle)?;
-
-            // cloudflared publishes the loopback listener. It is started with the app and
-            // killed explicitly on exit — never orphaned.
-            let state = handle.state::<AppState>();
-            state.sidecar.start(&handle);
-
-            // `--hidden` is what the autostart entry passes: come up in the tray, silently.
-            let hidden = std::env::args().any(|a| a == "--hidden");
-            if !hidden {
-                show_window(&handle);
+            // An accessory app that dies in setup leaves no Dock icon, no window and no
+            // message: double-clicking it simply does nothing. Say what went wrong instead.
+            if let Err(e) = setup_app(app) {
+                let message = format!("{e:#}");
+                tracing::error!(error = %message, "startup failed");
+                let handle = app.handle().clone();
+                // The dialog must not block the main thread before the event loop runs, so it
+                // gets its own; the process ends when the operator dismisses it.
+                std::thread::spawn(move || {
+                    handle
+                        .dialog()
+                        .message(message)
+                        .title("MCP Gatehound could not start")
+                        .blocking_show();
+                    std::process::exit(1);
+                });
             }
             Ok(())
         })
@@ -553,11 +576,39 @@ fn load_config() -> Result<(Config, PathBuf)> {
     let target = dirs_config()
         .map(|d| d.join("MCP Gatehound").join("gatehound.toml"))
         .unwrap_or_else(|| PathBuf::from("gatehound.toml"));
+
+    // First run. A double-clicked app inherits none of a shell's environment, so requiring
+    // GATEHOUND_TOKEN to be exported would mean the app can only ever start from a terminal.
+    // Write a configuration with a token of its own instead, and say where it went.
+    let mut cfg = Config::default();
+    cfg.apply_env();
+    let generated = cfg.auth.bearer_token.as_deref().unwrap_or("").len() < 16;
+    if generated {
+        cfg.auth.bearer_token = Some(new_bearer_token());
+    }
+    cfg.validate()?;
+
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let body = toml::to_string_pretty(&cfg).context("serializing the new configuration")?;
+    std::fs::write(&target, body).with_context(|| format!("writing {}", target.display()))?;
     tracing::info!(
-        will_write = %target.display(),
-        "no gatehound.toml found; using defaults plus the environment"
+        config = %target.display(),
+        generated_token = generated,
+        "first run: wrote a configuration. It has no upstreams or tools yet — import a pack \
+         from Upstreams & actions."
     );
-    Ok((Config::load(None)?, target))
+    Ok((cfg, target))
+}
+
+/// A bearer token for a first run: 64 hex characters, the same shape as `openssl rand -hex 32`.
+fn new_bearer_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
 }
 
 fn dirs_config() -> Option<std::path::PathBuf> {
