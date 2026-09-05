@@ -77,20 +77,23 @@ case "$ASSET" in
 esac
 chmod +x "$OUT"
 
-# Tauri resolves a sidecar by stripping the target triple, so the config names the stem only.
-if ! grep -q '"externalBin"' "$CONF"; then
-  python3 - "$CONF" <<'PY'
-import json, sys
-path = sys.argv[1]
-with open(path) as fh:
-    cfg = json.load(fh)
-cfg["bundle"]["externalBin"] = ["binaries/cloudflared"]
-with open(path, "w") as fh:
-    json.dump(cfg, fh, indent=2)
-    fh.write("\n")
-print("enabled externalBin in", path)
-PY
-fi
+# Tauri resolves a sidecar by stripping the target triple, so the overlay names the stem only.
+#
+# This goes in a separate, untracked config rather than into tauri.conf.json. Editing a tracked
+# file here would put every user in conflict on their next `git pull`, and would also commit a
+# reference to a 40 MB binary that is not in the repository — so a fresh clone would fail to
+# build. Tauri merges the overlay when it is passed with --config.
+OVERLAY="$ROOT/crates/gatehound-app/tauri.sidecar.conf.json"
+cat > "$OVERLAY" <<JSON
+{
+  "bundle": {
+    "externalBin": ["binaries/cloudflared"]
+  }
+}
+JSON
 
 echo "installed $OUT"
-echo "MCP Gatehound will now start and stop the tunnel with the app."
+echo "wrote $OVERLAY"
+echo
+echo "Build the app with the tunnel inside it:"
+echo "  cd crates/gatehound-app && cargo tauri build --config tauri.sidecar.conf.json"

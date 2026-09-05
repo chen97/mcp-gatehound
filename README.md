@@ -93,10 +93,15 @@ something Cargo does:
 
 ```sh
 cargo install tauri-cli --version "^2"          # once
+sh scripts/fetch-cloudflared.sh                 # only if the app should carry its own tunnel
 cd crates/gatehound-app
-sh ../../scripts/fetch-cloudflared.sh           # only if the app should carry its own tunnel
-cargo tauri build
+cargo tauri build --config tauri.sidecar.conf.json    # drop the flag if you skipped the fetch
 ```
+
+The fetch script writes `tauri.sidecar.conf.json`, an untracked overlay naming the binary it
+downloaded, and Tauri merges it when you pass `--config`. It stays out of the committed config
+on purpose: a 40 MB binary is not in the repository, so a clone referencing it could not build,
+and a script that edits a tracked file would put you in conflict on your next `git pull`.
 
 Output lands in `target/release/bundle/`: `macos/MCP Gatehound.app` and a `.dmg` on macOS, an
 `.msi`/`.exe` on Windows, `.deb`/`.AppImage` on Linux. Drag the `.app` to `/Applications` and

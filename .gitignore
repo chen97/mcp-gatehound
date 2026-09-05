@@ -8,3 +8,6 @@ crates/gatehound-app/gen/
 *.db-wal
 *.log
 .DS_Store
+
+# Written by scripts/fetch-cloudflared.sh; references a binary that is not committed.
+crates/gatehound-app/tauri.sidecar.conf.json
