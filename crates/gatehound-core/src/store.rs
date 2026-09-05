@@ -296,18 +296,38 @@ impl Store {
     /// A token starts denied: the `(identity, "*")` deny rule means it sees an empty
     /// `tools/list` until something is explicitly allowed. Granting is a separate, deliberate
     /// act — which is the whole reason to issue a token instead of handing out the super one.
-    pub fn issue_token(&self, id: &str, name: &str, identity: &str, digest: &str) -> Result<()> {
+    ///
+    /// The deny rule is written unconditionally, replacing any wildcard already there. An
+    /// identity can arrive pre-seeded — a pack does exactly that — and letting a token inherit
+    /// `* = allow` would mean issuing a narrow token silently produced a wide one. What the
+    /// operator chose at issue time wins.
+    ///
+    /// Returns the rules that were in place beforehand, so the caller can say what it changed
+    /// rather than quietly rewriting somebody's policy.
+    pub fn issue_token(
+        &self,
+        id: &str,
+        name: &str,
+        identity: &str,
+        digest: &str,
+    ) -> Result<Vec<IdentityRule>> {
+        let existing: Vec<IdentityRule> = self
+            .list_identities()?
+            .into_iter()
+            .filter(|r| r.identity == identity)
+            .collect();
         let conn = self.lock();
         conn.execute(
             "INSERT INTO tokens(id, name, identity, digest, created_at) VALUES (?1,?2,?3,?4,?5)",
             params![id, name, identity, digest, now()],
         )?;
         conn.execute(
-            "INSERT OR IGNORE INTO identities(identity, tool, decision, created_at, updated_at)
-             VALUES (?1, '*', 'deny', ?2, ?2)",
+            "INSERT INTO identities(identity, tool, decision, created_at, updated_at)
+             VALUES (?1, '*', 'deny', ?2, ?2)
+             ON CONFLICT(identity, tool) DO UPDATE SET decision = 'deny', updated_at = excluded.updated_at",
             params![identity, now()],
         )?;
-        Ok(())
+        Ok(existing)
     }
 
     /// The digest and identity behind a token id, for the authenticator to check against.

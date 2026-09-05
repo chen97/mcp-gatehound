@@ -361,9 +361,10 @@ fn token(cfg: Config, db_path: Option<PathBuf>, rest: &[String]) -> Result<()> {
             // than as an opaque id.
             let identity = slug(name);
             let minted = tokens::mint();
-            gateway
-                .store
-                .issue_token(&minted.id, name, &identity, &minted.digest)?;
+            let replaced =
+                gateway
+                    .store
+                    .issue_token(&minted.id, name, &identity, &minted.digest)?;
             for tool in tools {
                 gateway
                     .store
@@ -371,6 +372,13 @@ fn token(cfg: Config, db_path: Option<PathBuf>, rest: &[String]) -> Result<()> {
             }
 
             println!("issued '{name}' as identity '{identity}'\n");
+            if !replaced.is_empty() {
+                println!("'{identity}' already had rules, now replaced by what you asked for:");
+                for r in &replaced {
+                    println!("  was: {} → {}", r.tool, r.decision);
+                }
+                println!();
+            }
             println!("  {}\n", minted.secret);
             println!("This is the only time it is shown. Only a digest of it is stored, so it");
             println!("cannot be recovered — issue another if it is lost.\n");

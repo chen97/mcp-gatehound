@@ -594,6 +594,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issuing_never_inherits_a_wildcard_allow_that_was_already_there() {
+        // A pack seeds identities, so an identity can already be allowed everything before any
+        // token exists for it. Issuing a narrow token for that name must produce a narrow
+        // token — otherwise "it may call read_note" would be a lie, and the operator would
+        // have handed out full access believing the opposite.
+        let store = Arc::new(Store::open_memory().unwrap());
+        store
+            .set_decision("message-desk", "*", crate::config::Decision::Allow)
+            .unwrap();
+
+        let minted = crate::tokens::mint();
+        let replaced = store
+            .issue_token(&minted.id, "Message Desk", "message-desk", &minted.digest)
+            .unwrap();
+        store
+            .set_decision("message-desk", "read_note", crate::config::Decision::Allow)
+            .unwrap();
+
+        assert_eq!(
+            replaced.len(),
+            1,
+            "the caller must be told what it replaced"
+        );
+        assert_eq!(replaced[0].tool, "*");
+        assert_eq!(replaced[0].decision, "allow");
+
+        let policy = crate::policy::Policy::new(store.clone());
+        assert_eq!(
+            policy.resolve("message-desk", "read_note"),
+            crate::config::Decision::Allow
+        );
+        assert_eq!(
+            policy.resolve("message-desk", "send_message"),
+            crate::config::Decision::Deny,
+            "the seeded wildcard must not survive issuing"
+        );
+    }
+
+    #[tokio::test]
     async fn a_revoked_token_stops_working_immediately() {
         let (a, store) = with_store();
         let minted = crate::tokens::mint();

@@ -82,6 +82,7 @@ interface Issued {
   secret: string;
   identity: string;
   allowed: string[];
+  replaced: string[];
 }
 
 interface Pending {
@@ -646,6 +647,18 @@ async function renderAccess(snap: Snapshot): Promise<void> {
            <code id="new-secret" class="secret">${esc(justIssued.secret)}</code>
            <button id="copy-new" class="primary">Copy</button>
          </div>
+         ${
+           justIssued.replaced.length
+             ? `<div class="notice">
+                  <strong>That identity already had rules, now replaced by what you ticked.</strong>
+                  <div class="meta">
+                    Was: ${justIssued.replaced.map((r) => `<code>${esc(r)}</code>`).join(", ")}.
+                    An identity can arrive pre-seeded by a pack; keeping a wildcard allow would
+                    have made this token wider than you asked for.
+                  </div>
+                </div>`
+             : ""
+         }
          <div class="meta" style="margin-top:8px">
            Authenticates as <code>${esc(justIssued.identity)}</code>.
            ${
