@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod pack;
 pub mod policy;
 pub mod protocol;
+pub mod publish;
 pub mod redact;
 pub mod store;
 pub mod tokens;

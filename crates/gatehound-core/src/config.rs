@@ -241,6 +241,9 @@ pub struct Config {
     pub tools: Vec<ToolConfig>,
     #[serde(default, rename = "identity")]
     pub identities: Vec<IdentitySeed>,
+    /// How, if at all, the loopback listener is reachable from off this machine.
+    #[serde(default)]
+    pub publish: crate::publish::PublishConfig,
 }
 
 fn default_listen() -> String {
@@ -268,6 +271,7 @@ impl Default for Config {
             upstreams: Vec::new(),
             tools: Vec::new(),
             identities: Vec::new(),
+            publish: crate::publish::PublishConfig::default(),
         }
     }
 }
@@ -350,6 +354,26 @@ impl Config {
         if let Some(v) = env_list("ALLOWED_EMAILS") {
             self.auth.allowed_identities = v;
         }
+        if let Some(v) = env("PUBLISH_VIA") {
+            match v.to_ascii_lowercase().as_str() {
+                "none" => self.publish.via = crate::publish::PublishVia::None,
+                "auto" => self.publish.via = crate::publish::PublishVia::Auto,
+                "cloudflare" => self.publish.via = crate::publish::PublishVia::Cloudflare,
+                "tailscale" => self.publish.via = crate::publish::PublishVia::Tailscale,
+                other => {
+                    tracing::warn!(value = %other, "PUBLISH_VIA is not a known backend; ignoring")
+                }
+            }
+        }
+        // The tunnel token is a credential, so it comes from the environment like the others.
+        if let Some(k) = self.publish.cloudflare.token_env.clone() {
+            if let Some(v) = env(&k) {
+                self.publish.cloudflare.token = Some(v);
+            }
+        }
+        if let Some(v) = env("CLOUDFLARE_TUNNEL_TOKEN") {
+            self.publish.cloudflare.token = Some(v);
+        }
 
         // Upstream credentials come from the environment so they never sit in the config
         // file: each upstream names the variable that carries its own.
@@ -428,6 +452,11 @@ impl Config {
                     bail!("tool '{}' has max_concurrency = 0", t.name);
                 }
             }
+        }
+        // Refuses a gateway that would be on the public internet with one factor. Warnings
+        // are returned rather than printed so the caller decides where they go.
+        for warning in self.publish.check(&self.auth)? {
+            tracing::warn!("{warning}");
         }
         for i in &self.identities {
             if i.tool != "*" && !self.tools.iter().any(|t| t.name == i.tool) {
