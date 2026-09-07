@@ -85,6 +85,25 @@ interface Issued {
   replaced: string[];
 }
 
+type Reach = "loopback" | "tailnet" | "internet";
+
+// Mirrors `PublishState`, which serialises internally tagged: the discriminant is `state`.
+type PublishState =
+  | { state: "not_published" }
+  | { state: "published"; via: string; reach: Reach; url: string | null }
+  | { state: "failed"; via: string; error: string };
+
+type SecondFactor =
+  | { kind: "access"; team_domain: string }
+  | { kind: "reach"; reach: Reach }
+  | { kind: "none" };
+
+interface PublishInfo {
+  configured: string;
+  state: PublishState;
+  second_factor: SecondFactor;
+}
+
 interface Pending {
   id: string;
   ts: string;
@@ -630,8 +649,110 @@ function tokenRow(t: TokenInfo): string {
   </tr>`;
 }
 
+const REACH: Record<Reach, { pill: string; label: string; who: string }> = {
+  loopback: { pill: "ok", label: "This machine only", who: "Nothing off this machine can reach the gateway." },
+  tailnet: { pill: "ok", label: "Your tailnet", who: "Devices signed in to your tailnet can reach it. The public internet cannot." },
+  internet: { pill: "error", label: "The public internet", who: "Anything that can resolve the hostname can reach it." },
+};
+
+function publishPanel(p: PublishInfo): string {
+  const st = p.state;
+  const reach: Reach = st.state === "published" ? st.reach : "loopback";
+  const r = REACH[reach];
+
+  // The configured backend is a request; the state is the outcome. Saying both only helps
+  // when they differ — otherwise it reads as the same fact twice.
+  const backend =
+    st.state === "not_published"
+      ? p.configured === "none"
+        ? "none, by configuration"
+        : `none — <code>${esc(p.configured)}</code> found nothing set up on this machine`
+      : st.state === "failed"
+        ? `<code>${esc(st.via)}</code> <span class="pill error">failed</span>`
+        : st.via === p.configured
+          ? `<code>${esc(st.via)}</code>`
+          : `<code>${esc(st.via)}</code> <span class="meta">(configured: ${esc(p.configured)})</span>`;
+
+  const url =
+    st.state === "published" && st.url
+      ? `<tr><td class="meta">Public URL</td><td>
+           <code>${esc(st.url)}</code>
+           <button id="copy-url" class="ghost">Copy</button>
+         </td></tr>`
+      : st.state === "published"
+        ? `<tr><td class="meta">Public URL</td><td class="meta">
+             Running, but the backend did not report a hostname. Set
+             <code>publish.cloudflare.hostname</code> so this can be copied.
+           </td></tr>`
+        : "";
+
+  const factor =
+    p.second_factor.kind === "access"
+      ? `Cloudflare Access <span class="meta">(${esc(p.second_factor.team_domain)})</span>`
+      : p.second_factor.kind === "reach"
+        ? `<span class="meta">${
+            p.second_factor.reach === "loopback"
+              ? "Not needed — nothing off this machine can reach it."
+              : "Not needed — a device had to join your tailnet to get here."
+          }</span>`
+        : `<span class="pill error">none</span>`;
+
+  // Only worth shouting about when it is actually true right now: an internet reach with the
+  // token as the only factor. A configuration that intends that but has not started is the
+  // config validator's business, not the panel's.
+  const exposed =
+    reach === "internet" && p.second_factor.kind === "none"
+      ? `<div class="notice warn">
+           <strong>The bearer token is the only thing in the way.</strong>
+           <div class="meta">
+             Anyone who learns a token has whatever that token may call, from anywhere.
+             Put Cloudflare Access in front (<code>[auth.access]</code>), or publish over
+             Tailscale instead so only your own devices can reach it.
+           </div>
+         </div>`
+      : "";
+
+  const failed =
+    st.state === "failed"
+      ? `<div class="notice warn">
+           <strong>${esc(st.via)} could not start.</strong>
+           <div class="meta">${esc(st.error)}</div>
+           <div class="meta">
+             The gateway is still serving on loopback, so anything on this machine keeps
+             working — it just is not reachable from anywhere else.
+           </div>
+         </div>`
+      : "";
+
+  const hint =
+    st.state === "not_published" && p.configured !== "none"
+      ? `<div class="meta" style="margin-top:8px">
+           To publish it, set <code>publish.via</code> to <code>"tailscale"</code> (your
+           devices only, no account beyond Tailscale) or <code>"cloudflare"</code> (a public
+           hostname, which needs Access in front) in the config file, then restart.
+         </div>`
+      : "";
+
+  return `<div class="card">
+    <h3>Reachable from</h3>
+    ${failed}${exposed}
+    <table><tbody>
+      <tr>
+        <td class="meta">Who can reach it</td>
+        <td><span class="pill ${r.pill}">${esc(r.label)}</span></td>
+      </tr>
+      <tr><td class="meta">Published by</td><td>${backend}</td></tr>
+      ${url}
+      <tr><td class="meta">In front of it</td><td>${factor}</td></tr>
+    </tbody></table>
+    <div class="meta" style="margin-top:8px">${esc(r.who)}</div>
+    ${hint}
+  </div>`;
+}
+
 async function renderAccess(snap: Snapshot): Promise<void> {
   const a = await invoke<Access>("access");
+  const pub_ = await invoke<PublishInfo>("publish_state");
 
   const issuedPanel = justIssued
     ? `<div class="card">
@@ -706,6 +827,10 @@ async function renderAccess(snap: Snapshot): Promise<void> {
       </div>
     </div>
 
+    ` +
+    publishPanel(pub_) +
+    `
+
     <div class="card">
       <h3>Issue a token</h3>
       <div class="meta">
@@ -738,6 +863,10 @@ async function renderAccess(snap: Snapshot): Promise<void> {
   $("#copy-super")?.addEventListener("click", (e) =>
     copy(a.super_token, e.currentTarget as HTMLElement),
   );
+  if (pub_.state.state === "published" && pub_.state.url) {
+    const url = pub_.state.url;
+    $("#copy-url")?.addEventListener("click", (e) => copy(url, e.currentTarget as HTMLElement));
+  }
   $("#copy-new")?.addEventListener("click", (e) => {
     if (justIssued) void copy(justIssued.secret, e.currentTarget as HTMLElement);
   });

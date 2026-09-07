@@ -13,6 +13,12 @@ log_retention_days = 7
 # deployment sets [auth.access], and the gateway warns loudly when it is missing.
 bearer_identity = "test-client"
 
+# The rig is loopback and nothing else. Left at the default the gateway would try whatever
+# tunnel this machine happens to be set up for, which would make the run depend on the machine
+# rather than on the code.
+[publish]
+via = "none"
+
 [[upstream]]
 name = "notes"
 type = "http"

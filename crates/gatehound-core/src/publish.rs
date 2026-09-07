@@ -172,6 +172,63 @@ impl PublishConfig {
              publish.via = \"tailscale\" (tailnet only), or set publish.via = \"none\"."
         )
     }
+
+    /// What stands in front of the gateway besides the bearer token.
+    ///
+    /// The window and the CLI both have to answer this, and two answers that disagreed would
+    /// be worse than one: an operator who reads "protected" in one place and "NONE" in the
+    /// other has no way to tell which is true.
+    pub fn second_factor(&self, auth: &AuthConfig) -> SecondFactor {
+        SecondFactor::of(auth, self.intended_reach())
+    }
+}
+
+/// What a request has to get past before the bearer token is even looked at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SecondFactor {
+    /// Cloudflare Access, at the named team domain. Checked at the edge, so an unauthenticated
+    /// request never arrives at all.
+    Access { team_domain: String },
+    /// The reach is the factor: loopback, or a tailnet a device had to authenticate to join.
+    Reach { reach: Reach },
+    /// Nothing. Whoever holds the token holds the gateway.
+    None,
+}
+
+impl SecondFactor {
+    /// What stands in front of a gateway at the given reach.
+    ///
+    /// The reach is a parameter rather than read from configuration because the two differ:
+    /// what a config intends is the right basis for refusing to start, but what is actually
+    /// running is the right basis for telling an operator what is true now. Reporting
+    /// "nothing in front of it" for a gateway that turned out to be loopback-only would
+    /// alarm in the wrong direction, and be ignored the next time it was right.
+    pub fn of(auth: &AuthConfig, reach: Reach) -> Self {
+        match (&auth.access, reach.carries_a_factor()) {
+            (Some(a), _) => SecondFactor::Access {
+                team_domain: a.team_domain.clone(),
+            },
+            (None, true) => SecondFactor::Reach { reach },
+            (None, false) => SecondFactor::None,
+        }
+    }
+
+    /// One line for a terminal or a panel.
+    pub fn describe(&self) -> String {
+        match self {
+            SecondFactor::Access { team_domain } => format!("Cloudflare Access ({team_domain})"),
+            SecondFactor::Reach {
+                reach: Reach::Loopback,
+            } => "not needed — nothing off this machine can reach it".to_string(),
+            SecondFactor::Reach { .. } => {
+                "not needed — a device had to join your tailnet to get here".to_string()
+            }
+            SecondFactor::None => {
+                "NONE — the bearer token is the only thing in the way".to_string()
+            }
+        }
+    }
 }
 
 /// A running backend and where it put the gateway.
@@ -343,6 +400,19 @@ pub enum PublishState {
         via: String,
         error: String,
     },
+}
+
+impl PublishState {
+    /// Who can actually reach the gateway right now.
+    ///
+    /// Nothing published and a backend that failed are the same answer: the listener is on
+    /// loopback and that is all.
+    pub fn reach(&self) -> Reach {
+        match self {
+            PublishState::Published(p) => p.reach,
+            PublishState::NotPublished | PublishState::Failed { .. } => Reach::Loopback,
+        }
+    }
 }
 
 /// Runs a publishing backend for as long as the gateway is up.
@@ -529,6 +599,102 @@ mod tests {
             via: v,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_second_factor_is_named_the_same_way_everywhere() {
+        // The window and the CLI both render this. Two answers that disagreed would leave an
+        // operator with no way to tell which one is true, so there is one function.
+        let f = via(PublishVia::Cloudflare).second_factor(&auth(true));
+        assert_eq!(
+            f,
+            SecondFactor::Access {
+                team_domain: "team.cloudflareaccess.com".into()
+            }
+        );
+        assert!(f.describe().contains("team.cloudflareaccess.com"));
+
+        // Loopback and a tailnet are both factors, but not the same sentence: "nothing can
+        // reach it" and "a device had to join your tailnet" tell an operator different things.
+        let loopback = via(PublishVia::None).second_factor(&auth(false));
+        let tailnet = via(PublishVia::Tailscale).second_factor(&auth(false));
+        assert!(loopback.describe().contains("off this machine"));
+        assert!(tailnet.describe().contains("tailnet"));
+        assert_ne!(loopback.describe(), tailnet.describe());
+
+        // A tailnet is a factor: a device had to authenticate to join it.
+        assert_eq!(
+            via(PublishVia::Tailscale).second_factor(&auth(false)),
+            SecondFactor::Reach {
+                reach: Reach::Tailnet
+            }
+        );
+        assert_eq!(
+            via(PublishVia::None).second_factor(&auth(false)),
+            SecondFactor::Reach {
+                reach: Reach::Loopback
+            }
+        );
+    }
+
+    #[test]
+    fn a_backend_that_published_nothing_is_loopback_not_exposed() {
+        // `auto` intends the internet, so the config check must treat it as exposed. But if
+        // nothing was actually published, the panel must not tell the operator their tools
+        // are on the internet behind one token — a false alarm here is how the true one gets
+        // ignored later.
+        let cfg = via(PublishVia::Auto);
+        assert_eq!(cfg.intended_reach(), Reach::Internet);
+        assert_eq!(cfg.second_factor(&auth(false)), SecondFactor::None);
+
+        for state in [
+            PublishState::NotPublished,
+            PublishState::Failed {
+                via: "cloudflare".into(),
+                error: "could not start".into(),
+            },
+        ] {
+            assert_eq!(state.reach(), Reach::Loopback);
+            assert_eq!(
+                SecondFactor::of(&auth(false), state.reach()),
+                SecondFactor::Reach {
+                    reach: Reach::Loopback
+                }
+            );
+        }
+
+        // And when it did publish, the running reach is what counts.
+        let live = PublishState::Published(Published {
+            via: "cloudflare",
+            reach: Reach::Internet,
+            url: None,
+        });
+        assert_eq!(live.reach(), Reach::Internet);
+        assert_eq!(
+            SecondFactor::of(&auth(false), live.reach()),
+            SecondFactor::None
+        );
+    }
+
+    #[test]
+    fn nothing_in_front_is_reported_as_nothing_not_as_a_reach() {
+        // The case that matters: on the internet with only the bearer token. Reporting this
+        // as anything softer than "none" is how an operator ends up believing they are
+        // covered when they are not.
+        let none = via(PublishVia::Cloudflare).second_factor(&auth(false));
+        assert_eq!(none, SecondFactor::None);
+        assert!(none.describe().contains("NONE"));
+
+        // Funnel is as exposed as a tunnel, so its reach must not be mistaken for a factor.
+        let funnel = PublishConfig {
+            via: PublishVia::Tailscale,
+            tailscale: TailscaleConfig {
+                funnel: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(funnel.second_factor(&auth(false)), SecondFactor::None);
     }
 
     #[test]

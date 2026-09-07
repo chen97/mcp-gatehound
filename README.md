@@ -2,11 +2,12 @@
 
 An authenticated MCP gateway that runs on your own machine.
 
-It accepts MCP requests arriving from the public internet through a Cloudflare Tunnel,
-verifies two independent auth factors, applies **tool filtering** per identity so a caller
-sees only the tools it may use, routes each call to an action declared in configuration — an
-upstream REST or MCP server, or a local command — and writes an **audit log** of everything.
-New or unknown clients are held for your approval rather than silently let in.
+It accepts MCP requests — from this machine, from your tailnet, or from the public internet,
+depending on how you publish it — verifies two independent auth factors, applies **tool
+filtering** per identity so a caller sees only the tools it may use, routes each call to an
+action declared in configuration — an upstream REST or MCP server, or a local command — and
+writes an **audit log** of everything. New or unknown clients are held for your approval
+rather than silently let in.
 
 In the vocabulary the gateway market has settled on: `gatehound.toml` defines one **virtual
 server** — a curated tool set composed from your upstreams and exposed as a single
@@ -20,8 +21,8 @@ retyped.
 
 ```
 phone / browser / agent
-  → Cloudflare Access (identity)
-  → Cloudflare Tunnel
+  → Cloudflare Access (identity)        [when published to the internet]
+  → Cloudflare Tunnel · tailscale serve · nothing at all
   → MCP Gatehound                       [MCP gateway + GUI + SQLite]
       ├─ action: proxy → an upstream REST API declared in config
       ├─ action: proxy → another MCP server, kept on loopback behind this gateway
@@ -81,9 +82,10 @@ Prerequisites: macOS needs the Xcode command line tools; Windows needs the WebVi
 Linux needs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev` and `libayatana-appindicator3-dev` (GNOME
 also needs an AppIndicator extension for the tray to appear at all).
 
-The tunnel is optional. With no Cloudflare Tunnel configured on the machine, cloudflared exits
-immediately, the log says so, and the gateway serves on loopback — which is what a development
-machine wants.
+Publishing is optional and pluggable: `publish.via` chooses between a Cloudflare Tunnel,
+`tailscale serve`, or nothing. The default is `auto`, which uses whatever the machine is
+already set up for and otherwise serves loopback only — which is what a development machine
+wants. See [Publishing](#publishing-reaching-it-from-off-the-machine).
 
 #### An installable app, not just a binary
 
@@ -114,9 +116,10 @@ Apple Developer account.
 
 For a dev loop on the UI, `cargo tauri dev` starts Vite and hot-reloads it.
 
-The tunnel is optional. With no Cloudflare Tunnel configured on the machine, cloudflared exits
-immediately, the log says so, and the gateway serves on loopback — which is what a development
-machine wants.
+Publishing is optional and pluggable: `publish.via` chooses between a Cloudflare Tunnel,
+`tailscale serve`, or nothing. The default is `auto`, which uses whatever the machine is
+already set up for and otherwise serves loopback only — which is what a development machine
+wants. See [Publishing](#publishing-reaching-it-from-off-the-machine).
 
 ## How it works
 
@@ -171,6 +174,59 @@ header requirements, so an older client sees exactly what it saw before.
 The listener binds loopback only and refuses to start on any other address. Publishing it is
 cloudflared's job.
 
+### Publishing: reaching it from off the machine
+
+The listener binds to loopback and speaks plain HTTP. That is deliberate — it is not the thing
+that should face a network — so reaching the gateway from anywhere else means putting something
+in front of it. `[publish]` names that something, and the gateway starts and stops it with
+itself: a tunnel that outlived the gateway would leave a hostname answering nothing, and
+`tailscale serve` would stay configured across a reboot.
+
+| `publish.via` | Who can reach it | What you need |
+|---|---|---|
+| `none` | This machine only | nothing |
+| `auto` *(default)* | Whatever the machine is already set up for, or nobody | nothing |
+| `tailscale` | Your tailnet | Tailscale on this machine and on whatever calls it |
+| `cloudflare` | The public internet | a Cloudflare account, a tunnel, and Access |
+
+`auto` is the default so that upgrading never starts publishing something that was not
+published before, and never stops something that was.
+
+**Tailscale is the low-dependency option.** `tailscale serve --https=443 localhost:8790` gets
+TLS Tailscale issues, a hostname it manages, and no DNS, certificate or Cloudflare account of
+your own. It is also the safer one: a device has to authenticate to your tailnet before it can
+reach the gateway at all, which is a second factor in its own right — so the gateway does not
+insist on Access for it, the way it does for anything internet-facing.
+
+**Cloudflare is the option for callers you cannot put on a tailnet** — a Worker, a hosted agent,
+a phone browser. A remotely-managed tunnel needs only its token
+(`CLOUDFLARE_TUNNEL_TOKEN`), so there is no local `cloudflared` config file and no browser
+login. Set `publish.cloudflare.hostname` too: the routing is the tunnel's own configuration,
+but without the hostname the app has no address to show you.
+
+**Publishing to the internet without a second factor is refused, not warned about.** With
+`via = "cloudflare"` (or `tailscale` with `funnel = true`) and no `[auth.access]`, the gateway
+will not start: the bearer token would be the only thing between a stranger and your tools, and
+a token travels. `auto` warns instead of refusing, because it is the default and may well
+resolve to publishing nothing.
+
+To see what a configuration would do without doing it:
+
+```sh
+gatehound-headless --config gatehound.toml publish
+```
+
+```
+Publish via:     tailscale
+Reachable by:    Tailnet
+Second factor:   not needed — a device had to join your tailnet to get here
+Would run:       tailscale serve --https=443 localhost:8790
+Stopping runs:   tailscale serve --https=443 localhost:8790 off
+```
+
+The desktop app shows the same thing live on its **Access** screen, including the URL to hand
+a client and a warning if the gateway is on the internet with nothing but a token in front.
+
 ### Two auth factors, both required
 
 1. **A bearer token.** Either the **super token** from configuration, which authenticates as
@@ -179,6 +235,7 @@ cloudflared's job.
 2. **A Cloudflare Access JWT** (`Cf-Access-Jwt-Assertion` or the `CF_Authorization` cookie),
    verified RS256 against the team's JWKS — cached an hour, refetched on an unknown `kid` —
    with `aud`, `iss` and expiry checked and 30s of leeway.
+
 A misrouted or misconfigured tunnel therefore still yields nothing. Access issues human logins
 with an `email` claim and **service tokens with `common_name` instead**; both are handled, and
 the identity string is derived `email` → `common_name` → `sub`. That string is what policy and
@@ -294,14 +351,16 @@ The lifecycle rule is the point: **the app running is the gateway being up, and 
 app is the gateway going down.** Closing the window hides it. On macOS there is no Dock icon,
 only the menubar. Single-instance is enforced, because two would fight over the port and the
 database. Quitting cancels the listener so axum drains in-flight calls, releases queued
-approvals with a clear error, kills the cloudflared sidecar rather than orphaning it, and
-checkpoints the WAL.
+approvals with a clear error, stops publishing rather than orphaning it, and checkpoints the
+WAL.
 
 The tray is the primary surface: green listening, grey paused, red an upstream is not
 answering, with a badge counting waiting approvals. "Pause gateway" stops only the listener
-and leaves the app open. The window has four screens — Approvals, Live log, Upstreams &
-actions, Identities — and holds no state of record; it reads everything from the core and
-re-reads whenever the core pushes an event.
+and leaves the app open. The window has five screens — Approvals, Live log, Upstreams &
+actions, Identities, Access — and holds no state of record; it reads everything from the core
+and re-reads whenever the core pushes an event. The Access screen is also where publishing is
+visible: which backend is running, who can reach the gateway, the URL to hand a client, and
+whether anything but the bearer token stands in front of it.
 
 ## Configuration
 
@@ -319,7 +378,8 @@ needs to present it. Setting `GATEHOUND_TOKEN` still wins if you prefer to suppl
 
 Environment keys: `GATEHOUND_TOKEN`, `LISTEN_ADDR`, `DB_PATH`, `APPROVAL_TIMEOUT_SECS`,
 `LOG_RETENTION_DAYS`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`, `ALLOWED_EMAILS`,
-`SEND_LIMIT_PER_HOUR`, plus whatever variables your own upstreams name.
+`SEND_LIMIT_PER_HOUR`, `PUBLISH_VIA`, `CLOUDFLARE_TUNNEL_TOKEN`, plus whatever variables your
+own upstreams name.
 
 Where things live:
 

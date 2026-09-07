@@ -12,6 +12,7 @@
 //!   gatehound-headless import <pack.toml> merge a pack of upstreams and tools into the config
 //!   gatehound-headless export <name>      write the current setup out as a pack
 //!   gatehound-headless token <sub>        issue, list or revoke an access token
+//!   gatehound-headless publish            show how the gateway is published
 //!
 //! Options:
 //!   --config <path>     gatehound.toml (default: ./gatehound.toml when it exists)
@@ -27,6 +28,7 @@ use gatehound_core::approval::Resolution;
 use gatehound_core::config::{Config, Decision};
 use gatehound_core::events::GatewayEvent;
 use gatehound_core::pack::{self, Pack};
+use gatehound_core::publish;
 use gatehound_core::tokens;
 use gatehound_core::{default_db_path, Gateway};
 use std::path::PathBuf;
@@ -97,7 +99,8 @@ fn print_help() {
          export <name>             write the current setup out as a pack\n  \
          token issue <name> [tools]  mint a token; tools it may call, or none\n  \
          token list                list issued tokens\n  \
-         token revoke <id>         stop a token working\n\n\
+         token revoke <id>         stop a token working\n  \
+         publish                   show how the gateway is published\n\n\
          OPTIONS\n  \
          --config <path>           gatehound.toml\n  \
          --db <path>               database file\n  \
@@ -153,6 +156,7 @@ async fn main() -> Result<()> {
         "allow" => set_rule(cfg, db_path, &args.rest, Decision::Allow),
         "deny" => set_rule(cfg, db_path, &args.rest, Decision::Deny),
         "token" => token(cfg, db_path, &args.rest),
+        "publish" => publish_status(cfg).await,
         "import" => import_pack(cfg, &args),
         "export" => export_pack(cfg, &args),
         other => {
@@ -162,9 +166,65 @@ async fn main() -> Result<()> {
     }
 }
 
+/// What publishing this configuration would do, without doing it.
+async fn publish_status(cfg: Config) -> Result<()> {
+    println!("Publish via:     {}", cfg.publish.via.as_str());
+    println!("Reachable by:    {:?}", cfg.publish.intended_reach());
+    println!(
+        "Second factor:   {}",
+        cfg.publish.second_factor(&cfg.auth).describe()
+    );
+    match publish::launch(&cfg.publish, &cfg.listen_addr)? {
+        Some(l) => {
+            println!("Would run:       {} {}", l.program, l.args.join(" "));
+            if !l.stop_args.is_empty() {
+                println!("Stopping runs:   {} {}", l.program, l.stop_args.join(" "));
+            }
+        }
+        None => println!("Would run:       nothing; loopback only"),
+    }
+    Ok(())
+}
+
 async fn serve(cfg: Config, db_path: Option<PathBuf>, auto_approve: bool) -> Result<()> {
+    // Publishing runs alongside the listener and stops with it: a tunnel outliving the
+    // gateway leaves a hostname answering nothing, and `tailscale serve` would stay
+    // configured across a reboot.
+    let publisher = Arc::new(publish::Publisher::new(
+        cfg.publish.clone(),
+        cfg.listen_addr.clone(),
+    ));
     let gateway = Gateway::build(cfg, db_path)?;
     let cancel = CancellationToken::new();
+
+    let published = publisher.start().await;
+    match &published {
+        publish::PublishState::NotPublished => {
+            tracing::info!("not published; the gateway is reachable on loopback only")
+        }
+        publish::PublishState::Published(p) => tracing::info!(
+            via = p.via,
+            reach = ?p.reach,
+            url = %p.url.clone().unwrap_or_else(|| "not reported".into()),
+            "published"
+        ),
+        publish::PublishState::Failed { via, error } => {
+            tracing::warn!(%via, %error, "could not publish; loopback only")
+        }
+    }
+
+    // The config check warns about what `auto` *might* do. This is what it did: once the
+    // gateway is actually on the internet with nothing but a token in front of it, that stops
+    // being a hypothetical and the operator should be told in those terms.
+    if publish::SecondFactor::of(&gateway.cfg.auth, published.reach())
+        == publish::SecondFactor::None
+    {
+        tracing::warn!(
+            reach = ?published.reach(),
+            "the gateway is on the public internet and the bearer token is the only thing in \
+             the way; configure [auth.access], or set publish.via = \"tailscale\" or \"none\""
+        );
+    }
 
     // With no GUI, approvals would otherwise be invisible. Print them, and — only when the
     // operator explicitly asked — answer them.
@@ -183,7 +243,9 @@ async fn serve(cfg: Config, db_path: Option<PathBuf>, auto_approve: bool) -> Res
         }
     });
 
-    gateway.serve(cancel).await
+    let result = gateway.serve(cancel).await;
+    publisher.stop().await;
+    result
 }
 
 fn spawn_event_printer(gateway: Arc<Gateway>, cancel: CancellationToken, auto_approve: bool) {

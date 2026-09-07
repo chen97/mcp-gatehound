@@ -601,15 +601,24 @@ mod tests {
         // have handed out full access believing the opposite.
         let store = Arc::new(Store::open_memory().unwrap());
         store
-            .set_decision("message-desk", "*", crate::config::Decision::Allow)
+            .set_decision("packaged-client", "*", crate::config::Decision::Allow)
             .unwrap();
 
         let minted = crate::tokens::mint();
         let replaced = store
-            .issue_token(&minted.id, "Message Desk", "message-desk", &minted.digest)
+            .issue_token(
+                &minted.id,
+                "Packaged client",
+                "packaged-client",
+                &minted.digest,
+            )
             .unwrap();
         store
-            .set_decision("message-desk", "read_note", crate::config::Decision::Allow)
+            .set_decision(
+                "packaged-client",
+                "read_note",
+                crate::config::Decision::Allow,
+            )
             .unwrap();
 
         assert_eq!(
@@ -622,11 +631,11 @@ mod tests {
 
         let policy = crate::policy::Policy::new(store.clone());
         assert_eq!(
-            policy.resolve("message-desk", "read_note"),
+            policy.resolve("packaged-client", "read_note"),
             crate::config::Decision::Allow
         );
         assert_eq!(
-            policy.resolve("message-desk", "send_message"),
+            policy.resolve("packaged-client", "send_message"),
             crate::config::Decision::Deny,
             "the seeded wildcard must not survive issuing"
         );

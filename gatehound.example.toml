@@ -45,6 +45,54 @@ aud = "0000000000000000000000000000000000000000000000000000000000000000"
 allowed_identities = ["you@example.com", "my-worker.access"]
 
 # ---------------------------------------------------------------------------------------------
+# Publishing — how something off this machine reaches the listener.
+# ---------------------------------------------------------------------------------------------
+#
+# The listener above binds to loopback and speaks plain HTTP. It is not the thing that should
+# face a network. This section names a backend to put in front of it, and the gateway starts
+# and stops that backend with itself — a tunnel left running would leave a hostname answering
+# nothing, and `tailscale serve` would stay configured across a reboot.
+#
+#   via = "none"        Loopback only. Nothing off this machine can reach it.
+#   via = "auto"        The default: whatever this machine is already set up for, or nothing.
+#                       Chosen so that upgrading never starts publishing something that was
+#                       not published before, and never stops something that was.
+#   via = "tailscale"   `tailscale serve`. Your tailnet only, with TLS Tailscale issues. No
+#                       Cloudflare account, no DNS, no certificate to manage — and a device
+#                       had to authenticate to the tailnet before it could reach the gateway
+#                       at all, which is a second factor in its own right.
+#   via = "cloudflare"  A Cloudflare Tunnel. A public hostname, so [auth.access] is required:
+#                       the gateway refuses to start otherwise rather than putting your tools
+#                       behind one bearer token.
+[publish]
+via = "auto"
+
+# The backend's binary, when it is not on PATH. The desktop app bundles `cloudflared` and finds
+# it without this.
+#
+# binary = "/opt/homebrew/bin/cloudflared"
+
+[publish.cloudflare]
+# A remotely-managed tunnel's token, from the Zero Trust dashboard. With one, `cloudflared`
+# needs no local config file and no browser login. Keep the value in the environment
+# (CLOUDFLARE_TUNNEL_TOKEN) rather than in this file; `token_env` names a different variable.
+#
+# token_env = "MY_TUNNEL_TOKEN"
+
+# The hostname the tunnel routes to this gateway. Only used to report a URL — the routing
+# itself is the tunnel's own configuration — but without it the app has no address to show you.
+#
+# hostname = "gatehound.example.com"
+
+[publish.tailscale]
+# The port `tailscale serve` listens on, and the port the URL is built from.
+https_port = 443
+
+# Tailscale Funnel: the same serve, but open to the public internet. This is exactly as exposed
+# as a Cloudflare Tunnel, so [auth.access] is required for it too.
+funnel = false
+
+# ---------------------------------------------------------------------------------------------
 # Upstreams — where proxied tools send their work.
 # ---------------------------------------------------------------------------------------------
 

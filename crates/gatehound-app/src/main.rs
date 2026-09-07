@@ -32,7 +32,8 @@ pub struct AppState {
     gateway: Arc<Gateway>,
     /// Cancels the running listener. `None` while paused.
     listener: Mutex<Option<CancellationToken>>,
-    sidecar: sidecar::Sidecar,
+    /// Publishes the loopback listener, however configuration says to.
+    publisher: Arc<gatehound_core::publish::Publisher>,
     /// The file the running configuration came from, and the file an import writes back to.
     /// Held because importing a pack has to change the same file the next start will read.
     config_path: PathBuf,
@@ -189,6 +190,10 @@ struct Issued {
     secret: String,
     identity: String,
     allowed: Vec<String>,
+    /// Rules this identity had before, which the choices above replaced. An identity can
+    /// arrive pre-seeded by a pack, and silently keeping a wildcard allow would turn a narrow
+    /// token into a wide one. The window shows these beside the new secret.
+    replaced: Vec<String>,
 }
 
 #[tauri::command]
@@ -205,6 +210,37 @@ fn access(state: tauri::State<'_, AppState>) -> Result<Access, String> {
         endpoint: format!("http://{}/mcp", state.gateway.cfg.listen_addr),
         tokens: state.gateway.store.list_tokens().map_err(err)?,
     })
+}
+
+// ---- Publishing -----------------------------------------------------------
+
+/// What the Publish panel shows: what configuration asked for, what is actually happening,
+/// and what stands in front of the gateway. The three can disagree — `auto` may resolve to
+/// nothing, a backend may have failed to start — and the panel is where that becomes visible
+/// rather than a line in a log nobody reads.
+#[derive(Serialize)]
+struct PublishInfo {
+    /// The configured backend, which is a request rather than an outcome.
+    configured: &'static str,
+    /// The outcome.
+    state: gatehound_core::publish::PublishState,
+    second_factor: gatehound_core::publish::SecondFactor,
+}
+
+#[tauri::command]
+fn publish_state(state: tauri::State<'_, AppState>) -> PublishInfo {
+    let published = state.publisher.state();
+    PublishInfo {
+        configured: state.gateway.cfg.publish.via.as_str(),
+        // The factor is judged against what is actually running, not what the config asked
+        // for: `auto` intends the internet but may well have found nothing to publish with,
+        // and calling that "nothing in front of it" would be a false alarm.
+        second_factor: gatehound_core::publish::SecondFactor::of(
+            &state.gateway.cfg.auth,
+            published.reach(),
+        ),
+        state: published,
+    }
 }
 
 /// Mint a token for one client, allowing exactly the tools chosen for it.
@@ -226,7 +262,7 @@ fn issue_token(
 
     let identity = identity_for(&name, &state);
     let minted = gatehound_core::tokens::mint();
-    state
+    let replaced = state
         .gateway
         .store
         .issue_token(&minted.id, &name, &identity, &minted.digest)
@@ -244,6 +280,10 @@ fn issue_token(
         secret: minted.secret,
         identity,
         allowed: tools,
+        replaced: replaced
+            .into_iter()
+            .map(|r| format!("{} → {}", r.tool, r.decision))
+            .collect(),
     })
 }
 
@@ -473,7 +513,8 @@ fn restart_app(app: AppHandle) {
         token.cancel();
     }
     state.gateway.approvals.cancel_all();
-    state.sidecar.stop();
+    let publisher = state.publisher.clone();
+    tauri::async_runtime::block_on(publisher.stop());
     app.restart();
 }
 
@@ -561,12 +602,13 @@ fn setup_app(app: &mut tauri::App) -> Result<()> {
         .app_data_dir()
         .context("no application data directory")?
         .join("gatehound.db");
+    let publisher = sidecar::build(&handle, &cfg);
     let gateway = Gateway::build(cfg, Some(db_path))?;
 
     app.manage(AppState {
         gateway,
         listener: Mutex::new(None),
-        sidecar: sidecar::Sidecar::new(),
+        publisher,
         config_path,
     });
 
@@ -574,10 +616,17 @@ fn setup_app(app: &mut tauri::App) -> Result<()> {
     forward_events(&handle);
     start_listener(&handle)?;
 
-    // cloudflared publishes the loopback listener. It is started with the app and
-    // killed explicitly on exit — never orphaned.
-    let state = handle.state::<AppState>();
-    state.sidecar.start(&handle);
+    // Publish the loopback listener however configuration says, and never orphan it: a
+    // tunnel left running keeps a hostname pointing at nothing, and `tailscale serve` left
+    // configured outlives this process entirely.
+    {
+        let handle = handle.clone();
+        tauri::async_runtime::spawn(async move {
+            let published = handle.state::<AppState>().publisher.start().await;
+            tracing::info!(publish = %sidecar::describe(&published), "publishing");
+            let _ = handle.emit("gateway", serde_json::json!({ "event": "status_changed" }));
+        });
+    }
 
     // `--hidden` is what the autostart entry passes: come up in the tray, silently.
     let hidden = std::env::args().any(|a| a == "--hidden");
@@ -626,6 +675,7 @@ fn main() {
             apply_pack,
             restart_app,
             access,
+            publish_state,
             issue_token,
             revoke_token,
         ])
@@ -670,7 +720,10 @@ fn main() {
                     token.cancel();
                 }
                 state.gateway.approvals.cancel_all();
-                state.sidecar.stop();
+                // Unpublish before the process goes: exiting with a hostname still pointing
+                // at a stopped gateway is the one outcome worth blocking for.
+                let publisher = state.publisher.clone();
+                tauri::async_runtime::block_on(publisher.stop());
                 // Give the graceful shutdown a moment to finish before the process goes.
                 std::thread::sleep(std::time::Duration::from_millis(750));
                 if let Err(e) = state.gateway.store.checkpoint() {

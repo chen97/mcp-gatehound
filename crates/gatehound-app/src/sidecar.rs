@@ -1,115 +1,75 @@
-//! cloudflared, bundled as a Tauri sidecar.
+//! Finding the publishing backend's binary, and running the core publisher with it.
 //!
-//! It is started with the app and killed explicitly on exit, never orphaned — an orphaned
-//! tunnel would keep publishing a hostname with nothing behind it.
-//!
-//! The tunnel is optional: a laptop with no `binaries/cloudflared` in the bundle still runs
-//! the gateway on loopback, which is what a development machine wants.
+//! The desktop app may carry its own `cloudflared` inside the bundle, which is the one thing
+//! the core cannot work out for itself — everything else about publishing lives in
+//! `gatehound_core::publish`, so the headless binary gets the same behaviour rather than a
+//! second implementation that drifts.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use tauri::AppHandle;
-use tauri_plugin_shell::process::CommandChild;
-use tauri_plugin_shell::ShellExt;
+use gatehound_core::config::Config;
+use gatehound_core::publish::{PublishConfig, PublishState, PublishVia, Publisher};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tauri::{AppHandle, Manager};
 
-pub struct Sidecar {
-    child: Mutex<Option<CommandChild>>,
-}
-
-impl Sidecar {
-    pub fn new() -> Self {
-        Self {
-            child: Mutex::new(None),
+/// Where the app keeps a bundled backend, if it has one.
+///
+/// Tauri names a sidecar with the host target triple appended, and strips it when resolving —
+/// but only through its own shell API, which the core does not use. Looking for the file
+/// directly keeps the core free of Tauri without giving up the bundled copy.
+fn bundled(app: &AppHandle, name: &str) -> Option<PathBuf> {
+    let dir = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join(if cfg!(target_os = "macos") { ".." } else { "." });
+    for candidate in [
+        dir.join("MacOS").join(name),
+        dir.join(name),
+        dir.join("binaries").join(name),
+    ] {
+        if candidate.exists() {
+            return Some(candidate);
         }
     }
+    // Running from `cargo run`, where the bundle does not exist yet.
+    let dev = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join("../../crates/gatehound-app/binaries");
+    std::fs::read_dir(dev)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(name))
+        })
+}
 
-    pub fn start(&self, app: &AppHandle) {
-        // `tunnel run` uses the credentials cloudflared already has on this machine, so the
-        // app never holds a tunnel secret of its own.
-        let command = match app.shell().sidecar("cloudflared") {
-            Ok(c) => c.args(["tunnel", "--no-autoupdate", "run"]),
-            Err(e) => {
-                tracing::info!(error = %e, "no cloudflared sidecar bundled; serving on loopback only");
-                return;
-            }
+/// The publisher for this configuration, with the bundled binary filled in when the config
+/// does not name one and the app is carrying a suitable copy.
+pub fn build(app: &AppHandle, cfg: &Config) -> Arc<Publisher> {
+    let mut publish: PublishConfig = cfg.publish.clone();
+    if publish.binary.is_none() {
+        let name = match publish.via {
+            PublishVia::Tailscale => "tailscale",
+            // `auto` resolves to cloudflared, which is the one the app bundles.
+            _ => "cloudflared",
         };
-        match command.spawn() {
-            Ok((mut rx, child)) => {
-                *self.child.lock().unwrap() = Some(child);
-                tracing::info!("cloudflared started");
-                tauri::async_runtime::spawn(async move {
-                    use tauri_plugin_shell::process::CommandEvent;
-                    let started = Instant::now();
-                    // cloudflared explains itself on stderr and then exits. Those lines are
-                    // the only thing that says *why*, so keep the last few: reporting a bare
-                    // exit code is what makes this look like a mystery rather than a machine
-                    // with no tunnel set up on it.
-                    let tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
-                    while let Some(event) = rx.recv().await {
-                        match event {
-                            CommandEvent::Stderr(line) | CommandEvent::Stdout(line) => {
-                                let text = String::from_utf8_lossy(&line).trim().to_string();
-                                if !text.is_empty() {
-                                    tracing::debug!(target: "cloudflared", "{text}");
-                                    let mut t = tail.lock().unwrap();
-                                    t.push_back(text);
-                                    if t.len() > 4 {
-                                        t.pop_front();
-                                    }
-                                }
-                            }
-                            CommandEvent::Terminated(payload) => {
-                                let reason = tail
-                                    .lock()
-                                    .unwrap()
-                                    .iter()
-                                    .cloned()
-                                    .collect::<Vec<_>>()
-                                    .join(" | ");
-                                // Failing immediately means it never had a tunnel to run, which
-                                // is the normal state of a machine nobody has configured yet.
-                                // The gateway is unaffected either way; only the tunnel is.
-                                if started.elapsed().as_secs() < 5 && payload.code != Some(0) {
-                                    tracing::info!(
-                                        code = ?payload.code,
-                                        reason = %reason,
-                                        "no Cloudflare Tunnel is configured on this machine, so \
-                                         the gateway is reachable on loopback only. Run \
-                                         `cloudflared tunnel login` and create one when you want \
-                                         it published."
-                                    );
-                                } else {
-                                    tracing::warn!(code = ?payload.code, reason = %reason, "cloudflared exited");
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                });
-            }
-            Err(e) => tracing::warn!(error = %e, "could not start cloudflared"),
-        }
+        publish.binary = bundled(app, name);
     }
-
-    pub fn stop(&self) {
-        if let Some(child) = self.child.lock().unwrap().take() {
-            match child.kill() {
-                Ok(()) => tracing::info!("cloudflared stopped"),
-                Err(e) => tracing::warn!(error = %e, "could not stop cloudflared"),
-            }
-        }
-    }
+    Arc::new(Publisher::new(publish, cfg.listen_addr.clone()))
 }
 
-impl Default for Sidecar {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Drop for Sidecar {
-    fn drop(&mut self) {
-        self.stop();
+/// Human-readable one-liner for the log and the window.
+pub fn describe(state: &PublishState) -> String {
+    match state {
+        PublishState::NotPublished => "loopback only".into(),
+        PublishState::Published(p) => match &p.url {
+            Some(url) => format!("{} · {url}", p.via),
+            None => format!("{} · reachable, URL not reported", p.via),
+        },
+        PublishState::Failed { via, error } => format!("{via} failed: {error}"),
     }
 }
