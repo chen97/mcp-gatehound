@@ -257,5 +257,22 @@ jobs:
           echo "beforeBuildCommand: $hook"
           cd ui && sh -c "$hook"
 
+      # A `trayIcon` in the config makes Tauri create a tray before `setup` runs, and a menu
+      # and click handlers can only go on one built in code. Declaring it in both places puts
+      # two icons in the menubar: one that looks right and does nothing, and one that works
+      # but is invisible. Only the code may declare it.
+      - name: Exactly one tray icon is declared
+        working-directory: crates/gatehound-app
+        run: |
+          set -eu
+          if python3 -c "import json,sys; sys.exit(0 if 'trayIcon' in json.load(open('tauri.conf.json')).get('app',{}) else 1)"; then
+            echo "tauri.conf.json declares app.trayIcon; the tray is built in src/tray.rs"
+            exit 1
+          fi
+          grep -q 'TrayIconBuilder' src/tray.rs \
+            || { echo "no tray is built in code either"; exit 1; }
+          grep -q '\.icon(' src/tray.rs \
+            || { echo "the tray built in code sets no icon; it would be invisible"; exit 1; }
+
       - name: Check the shell
         run: cargo clippy -p gatehound-app --all-targets -- -D warnings

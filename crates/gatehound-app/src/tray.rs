@@ -15,6 +15,14 @@ use tauri_plugin_notification::NotificationExt;
 
 const TRAY_ID: &str = "main";
 
+/// The menubar icon, embedded rather than resolved at runtime.
+///
+/// It is deliberately not declared in `tauri.conf.json`: a `trayIcon` there makes Tauri create
+/// a tray of its own before `setup` runs, and a menu and click handlers can only be attached
+/// to one built in code. Declaring it in both places is how you end up with two icons in the
+/// menubar — one that looks right and does nothing, and one that works but has no picture.
+const TRAY_ICON: &[u8] = include_bytes!("../icons/tray.png");
+
 /// Tauri hands out no getter for a tray's menu, so the items whose text changes are kept
 /// here and managed alongside the rest of the shell's state.
 pub struct TrayItems {
@@ -45,6 +53,12 @@ pub fn build(app: &AppHandle) -> Result<()> {
     });
 
     TrayIconBuilder::with_id(TRAY_ID)
+        .icon(tauri::image::Image::from_bytes(TRAY_ICON)?)
+        // A template image is drawn monochrome and follows the menubar, so the icon stays
+        // legible in light and dark. macOS is the only platform that acts on it, but the call
+        // compiles everywhere and does nothing elsewhere — cheaper than a `#[cfg]` branch that
+        // no other platform's build would ever compile, which is how the last tray bug got in.
+        .icon_as_template(true)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("MCP Gatehound")
