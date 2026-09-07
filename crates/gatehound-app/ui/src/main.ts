@@ -98,10 +98,27 @@ type SecondFactor =
   | { kind: "reach"; reach: Reach }
   | { kind: "none" };
 
+interface PublishForm {
+  via: string;
+  hostname: string;
+  funnel: boolean;
+  has_token: boolean;
+  token_env: string;
+  access_team_domain: string;
+  access_aud: string;
+}
+
 interface PublishInfo {
   configured: string;
   state: PublishState;
   second_factor: SecondFactor;
+  form: PublishForm;
+}
+
+interface Saved {
+  config_path: string;
+  warnings: string[];
+  form: PublishForm;
 }
 
 interface Pending {
@@ -619,6 +636,9 @@ async function renderIdentities(snap: Snapshot): Promise<void> {
 // afterwards, so it is never re-fetched and never stored.
 let justIssued: Issued | null = null;
 let revealSuper = false;
+// Saved to the file but not yet running. The status panel reports what is live; the form has
+// to keep showing what will apply, or a save the operator declined to restart for looks lost.
+let publishPending: Saved | null = null;
 
 async function copy(text: string, button: HTMLElement): Promise<void> {
   try {
@@ -654,6 +674,105 @@ const REACH: Record<Reach, { pill: string; label: string; who: string }> = {
   tailnet: { pill: "ok", label: "Your tailnet", who: "Devices signed in to your tailnet can reach it. The public internet cannot." },
   internet: { pill: "error", label: "The public internet", who: "Anything that can resolve the hostname can reach it." },
 };
+
+const BACKENDS: { value: string; label: string; hint: string }[] = [
+  { value: "none", label: "Nobody — this machine only", hint: "Nothing off this machine can reach the gateway." },
+  { value: "auto", label: "Whatever this machine is set up for", hint: "Uses an existing Cloudflare tunnel if there is one, otherwise publishes nothing." },
+  { value: "tailscale", label: "My tailnet (Tailscale)", hint: "Needs Tailscale on this machine and on whatever calls it. No Cloudflare account, no DNS, no certificate — and joining your tailnet is itself a second factor." },
+  { value: "cloudflare", label: "The public internet (Cloudflare Tunnel)", hint: "For callers that cannot be on your tailnet, like a Worker or a hosted agent. Cloudflare Access is required." },
+];
+
+function publishEditor(f: PublishForm, pending: Saved | null): string {
+  const banner = pending
+    ? `<div class="notice">
+         <strong>Saved. Not applied until the gateway restarts.</strong>
+         <div class="meta">
+           Written to <code>${esc(pending.config_path)}</code>. Above is what is running now;
+           below is what will run.
+           ${pending.warnings.map((w) => `<div>${esc(w)}</div>`).join("")}
+         </div>
+         <div class="row"><button id="pub-restart" class="primary">Restart now</button></div>
+       </div>`
+    : "";
+
+  const options = BACKENDS.map(
+    (b) => `<option value="${b.value}"${b.value === f.via ? " selected" : ""}>${esc(b.label)}</option>`,
+  ).join("");
+
+  return `<div class="card">
+    <h3>Change how it is published</h3>
+    <div class="meta">
+      Saved to the config file and applied on restart. Publishing to the public internet
+      without Cloudflare Access in front is refused, not warned about.
+    </div>
+    ${banner}
+
+    <div class="row">
+      <label class="meta" for="pub-via" style="min-width:120px">Reachable by</label>
+      <select id="pub-via" style="min-width:320px">${options}</select>
+    </div>
+    <div class="meta" id="pub-hint" style="margin-top:6px">
+      ${esc(BACKENDS.find((b) => b.value === f.via)?.hint ?? "")}
+    </div>
+
+    <div id="pub-cloudflare" class="${f.via === "cloudflare" || f.via === "auto" ? "" : "hidden"}">
+      <div class="row">
+        <label class="meta" for="pub-hostname" style="min-width:120px">Hostname</label>
+        <input id="pub-hostname" type="text" style="min-width:320px"
+               placeholder="gatehound.yourdomain.com" value="${esc(f.hostname)}" />
+      </div>
+      <div class="meta">
+        The hostname your tunnel routes here. Only used to show you a URL — the routing itself
+        is the tunnel's own configuration.
+      </div>
+      <div class="row">
+        <label class="meta" for="pub-token" style="min-width:120px">Tunnel token</label>
+        <input id="pub-token" type="password" style="min-width:320px"
+               placeholder="${f.has_token ? "stored — leave blank to keep" : "paste a remotely-managed tunnel's token"}" />
+        ${f.has_token ? `<button id="pub-forget" class="ghost">Forget</button>` : ""}
+      </div>
+      <div class="meta">
+        From <strong>Zero Trust → Networks → Tunnels</strong>. With one there is no
+        <code>cloudflared</code> login and no config file on disk. It is stored in the config
+        file, which lives in your user directory, not in any repository.
+        ${f.token_env ? `Currently read from <code>${esc(f.token_env)}</code> when that variable is set.` : ""}
+      </div>
+    </div>
+
+    <div id="pub-tailscale" class="${f.via === "tailscale" ? "" : "hidden"}">
+      <label class="check" style="margin-top:10px">
+        <input id="pub-funnel" type="checkbox" ${f.funnel ? "checked" : ""} />
+        <span>Tailscale Funnel — open it to the public internet too</span>
+      </label>
+      <div class="meta">
+        Off, only your tailnet can reach it and that is the second factor. On, it is as exposed
+        as a tunnel, so Access is required for it as well.
+      </div>
+    </div>
+
+    <h3 style="margin-top:14px">Cloudflare Access</h3>
+    <div class="meta">
+      The second factor: every request is checked at Cloudflare's edge before it reaches this
+      machine. Required for anything on the public internet. Both fields come from the Access
+      application guarding the gateway's hostname — not the one guarding any other site.
+    </div>
+    <div class="row">
+      <label class="meta" for="pub-team" style="min-width:120px">Team domain</label>
+      <input id="pub-team" type="text" style="min-width:320px"
+             placeholder="yourteam.cloudflareaccess.com" value="${esc(f.access_team_domain)}" />
+    </div>
+    <div class="row">
+      <label class="meta" for="pub-aud" style="min-width:120px">AUD tag</label>
+      <input id="pub-aud" type="text" style="min-width:320px"
+             placeholder="from the application's Overview tab" value="${esc(f.access_aud)}" />
+    </div>
+
+    <div class="row">
+      <button id="pub-save" class="primary">Save</button>
+      <span class="meta">Leave both Access fields blank to turn it off.</span>
+    </div>
+  </div>`;
+}
 
 function publishPanel(p: PublishInfo): string {
   const st = p.state;
@@ -829,6 +948,7 @@ async function renderAccess(snap: Snapshot): Promise<void> {
 
     ` +
     publishPanel(pub_) +
+    publishEditor(publishPending?.form ?? pub_.form, publishPending) +
     `
 
     <div class="card">
@@ -874,6 +994,63 @@ async function renderAccess(snap: Snapshot): Promise<void> {
     justIssued = null;
     void refresh();
   });
+
+  // The backend picked decides which fields matter, so the form follows the choice rather
+  // than showing every option at once and letting the operator work out which apply.
+  const viaSelect = $("#pub-via") as HTMLSelectElement | null;
+  const syncVia = (): void => {
+    const via = viaSelect?.value ?? "";
+    $("#pub-hint").textContent = BACKENDS.find((b) => b.value === via)?.hint ?? "";
+    $("#pub-cloudflare").classList.toggle("hidden", via !== "cloudflare" && via !== "auto");
+    $("#pub-tailscale").classList.toggle("hidden", via !== "tailscale");
+  };
+  viaSelect?.addEventListener("change", syncVia);
+
+  // Blank means "keep what is stored", so forgetting a token has to be said out loud.
+  let forgetToken = false;
+  $("#pub-forget")?.addEventListener("click", (e) => {
+    forgetToken = !forgetToken;
+    const b = e.currentTarget as HTMLButtonElement;
+    b.textContent = forgetToken ? "Will forget" : "Forget";
+    b.classList.toggle("danger", forgetToken);
+  });
+
+  $("#pub-save")?.addEventListener("click", async () => {
+    const value = (id: string): string => ($(id) as HTMLInputElement | null)?.value ?? "";
+    const typed = value("#pub-token");
+    let saved: Saved;
+    try {
+      saved = await invoke<Saved>("set_publish", {
+        edit: {
+          via: viaSelect?.value ?? "auto",
+          hostname: value("#pub-hostname"),
+          funnel: ($("#pub-funnel") as HTMLInputElement | null)?.checked ?? false,
+          // null keeps the stored token; "" forgets it. The window is never given the value,
+          // so an untouched field cannot mean "send back what you have".
+          token: typed ? typed : forgetToken ? "" : null,
+          access_team_domain: value("#pub-team"),
+          access_aud: value("#pub-aud"),
+        },
+      });
+    } catch (e) {
+      alert(String(e));
+      return;
+    }
+
+    publishPending = saved;
+    const warnings = saved.warnings.length ? `\n\n${saved.warnings.join("\n\n")}` : "";
+    const restart = confirm(
+      `Saved to ${saved.config_path}.\n\n` +
+        `The gateway is still published the way it started. Restart now to apply?${warnings}`,
+    );
+    if (restart) {
+      await invoke("restart_app");
+    } else {
+      await refresh();
+    }
+  });
+
+  $("#pub-restart")?.addEventListener("click", () => void invoke("restart_app"));
 
   $("#issue")?.addEventListener("click", async () => {
     const name = ($("#token-name") as HTMLInputElement).value;

@@ -611,4 +611,46 @@ decision = "allow"
         }
         std::env::remove_var("GATEHOUND_TEST_TOKEN");
     }
+
+    #[test]
+    fn a_configuration_the_app_writes_can_be_read_back() {
+        // The window edits a clone of the running config and writes the whole file. If that
+        // round trip is not exact, saving from the UI silently drops settings — or worse,
+        // produces a file the gateway then refuses to start from.
+        let mut cfg = Config {
+            listen_addr: "127.0.0.1:8790".into(),
+            auth: AuthConfig {
+                bearer_token: Some("0123456789abcdef0123".into()),
+                access: Some(AccessConfig {
+                    team_domain: "team.cloudflareaccess.com".into(),
+                    aud: "aud123".into(),
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        cfg.publish.via = crate::publish::PublishVia::Cloudflare;
+        cfg.publish.cloudflare.hostname = Some("gatehound.example.com".into());
+        cfg.publish.cloudflare.token = Some("a-tunnel-token".into());
+        cfg.publish.tailscale.funnel = true;
+
+        let body = toml::to_string_pretty(&cfg).expect("the app must be able to write this");
+        let back: Config = toml::from_str(&body).expect("and read back what it wrote");
+
+        assert_eq!(back.publish.via, crate::publish::PublishVia::Cloudflare);
+        assert_eq!(
+            back.publish.cloudflare.hostname.as_deref(),
+            Some("gatehound.example.com")
+        );
+        assert_eq!(
+            back.publish.cloudflare.token.as_deref(),
+            Some("a-tunnel-token")
+        );
+        assert!(back.publish.tailscale.funnel);
+        assert_eq!(
+            back.auth.access.as_ref().map(|a| a.team_domain.as_str()),
+            Some("team.cloudflareaccess.com")
+        );
+        back.validate().expect("and the result must be startable");
+    }
 }

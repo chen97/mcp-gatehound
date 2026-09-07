@@ -276,3 +276,9 @@ jobs:
 
       - name: Check the shell
         run: cargo clippy -p gatehound-app --all-targets -- -D warnings
+
+      # The shell is not a default workspace member, so `cargo test` above never reaches it.
+      # What it holds that is worth testing is the settings the window writes back: a config
+      # the gateway then refuses to start from cannot be fixed from the window that caused it.
+      - name: Test the shell
+        run: cargo test -p gatehound-app --bin gatehound-app

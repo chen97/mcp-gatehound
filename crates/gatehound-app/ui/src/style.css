@@ -30,7 +30,7 @@ nav button.active { color: var(--tx); border-bottom-color: var(--am); }
 .badge.hot { background: var(--am); color: #1a1405; font-weight: 700; }
 
 main { padding: 14px 18px 32px; }
-.screen.hidden { display: none; }
+.screen.hidden, .hidden { display: none; }
 
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 10px; }
 .card h3 { margin: 0 0 4px; font-size: 14px; }

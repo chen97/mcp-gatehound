@@ -18,7 +18,7 @@ use gatehound_core::pack::{self, MissingFile, Pack};
 use gatehound_core::store::{IdentityRule, PendingRow, RequestLog};
 use gatehound_core::tokens::TokenInfo;
 use gatehound_core::Gateway;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
@@ -225,6 +225,51 @@ struct PublishInfo {
     /// The outcome.
     state: gatehound_core::publish::PublishState,
     second_factor: gatehound_core::publish::SecondFactor,
+    /// What the form shows. Editing publishing by hand means finding a TOML file, which is
+    /// the one step of setup that has nothing to do with what the operator is deciding.
+    form: PublishForm,
+}
+
+/// The settings the panel can change, as the window sees them.
+#[derive(Serialize)]
+struct PublishForm {
+    via: &'static str,
+    hostname: String,
+    funnel: bool,
+    /// Whether a tunnel token is stored — never the token. A secret that has been saved does
+    /// not need to travel back to the window to be kept, and a field that echoed it would put
+    /// it on screen every time the panel rendered.
+    has_token: bool,
+    /// The variable a token is read from instead, when configuration names one. Editing that
+    /// belongs in the file; the panel only says it is in play, so a blank token field is not
+    /// mistaken for no token at all.
+    token_env: String,
+    access_team_domain: String,
+    access_aud: String,
+}
+
+/// The settings coming back from the panel.
+#[derive(Deserialize)]
+struct PublishEdit {
+    via: String,
+    hostname: String,
+    funnel: bool,
+    /// `null` keeps whatever is stored, `""` forgets it, anything else replaces it. The window
+    /// is never given the current value, so "unchanged" has to be sayable without echoing it.
+    token: Option<String>,
+    access_team_domain: String,
+    access_aud: String,
+}
+
+/// Where the change landed, and anything the gateway wants to say about it.
+#[derive(Serialize)]
+struct Saved {
+    config_path: String,
+    warnings: Vec<String>,
+    /// The settings as saved. The status panel above the form reports what is *running*, and
+    /// until a restart those differ — so the form has to show what will apply, or it snaps
+    /// back to the old values and looks as though the save was lost.
+    form: PublishForm,
 }
 
 #[tauri::command]
@@ -232,6 +277,7 @@ fn publish_state(state: tauri::State<'_, AppState>) -> PublishInfo {
     let published = state.publisher.state();
     PublishInfo {
         configured: state.gateway.cfg.publish.via.as_str(),
+        form: form_of(&state.gateway.cfg),
         // The factor is judged against what is actually running, not what the config asked
         // for: `auto` intends the internet but may well have found nothing to publish with,
         // and calling that "nothing in front of it" would be a false alarm.
@@ -241,6 +287,105 @@ fn publish_state(state: tauri::State<'_, AppState>) -> PublishInfo {
         ),
         state: published,
     }
+}
+
+/// Apply a panel edit to a configuration, returning anything the gateway wants to say about
+/// the result — or an error, for a configuration it would refuse to start from.
+///
+/// Separate from the command so it can be tested without a running app: this is where a
+/// mistake would write a file the gateway then will not come up from, which is the one
+/// failure an operator cannot fix from the window that caused it.
+fn apply_publish_edit(cfg: &mut Config, edit: PublishEdit) -> Result<Vec<String>, String> {
+    use gatehound_core::publish::PublishVia;
+
+    cfg.publish.via = match edit.via.as_str() {
+        "none" => PublishVia::None,
+        "auto" => PublishVia::Auto,
+        "cloudflare" => PublishVia::Cloudflare,
+        "tailscale" => PublishVia::Tailscale,
+        other => return Err(format!("unknown publish backend '{other}'")),
+    };
+    cfg.publish.tailscale.funnel = edit.funnel;
+    cfg.publish.cloudflare.hostname = non_empty(&edit.hostname);
+    // `None` means the panel did not touch the field, which is the ordinary case: it is never
+    // sent the stored token, so it cannot send it back unchanged.
+    if let Some(token) = edit.token {
+        cfg.publish.cloudflare.token = non_empty(&token);
+    }
+
+    cfg.auth.access = match (
+        non_empty(&edit.access_team_domain),
+        non_empty(&edit.access_aud),
+    ) {
+        (None, None) => None,
+        // Half-filled is not silently dropped: `validate` names the missing field, which is
+        // more use than an Access section quietly failing to exist.
+        (team_domain, aud) => Some(gatehound_core::config::AccessConfig {
+            team_domain: team_domain.unwrap_or_default(),
+            aud: aud.unwrap_or_default(),
+        }),
+    };
+
+    // The same check the gateway runs at startup, so the panel cannot save a configuration
+    // that would then refuse to come up — including publishing to the internet on one factor.
+    cfg.validate().map_err(|e| format!("{e:#}"))?;
+    cfg.publish.check(&cfg.auth).map_err(err)
+}
+
+/// Save publishing settings, refusing anything the gateway would refuse to start from.
+///
+/// Written to the same file the rest of the configuration lives in, by editing a clone of the
+/// running config — so keys the panel does not show keep their values, and the gateway carries
+/// on serving what it started with until it is restarted.
+#[tauri::command]
+fn set_publish(state: tauri::State<'_, AppState>, edit: PublishEdit) -> Result<Saved, String> {
+    let mut cfg = (*state.gateway.cfg).clone();
+    let warnings = apply_publish_edit(&mut cfg, edit)?;
+    let via = cfg.publish.via;
+
+    let body = toml::to_string_pretty(&cfg)
+        .context("serializing the configuration")
+        .map_err(err)?;
+    if let Some(dir) = state.config_path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating {}", dir.display()))
+            .map_err(err)?;
+    }
+    std::fs::write(&state.config_path, body)
+        .with_context(|| format!("writing {}", state.config_path.display()))
+        .map_err(err)?;
+
+    tracing::info!(
+        via = via.as_str(),
+        config = %state.config_path.display(),
+        "publishing settings changed"
+    );
+    Ok(Saved {
+        config_path: state.config_path.display().to_string(),
+        warnings,
+        form: form_of(&cfg),
+    })
+}
+
+/// The form's view of a configuration, wherever that configuration came from.
+fn form_of(cfg: &Config) -> PublishForm {
+    let access = cfg.auth.access.as_ref();
+    PublishForm {
+        via: cfg.publish.via.as_str(),
+        hostname: cfg.publish.cloudflare.hostname.clone().unwrap_or_default(),
+        funnel: cfg.publish.tailscale.funnel,
+        has_token: cfg.publish.cloudflare.token.is_some(),
+        token_env: cfg.publish.cloudflare.token_env.clone().unwrap_or_default(),
+        access_team_domain: access.map(|a| a.team_domain.clone()).unwrap_or_default(),
+        access_aud: access.map(|a| a.aud.clone()).unwrap_or_default(),
+    }
+}
+
+/// A blank field means absent, not present-and-empty. TOML has no way to tell those apart in
+/// a way an operator would predict, and an empty hostname is not a hostname.
+fn non_empty(s: &str) -> Option<String> {
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
 }
 
 /// Mint a token for one client, allowing exactly the tools chosen for it.
@@ -676,6 +821,7 @@ fn main() {
             restart_app,
             access,
             publish_state,
+            set_publish,
             issue_token,
             revoke_token,
         ])
@@ -815,5 +961,134 @@ fn dirs_config() -> Option<std::path::PathBuf> {
             .or_else(|| {
                 std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gatehound_core::publish::PublishVia;
+
+    fn base() -> Config {
+        Config {
+            auth: gatehound_core::config::AuthConfig {
+                bearer_token: Some("0123456789abcdef0123".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn edit(via: &str) -> PublishEdit {
+        PublishEdit {
+            via: via.into(),
+            hostname: String::new(),
+            funnel: false,
+            token: None,
+            access_team_domain: String::new(),
+            access_aud: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_panel_cannot_save_a_gateway_it_would_then_fail_to_start() {
+        // The refusal has to happen before the file is written. Saving a config the gateway
+        // will not come up from leaves the operator unable to fix it from the window that
+        // caused it — the window needs the gateway running to be there at all.
+        let mut cfg = base();
+        let err = apply_publish_edit(&mut cfg, edit("cloudflare")).expect_err("must refuse");
+        assert!(err.contains("public internet"), "{err}");
+        assert!(err.contains("auth.access"), "{err}");
+
+        // With Access it goes through, and no warning is left over.
+        let mut cfg = base();
+        let mut e = edit("cloudflare");
+        e.access_team_domain = "team.cloudflareaccess.com".into();
+        e.access_aud = "aud123".into();
+        e.hostname = "gatehound.example.com".into();
+        assert_eq!(
+            apply_publish_edit(&mut cfg, e).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(cfg.publish.via, PublishVia::Cloudflare);
+        assert_eq!(
+            cfg.publish.cloudflare.hostname.as_deref(),
+            Some("gatehound.example.com")
+        );
+    }
+
+    #[test]
+    fn a_tailnet_needs_no_access_but_a_funnel_does() {
+        // The whole point of offering Tailscale is that it works without a Cloudflare account.
+        let mut cfg = base();
+        assert!(apply_publish_edit(&mut cfg, edit("tailscale"))
+            .unwrap()
+            .is_empty());
+        assert!(cfg.auth.access.is_none());
+
+        // Funnel is as exposed as a tunnel, so the same rule applies.
+        let mut cfg = base();
+        let mut e = edit("tailscale");
+        e.funnel = true;
+        let err = apply_publish_edit(&mut cfg, e).expect_err("a funnel is the public internet");
+        assert!(err.contains("public internet"), "{err}");
+    }
+
+    #[test]
+    fn a_blank_token_field_keeps_the_stored_one_and_forgetting_is_explicit() {
+        // The window is never sent the token, so it cannot echo it back to mean "unchanged".
+        // If blank wiped it, every unrelated save would silently unpublish the gateway.
+        let mut cfg = base();
+        cfg.publish.cloudflare.token = Some("a-tunnel-token".into());
+
+        apply_publish_edit(&mut cfg, edit("tailscale")).unwrap();
+        assert_eq!(
+            cfg.publish.cloudflare.token.as_deref(),
+            Some("a-tunnel-token"),
+            "an untouched field must not clear the token"
+        );
+
+        let mut e = edit("tailscale");
+        e.token = Some("replaced".into());
+        apply_publish_edit(&mut cfg, e).unwrap();
+        assert_eq!(cfg.publish.cloudflare.token.as_deref(), Some("replaced"));
+
+        let mut e = edit("tailscale");
+        e.token = Some(String::new());
+        apply_publish_edit(&mut cfg, e).unwrap();
+        assert_eq!(cfg.publish.cloudflare.token, None, "forgetting must work");
+    }
+
+    #[test]
+    fn access_is_removed_by_clearing_both_fields_and_half_filled_is_an_error() {
+        let mut cfg = base();
+        let mut e = edit("tailscale");
+        e.access_team_domain = "team.cloudflareaccess.com".into();
+        e.access_aud = "aud123".into();
+        apply_publish_edit(&mut cfg, e).unwrap();
+        assert!(cfg.auth.access.is_some());
+
+        apply_publish_edit(&mut cfg, edit("tailscale")).unwrap();
+        assert!(cfg.auth.access.is_none(), "both blank turns Access off");
+
+        // One field alone is a mistake, not a silent no-op.
+        let mut e = edit("tailscale");
+        e.access_aud = "aud123".into();
+        let err = apply_publish_edit(&mut cfg, e).expect_err("half-filled Access must be caught");
+        assert!(err.contains("team_domain"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_backend_is_refused_rather_than_defaulted() {
+        // Defaulting here would mean a typo in the window silently publishing the gateway.
+        let mut cfg = base();
+        let err = apply_publish_edit(&mut cfg, edit("cloudfalre")).expect_err("must refuse");
+        assert!(err.contains("cloudfalre"), "{err}");
+    }
+
+    #[test]
+    fn blank_fields_mean_absent_not_present_and_empty() {
+        assert_eq!(non_empty("  "), None);
+        assert_eq!(non_empty(" host "), Some("host".to_string()));
     }
 }
