@@ -167,6 +167,121 @@ async fn set_paused(app: AppHandle, paused: bool) -> Result<(), String> {
     Ok(())
 }
 
+// ---- Connecting a service -------------------------------------------------
+// A service added here becomes the same thing an imported pack becomes. What the window adds
+// is discovery — asking an MCP server what it has, so an operator ticks real tools instead of
+// typing names — and a say in what its tools do the first time a client calls one.
+
+/// What a service says it offers. Names and descriptions are the other server's text, shown
+/// to an operator who is deciding what to allow; they are data, never instructions.
+#[derive(Serialize)]
+struct Discovered {
+    tools: Vec<gatehound_core::upstreams::mcp::DiscoveredTool>,
+}
+
+/// Ask an MCP server for its tool list, without changing anything.
+#[tauri::command]
+async fn discover_tools(
+    url: String,
+    token: Option<String>,
+    token_env: Option<String>,
+) -> Result<Discovered, String> {
+    let bearer = token
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            token_env
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .and_then(|v| std::env::var(v).ok())
+                .filter(|t| !t.is_empty())
+        });
+    let up = gatehound_core::upstreams::mcp::McpUpstream::new(url.trim(), bearer).map_err(err)?;
+    let tools = up.list_tools().await.map_err(|e| format!("{e:#}"))?;
+    Ok(Discovered { tools })
+}
+
+/// What adding a connection did.
+#[derive(Serialize)]
+struct Connected {
+    applied: Applied,
+    config_path: String,
+    missing_env: Vec<String>,
+    /// Clients whose existing deny-everything rule was overridden so a first call to these
+    /// tools reaches you instead of vanishing.
+    asked_for: Vec<String>,
+}
+
+/// Add a service and the tools chosen from it, writing them to the configuration.
+///
+/// `on_first_call` says what a client's first call to these tools does: `Ask` holds it for a
+/// decision here, `Deny` makes them invisible until granted on Identities.
+#[tauri::command]
+fn add_connection(
+    state: tauri::State<'_, AppState>,
+    connection: gatehound_core::connect::NewConnection,
+    replace: bool,
+    on_first_call: Decision,
+) -> Result<Connected, String> {
+    let pack = connection.to_pack().map_err(|e| format!("{e:#}"))?;
+    let mut cfg = (*state.gateway.cfg).clone();
+    let applied = pack::merge(&mut cfg, &pack, replace).map_err(|e| format!("{e:#}"))?;
+    if let Some(token) = connection.inline_token() {
+        gatehound_core::connect::apply_inline_token(&mut cfg, &connection.name, token);
+    }
+
+    let body = toml::to_string_pretty(&cfg)
+        .context("serializing the configuration")
+        .map_err(err)?;
+    if let Some(dir) = state.config_path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating {}", dir.display()))
+            .map_err(err)?;
+    }
+    std::fs::write(&state.config_path, body)
+        .with_context(|| format!("writing {}", state.config_path.display()))
+        .map_err(err)?;
+
+    // An identity with no rule at all already falls through to `ask`. An issued token does
+    // not: it carries a deny-everything wildcard, so a new tool would be silently invisible
+    // to it rather than prompting. An exact rule beats that wildcard, so write one — this is
+    // the difference between "a client asks you the first time" and "a client sees nothing
+    // and nobody finds out why".
+    let mut asked_for = Vec::new();
+    if on_first_call == Decision::Ask {
+        let rules = state.gateway.identities().map_err(err)?;
+        let wildcarded: Vec<String> = rules
+            .iter()
+            .filter(|r| r.tool == "*" && r.decision == "deny")
+            .map(|r| r.identity.clone())
+            .collect();
+        for identity in &wildcarded {
+            for tool in &applied.tools {
+                state
+                    .gateway
+                    .store
+                    .set_decision(identity, tool, Decision::Ask)
+                    .map_err(err)?;
+            }
+            asked_for.push(identity.clone());
+        }
+    }
+
+    tracing::info!(
+        connection = %connection.name,
+        tools = applied.tools.len(),
+        config = %state.config_path.display(),
+        "added a connection"
+    );
+    Ok(Connected {
+        applied: applied.into(),
+        config_path: state.config_path.display().to_string(),
+        missing_env: pack.missing_env(),
+        asked_for,
+    })
+}
+
 // ---- Access tokens --------------------------------------------------------
 // The configured bearer is the super token: it authenticates as the owner and can call
 // everything. A token issued here authenticates as an identity of its own, and the policy
@@ -818,6 +933,8 @@ fn main() {
             inspect_pack,
             choose_file,
             apply_pack,
+            discover_tools,
+            add_connection,
             restart_app,
             access,
             publish_state,

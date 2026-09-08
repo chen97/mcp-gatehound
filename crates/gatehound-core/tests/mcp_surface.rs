@@ -207,6 +207,83 @@ impl Drop for Harness {
 }
 
 #[tokio::test]
+async fn a_server_can_be_discovered_and_connected_without_typing_its_tools() {
+    // The whole point of the connect form: point it at a real MCP server, get back what it
+    // actually offers, and turn a tick-box choice into working configuration. Run against a
+    // live gateway rather than a stub, because the risk is that discovery mis-parses what a
+    // real server returns — which a hand-written fixture would never catch.
+    let h = start(allow_all("bearer")).await;
+    let url = format!("{}/mcp", h.base);
+
+    let up = gatehound_core::upstreams::mcp::McpUpstream::new(&url, Some(TOKEN.into())).unwrap();
+    let found = up
+        .list_tools()
+        .await
+        .expect("a live server answers tools/list");
+
+    let names: Vec<&str> = found.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"echo"), "discovered {names:?}");
+    assert!(
+        found.iter().any(|t| !t.description.is_empty()),
+        "descriptions come across, or the operator picks blind"
+    );
+    assert!(
+        found.iter().any(|t| t.input_schema.is_some()),
+        "so does the argument schema, or the gateway advertises a guess at the shape"
+    );
+
+    // Now the form's half: expose only the one that was ticked.
+    let conn = gatehound_core::connect::NewConnection {
+        name: "inner".into(),
+        description: "another gateway".into(),
+        service: gatehound_core::connect::Service::Mcp {
+            url: url.clone(),
+            token_env: None,
+            token: Some(TOKEN.into()),
+        },
+        tools: found
+            .iter()
+            .filter(|t| t.name == "echo")
+            .map(|t| gatehound_core::connect::NewTool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema: t.input_schema.clone(),
+                binding: gatehound_core::connect::Binding::Op {
+                    op: String::new(),
+                    request: None,
+                },
+            })
+            .collect(),
+    };
+
+    let pack = conn.to_pack().unwrap();
+    let mut cfg = Config {
+        auth: AuthConfig {
+            bearer_token: Some(TOKEN.into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let applied = gatehound_core::pack::merge(&mut cfg, &pack, false).unwrap();
+    assert_eq!(applied.tools, vec!["echo"]);
+    gatehound_core::connect::apply_inline_token(&mut cfg, "inner", TOKEN);
+
+    // The ticked tool is there and the unticked one is not — an upstream cannot widen the
+    // surface just by offering more.
+    assert_eq!(cfg.tools.len(), 1);
+    assert!(!cfg.tools.iter().any(|t| t.name == "secret"));
+
+    // And what came out is a configuration a gateway will actually start from.
+    let written = toml::to_string_pretty(&cfg).unwrap();
+    let back: Config = toml::from_str(&written).unwrap();
+    back.validate()
+        .expect("the written config must be startable");
+    assert!(!written.contains("secret"), "{written}");
+
+    h.cancel.cancel();
+}
+
+#[tokio::test]
 async fn the_unauthenticated_endpoints_give_nothing_away() {
     // /healthz and /version answer without credentials so a tunnel or a load balancer can
     // probe them. Anything they disclose is disclosed to whoever reaches the hostname, so

@@ -324,9 +324,23 @@ async function renderLog(): Promise<void> {
 // ---- Connections & tools ---------------------------------------------------
 
 async function renderActions(snap: Snapshot): Promise<void> {
+  if (actionsAreBeingEdited()) return;
   const configFile = await invoke<string>("config_path");
   $("#actions").innerHTML =
-    renderPackPanel() +
+    (draft
+      ? connectForm(draft)
+      : `<div class="card">
+           <h3>Add something for the gateway to call</h3>
+           <div class="meta">
+             A connection is one service and the tools bound to it. Build it here, or import a
+             pack someone else wrote — both end up as the same thing.
+           </div>
+           <div class="row">
+             <button id="c-open" class="primary">Add a connection…</button>
+             <button id="pack-pick" class="ghost">Import a pack…</button>
+           </div>
+         </div>`) +
+    (draft ? "" : renderPackPlanIfAny()) +
     `
     <div class="card">
       <h3>Connected services</h3>
@@ -363,7 +377,502 @@ async function renderActions(snap: Snapshot): Promise<void> {
           .join("")}</tbody>
       </table>
     </div>`;
+  $("#c-open")?.addEventListener("click", () => {
+    draft = newDraft("mcp");
+    connDirty = false;
+    void refresh();
+  });
+  if (draft) wireConnectForm();
   wirePackPanel();
+}
+
+/// Whether rebuilding this screen would throw away something half-typed. Same rule as the
+/// Network screen: a URL or a token being entered outranks a five-second refresh.
+function actionsAreBeingEdited(): boolean {
+  if (!$("#actions").innerHTML) return false;
+  if (connDirty) return true;
+  const el = document.activeElement;
+  return (
+    el instanceof HTMLElement &&
+    $("#actions").contains(el) &&
+    (el instanceof HTMLInputElement ||
+      el instanceof HTMLSelectElement ||
+      el instanceof HTMLTextAreaElement)
+  );
+}
+
+// ---- Adding a connection ---------------------------------------------------
+// The same thing importing a pack produces, collected from a form instead of a file. For an
+// MCP server the tool list is discovered rather than typed, because a name typed from memory
+// is a name you find out was wrong on the first call.
+
+type ConnKind = "mcp" | "http" | "exec";
+
+interface DraftTool {
+  chosen: boolean;
+  name: string;
+  description: string;
+  /// MCP: the upstream's own tool name. HTTP: the operation these request details define.
+  op: string;
+  input_schema: unknown | null;
+  method: string;
+  path: string;
+  cmd: string;
+  args: string;
+}
+
+interface Draft {
+  kind: ConnKind;
+  name: string;
+  description: string;
+  url: string;
+  base_url: string;
+  auth: string;
+  token_env: string;
+  token: string;
+  health_path: string;
+  discovered: DraftTool[] | null;
+  error: string | null;
+  busy: boolean;
+  tools: DraftTool[];
+  on_first_call: "ask" | "deny";
+  replace: boolean;
+}
+
+interface Connected {
+  applied: Applied;
+  config_path: string;
+  missing_env: string[];
+  asked_for: string[];
+}
+
+// Open only while the operator is adding something. Null closes the form.
+let draft: Draft | null = null;
+// Same reason the publish form has one: this screen rebuilds on a timer, and a rebuild
+// mid-keystroke would throw away a URL or a token being typed.
+let connDirty = false;
+
+function blankTool(): DraftTool {
+  return {
+    chosen: true,
+    name: "",
+    description: "",
+    op: "",
+    input_schema: null,
+    method: "GET",
+    path: "",
+    cmd: "",
+    args: "",
+  };
+}
+
+function newDraft(kind: ConnKind): Draft {
+  return {
+    kind,
+    name: "",
+    description: "",
+    url: "",
+    base_url: "",
+    auth: "bearer",
+    token_env: "",
+    token: "",
+    health_path: "",
+    discovered: null,
+    error: null,
+    busy: false,
+    tools: [blankTool()],
+    on_first_call: "ask",
+    replace: false,
+  };
+}
+
+const KINDS: { value: ConnKind; label: string; hint: string }[] = [
+  {
+    value: "mcp",
+    label: "Another MCP server",
+    hint: "On this machine or anywhere else — only the URL differs. The gateway can ask it what tools it has, so you pick from a list.",
+  },
+  {
+    value: "http",
+    label: "A REST API",
+    hint: "Each tool is one request: a method and a path, with {placeholders} filled from the caller's arguments and never able to escape their part of the URL.",
+  },
+  {
+    value: "exec",
+    label: "Local commands",
+    hint: "Nothing to connect to — each tool runs a program on this machine. Arguments are passed as a list, never through a shell.",
+  },
+];
+
+/// The token row, shared by the two kinds that have one.
+function tokenFields(d: Draft): string {
+  return `
+    <div class="row">
+      <label class="meta" style="min-width:130px">Token from variable</label>
+      <input id="c-tokenenv" type="text" style="min-width:260px"
+             placeholder="e.g. BEEPER_TOKEN" value="${esc(d.token_env)}" />
+    </div>
+    <div class="row">
+      <label class="meta" style="min-width:130px">…or paste one</label>
+      <input id="c-token" type="password" style="min-width:260px"
+             placeholder="stored in the config file" value="${esc(d.token)}" />
+    </div>
+    <div class="meta">
+      A variable keeps the secret out of the config file, which is what makes that file safe to
+      share or commit. A pasted token is written into it — fine for a file in your own user
+      directory, not for one you hand to anyone.
+    </div>`;
+}
+
+function discoveredList(d: Draft): string {
+  if (d.busy) return `<div class="meta">Asking the server what it has…</div>`;
+  if (!d.discovered) return "";
+  if (d.discovered.length === 0) {
+    return `<div class="notice"><strong>It answered, but offers no tools.</strong>
+      <div class="meta">Nothing to expose. Check you pointed at the right server.</div></div>`;
+  }
+  return `
+    <div class="meta" style="margin-top:10px">
+      ${d.discovered.length} tool${d.discovered.length === 1 ? "" : "s"} offered. Tick what this
+      gateway may expose — the rest stay unreachable through it, whatever the server advertises.
+    </div>
+    <div class="checks">
+      ${d.discovered
+        .map(
+          (t, i) => `<label class="check">
+            <input type="checkbox" class="c-pick" data-i="${i}" ${t.chosen ? "checked" : ""} />
+            <code>${esc(t.name)}</code>
+            <span class="meta">${esc(t.description)}</span>
+          </label>`,
+        )
+        .join("")}
+    </div>`;
+}
+
+function manualTools(d: Draft): string {
+  const rows = d.tools
+    .map((t, i) => {
+      const detail =
+        d.kind === "http"
+          ? `<input class="c-method" data-i="${i}" style="width:90px" value="${esc(t.method)}" placeholder="GET" />
+             <input class="c-path" data-i="${i}" style="min-width:220px" value="${esc(t.path)}" placeholder="/v1/notes/{id}" />`
+          : `<input class="c-cmd" data-i="${i}" style="width:140px" value="${esc(t.cmd)}" placeholder="df" />
+             <input class="c-args" data-i="${i}" style="min-width:180px" value="${esc(t.args)}" placeholder="-h  (one per space)" />`;
+      return `<div class="row">
+        <input class="c-name" data-i="${i}" style="width:150px" value="${esc(t.name)}" placeholder="tool name" />
+        ${detail}
+        <button class="ghost c-drop" data-i="${i}">Remove</button>
+      </div>
+      <div class="row">
+        <input class="c-desc" data-i="${i}" style="min-width:420px" value="${esc(t.description)}"
+               placeholder="what it does — the caller sees this" />
+      </div>`;
+    })
+    .join("");
+  return `${rows}<div class="row"><button id="c-add-tool" class="ghost">Add another tool</button></div>`;
+}
+
+function connectForm(d: Draft): string {
+  const kind = KINDS.find((k) => k.value === d.kind)!;
+  const body =
+    d.kind === "mcp"
+      ? `<div class="row">
+           <label class="meta" style="min-width:130px">URL</label>
+           <input id="c-url" type="text" style="min-width:340px"
+                  placeholder="http://127.0.0.1:23373/mcp" value="${esc(d.url)}" />
+           <button id="c-discover" class="ghost">List its tools</button>
+         </div>
+         ${tokenFields(d)}
+         ${discoveredList(d)}`
+      : d.kind === "http"
+        ? `<div class="row">
+             <label class="meta" style="min-width:130px">Base URL</label>
+             <input id="c-baseurl" type="text" style="min-width:340px"
+                    placeholder="https://api.example.com" value="${esc(d.base_url)}" />
+           </div>
+           <div class="row">
+             <label class="meta" style="min-width:130px">Sends the token as</label>
+             <select id="c-auth">
+               <option value="bearer"${d.auth === "bearer" ? " selected" : ""}>Authorization: Bearer</option>
+               <option value="none"${d.auth === "none" ? " selected" : ""}>No credential</option>
+             </select>
+           </div>
+           ${tokenFields(d)}
+           <h3 style="margin-top:14px">Tools</h3>
+           <div class="meta">
+             One request each. <code>{placeholders}</code> in the path are filled from the
+             caller's arguments and percent-encoded, so an argument cannot escape its segment.
+           </div>
+           ${manualTools(d)}`
+        : `<h3 style="margin-top:4px">Tools</h3>
+           <div class="meta">
+             Each tool runs one program. Arguments are a list, never a shell line — so nothing
+             a caller sends can turn into a second command.
+           </div>
+           ${manualTools(d)}`;
+
+  return `<div class="card">
+    <h3>Add a connection</h3>
+    <div class="meta">${esc(kind.hint)}</div>
+
+    <div class="row">
+      <label class="meta" style="min-width:130px">Kind</label>
+      <select id="c-kind">
+        ${KINDS.map((k) => `<option value="${k.value}"${k.value === d.kind ? " selected" : ""}>${esc(k.label)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="row">
+      <label class="meta" style="min-width:130px">Name</label>
+      <input id="c-name" type="text" style="width:200px" placeholder="beeper" value="${esc(d.name)}" />
+      <span class="meta">An identifier, no spaces. Tools refer to it.</span>
+    </div>
+
+    ${body}
+
+    <h3 style="margin-top:14px">The first time a client calls these</h3>
+    <div class="row">
+      <label class="check">
+        <input type="radio" name="c-first" value="ask" ${d.on_first_call === "ask" ? "checked" : ""} />
+        <span>Ask me — the call waits here for a decision</span>
+      </label>
+    </div>
+    <div class="row">
+      <label class="check">
+        <input type="radio" name="c-first" value="deny" ${d.on_first_call === "deny" ? "checked" : ""} />
+        <span>Deny — the tools stay invisible until I grant them on Identities</span>
+      </label>
+    </div>
+    <div class="meta">
+      A client with no rule already asks. One holding an issued token denies everything by
+      default, so choosing <em>Ask</em> writes it a rule per tool — otherwise these would simply
+      never appear for it, and nothing would say why.
+    </div>
+
+    ${
+      d.error
+        ? `<div class="notice warn"><strong>That did not work.</strong>
+             <div class="meta">${esc(d.error)}</div></div>`
+        : ""
+    }
+
+    <div class="row">
+      <button id="c-save" class="primary">Add connection</button>
+      <button id="c-cancel" class="ghost">Cancel</button>
+      <label class="check" style="margin-left:8px">
+        <input id="c-replace" type="checkbox" ${d.replace ? "checked" : ""} />
+        <span class="meta">Replace anything already using these names</span>
+      </label>
+    </div>
+  </div>`;
+}
+
+/// Read every field back out of the DOM, so the draft survives a re-render.
+function readDraft(d: Draft): void {
+  const val = (sel: string): string =>
+    (document.querySelector(sel) as HTMLInputElement | HTMLSelectElement | null)?.value ?? "";
+  d.name = val("#c-name");
+  d.url = val("#c-url");
+  d.base_url = val("#c-baseurl");
+  d.auth = val("#c-auth") || d.auth;
+  d.token_env = val("#c-tokenenv");
+  d.token = val("#c-token");
+  d.replace = ($("#c-replace") as HTMLInputElement | null)?.checked ?? d.replace;
+  const first = document.querySelector<HTMLInputElement>('input[name="c-first"]:checked');
+  if (first) d.on_first_call = first.value === "deny" ? "deny" : "ask";
+
+  for (const [cls, key] of [
+    ["c-name", "name"],
+    ["c-desc", "description"],
+    ["c-method", "method"],
+    ["c-path", "path"],
+    ["c-cmd", "cmd"],
+    ["c-args", "args"],
+  ] as const) {
+    for (const el of Array.from(document.querySelectorAll<HTMLInputElement>(`.${cls}`))) {
+      const i = Number(el.dataset.i);
+      if (d.tools[i]) (d.tools[i] as unknown as Record<string, string>)[key] = el.value;
+    }
+  }
+  for (const el of Array.from(document.querySelectorAll<HTMLInputElement>(".c-pick"))) {
+    const i = Number(el.dataset.i);
+    if (d.discovered?.[i]) d.discovered[i].chosen = el.checked;
+  }
+}
+
+/// The tools the draft would actually send.
+function draftTools(d: Draft): unknown[] {
+  if (d.kind === "mcp") {
+    return (d.discovered ?? [])
+      .filter((t) => t.chosen)
+      .map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.input_schema,
+        binding: "op",
+        // For MCP the operation is the upstream's own tool name.
+        op: t.name,
+      }));
+  }
+  if (d.kind === "http") {
+    return d.tools
+      .filter((t) => t.name.trim())
+      .map((t) => ({
+        name: t.name,
+        description: t.description,
+        binding: "op",
+        op: t.op.trim() || t.name.trim(),
+        request: { method: t.method || "GET", path: t.path, query: {}, body: null },
+      }));
+  }
+  return d.tools
+    .filter((t) => t.name.trim())
+    .map((t) => ({
+      name: t.name,
+      description: t.description,
+      binding: "exec",
+      cmd: t.cmd,
+      args: t.args.split(/\s+/).filter(Boolean),
+    }));
+}
+
+function draftService(d: Draft): Record<string, unknown> {
+  if (d.kind === "mcp") {
+    return { kind: "mcp", url: d.url, token_env: d.token_env || null, token: d.token || null };
+  }
+  if (d.kind === "http") {
+    return {
+      kind: "http",
+      base_url: d.base_url,
+      auth: d.auth === "none" ? "none" : "bearer",
+      token_env: d.token_env || null,
+      token: d.token || null,
+      health_path: d.health_path || null,
+    };
+  }
+  return { kind: "exec" };
+}
+
+function wireConnectForm(): void {
+  const d = draft;
+  if (!d) return;
+  const touch = (): void => {
+    connDirty = true;
+  };
+  for (const el of Array.from(
+    document.querySelectorAll<HTMLElement>("#actions input, #actions select"),
+  )) {
+    el.addEventListener("input", touch);
+  }
+
+  $("#c-kind")?.addEventListener("change", (e) => {
+    // Changing kind changes which fields exist, so the draft restarts rather than carrying
+    // over half-filled values that no longer mean anything.
+    const kind = (e.currentTarget as HTMLSelectElement).value as ConnKind;
+    const name = ($("#c-name") as HTMLInputElement | null)?.value ?? "";
+    draft = newDraft(kind);
+    draft.name = name;
+    connDirty = false;
+    void refresh();
+  });
+
+  $("#c-cancel")?.addEventListener("click", () => {
+    draft = null;
+    connDirty = false;
+    void refresh();
+  });
+
+  $("#c-add-tool")?.addEventListener("click", () => {
+    readDraft(d);
+    d.tools.push(blankTool());
+    connDirty = false;
+    void refresh();
+  });
+
+  for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>(".c-drop"))) {
+    b.addEventListener("click", () => {
+      readDraft(d);
+      d.tools.splice(Number(b.dataset.i), 1);
+      if (d.tools.length === 0) d.tools.push(blankTool());
+      connDirty = false;
+      void refresh();
+    });
+  }
+
+  $("#c-discover")?.addEventListener("click", async () => {
+    readDraft(d);
+    d.busy = true;
+    d.error = null;
+    connDirty = false;
+    await refresh();
+    try {
+      const found = await invoke<{ tools: { name: string; description: string; input_schema: unknown }[] }>(
+        "discover_tools",
+        { url: d.url, token: d.token || null, tokenEnv: d.token_env || null },
+      );
+      d.discovered = found.tools.map((t) => ({
+        ...blankTool(),
+        chosen: true,
+        name: t.name,
+        description: t.description,
+        input_schema: t.input_schema ?? null,
+      }));
+      // A server usually knows its own name better than the operator does at this point.
+      if (!d.name.trim()) {
+        try {
+          d.name = new URL(d.url).hostname.split(".")[0].replace(/[^A-Za-z0-9_-]/g, "");
+        } catch {
+          /* a URL we cannot parse is the server's problem to report, not a naming failure */
+        }
+      }
+    } catch (e) {
+      d.discovered = null;
+      d.error = String(e);
+    }
+    d.busy = false;
+    connDirty = false;
+    await refresh();
+  });
+
+  $("#c-save")?.addEventListener("click", async () => {
+    readDraft(d);
+    const tools = draftTools(d);
+    let result: Connected;
+    try {
+      result = await invoke<Connected>("add_connection", {
+        connection: {
+          name: d.name,
+          description: d.description,
+          ...draftService(d),
+          tools,
+        },
+        replace: d.replace,
+        onFirstCall: d.on_first_call,
+      });
+    } catch (e) {
+      d.error = String(e);
+      connDirty = false;
+      await refresh();
+      return;
+    }
+
+    draft = null;
+    connDirty = false;
+    const env = result.missing_env.length
+      ? `\n\nStill to set in the environment: ${result.missing_env.join(", ")}`
+      : "";
+    const asked = result.asked_for.length
+      ? `\n\nThese clients will ask you before their first call: ${result.asked_for.join(", ")}`
+      : "";
+    const restart = confirm(
+      `Added to ${result.config_path}.\n\n` +
+        `The gateway is still serving what it started with. Restart now to apply?${env}${asked}`,
+    );
+    if (restart) {
+      await invoke("restart_app");
+    } else {
+      await refresh();
+    }
+  });
 }
 
 // ---- Importing a pack ------------------------------------------------------
@@ -393,6 +902,12 @@ function appliedList(a: Applied): string {
           .join(", ")}</td></tr>`,
     )
     .join("")}</tbody></table>`;
+}
+
+/// The pack panel only once a file has been chosen — the button that chooses one now lives
+/// alongside "Add a connection", so the two ways in sit together instead of one owning a card.
+function renderPackPlanIfAny(): string {
+  return packPath && packPlan ? renderPackPanel() : "";
 }
 
 function renderPackPanel(): string {
