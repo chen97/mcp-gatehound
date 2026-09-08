@@ -97,7 +97,19 @@ something Cargo does:
 cargo install tauri-cli --version "^2"          # once
 sh scripts/fetch-cloudflared.sh                 # only if the app should carry its own tunnel
 cd crates/gatehound-app
-cargo tauri build --config tauri.sidecar.conf.json    # drop the flag if you skipped the fetch
+cargo tauri build --bundles app --config tauri.sidecar.conf.json   # drop --config if you skipped the fetch
+```
+
+`--bundles app` builds the `.app` and stops. Without it, macOS also builds a `.dmg`, and that
+step drives Finder through AppleScript to lay out the disk image window — so it fails on a
+machine where the terminal has not been granted Automation access to Finder, or where an
+earlier attempt left a volume mounted. Neither has anything to do with the app, which by then
+is already built and working. Build the `.dmg` when you are actually distributing one:
+
+```sh
+ls /Volumes                                   # unmount any leftover "MCP Gatehound" first
+hdiutil detach "/Volumes/MCP Gatehound"
+cargo tauri build --config tauri.sidecar.conf.json
 ```
 
 The fetch script writes `tauri.sidecar.conf.json`, an untracked overlay naming the binary it
@@ -105,8 +117,8 @@ downloaded, and Tauri merges it when you pass `--config`. It stays out of the co
 on purpose: a 40 MB binary is not in the repository, so a clone referencing it could not build,
 and a script that edits a tracked file would put you in conflict on your next `git pull`.
 
-Output lands in `target/release/bundle/`: `macos/MCP Gatehound.app` and a `.dmg` on macOS, an
-`.msi`/`.exe` on Windows, `.deb`/`.AppImage` on Linux. Drag the `.app` to `/Applications` and
+Output lands in `target/release/bundle/`: `macos/MCP Gatehound.app` on macOS (plus a `.dmg` if
+you asked for one), an `.msi`/`.exe` on Windows, `.deb`/`.AppImage` on Linux. Drag the `.app` to `/Applications` and
 launch it like anything else — which is the form you want for something that lives in the
 menubar and starts at login.
 
