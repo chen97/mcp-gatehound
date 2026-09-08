@@ -206,6 +206,118 @@ impl Drop for Harness {
     }
 }
 
+/// A stand-in for a strict Streamable HTTP server: it enforces the Accept rule the way the
+/// real ones do, requires the handshake, and answers over SSE — the three things a client can
+/// get away with ignoring against a lenient server and cannot against a real one.
+async fn strict_mcp_server() -> (String, CancellationToken) {
+    use axum::response::IntoResponse;
+
+    async fn handle(headers: axum::http::HeaderMap, body: String) -> axum::response::Response {
+        let accept = headers
+            .get("accept")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        if !accept.contains("application/json") || !accept.contains("text/event-stream") {
+            return (
+                axum::http::StatusCode::NOT_ACCEPTABLE,
+                r#"{"jsonrpc":"2.0","error":{"code":-32000,"message":"Not Acceptable: Client must accept both application/json and text/event-stream"},"id":null}"#,
+            )
+                .into_response();
+        }
+
+        let req: Value = serde_json::from_str(&body).unwrap();
+        let method = req["method"].as_str().unwrap_or_default().to_string();
+        let id = req.get("id").cloned();
+
+        if method == "notifications/initialized" {
+            return axum::http::StatusCode::ACCEPTED.into_response();
+        }
+        if method != "initialize" && headers.get("mcp-session-id").is_none() {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Missing Mcp-Session-Id"},"id":null}"#,
+            )
+                .into_response();
+        }
+
+        let result = match method.as_str() {
+            "initialize" => json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "strict", "version": "1" }
+            }),
+            "tools/list" => json!({ "tools": [
+                { "name": "search_messages", "description": "Search chats",
+                  "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } } }
+            ]}),
+            "ping" => json!({}),
+            _ => json!({}),
+        };
+        let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+
+        // Answered as a one-event stream, which the transport explicitly allows.
+        let mut resp = (
+            axum::http::StatusCode::OK,
+            format!("event: message\ndata: {reply}\n\n"),
+        )
+            .into_response();
+        resp.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        if method == "initialize" {
+            resp.headers_mut().insert(
+                "mcp-session-id",
+                axum::http::HeaderValue::from_static("sess-123"),
+            );
+        }
+        resp
+    }
+
+    let app = axum::Router::new().route("/v0/mcp", axum::routing::post(handle));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v0/mcp", listener.local_addr().unwrap());
+    let cancel = CancellationToken::new();
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move { cancel.cancelled().await })
+                .await
+                .ok();
+        });
+    }
+    (url, cancel)
+}
+
+#[tokio::test]
+async fn a_strict_streamable_http_server_is_talked_to_correctly() {
+    // Reproduces a real refusal: "406 Not Acceptable: Client must accept both application/json
+    // and text/event-stream". Naming only one content type is not a preference, it is
+    // non-conformance, and a strict server will not talk to us at all.
+    let (url, cancel) = strict_mcp_server().await;
+
+    let up = gatehound_core::upstreams::mcp::McpUpstream::new(&url, None).unwrap();
+    let tools = up
+        .list_tools()
+        .await
+        .expect("a conformant client gets an answer");
+
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "search_messages");
+    assert_eq!(tools[0].description, "Search chats");
+    assert!(
+        tools[0].input_schema.is_some(),
+        "the schema survives the SSE wrapper"
+    );
+
+    // The session is negotiated once and reused, not renegotiated per call.
+    assert!(up.healthy().await);
+
+    cancel.cancel();
+}
+
 #[tokio::test]
 async fn a_server_can_be_discovered_and_connected_without_typing_its_tools() {
     // The whole point of the connect form: point it at a real MCP server, get back what it
