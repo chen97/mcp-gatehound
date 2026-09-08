@@ -182,8 +182,8 @@ in front of it. `[publish]` names that something, and the gateway starts and sto
 itself: a tunnel that outlived the gateway would leave a hostname answering nothing, and
 `tailscale serve` would stay configured across a reboot.
 
-In the desktop app this is a form on the **Access** screen — backend, hostname, tunnel token,
-Funnel, and the Cloudflare Access fields — so none of it needs a text editor. The app saves to
+In the desktop app this is the **Network** screen — backend, hostname, tunnel token, Funnel,
+and the Cloudflare Access fields — so none of it needs a text editor. The app saves to
 the same config file and applies it on restart, and it refuses to save anything the gateway
 would then refuse to start from. Everything below describes the same settings for
 `gatehound-headless`, which has no window.
@@ -230,9 +230,10 @@ Would run:       tailscale serve --https=443 localhost:8790
 Stopping runs:   tailscale serve --https=443 localhost:8790 off
 ```
 
-The desktop app shows the same thing live on its **Access** screen, including the URL to hand
-a client and a warning if the gateway is on the internet with nothing but a token in front —
-directly above the form that changes it.
+The desktop app shows the same thing live on its **Network** screen, including the URL to hand
+a client, whether the backend has reported an actual connection or has merely started, and a
+warning if the gateway is on the internet with nothing but a token in front — directly above
+the form that changes it.
 
 ### Two auth factors, both required
 
@@ -363,12 +364,13 @@ WAL.
 
 The tray is the primary surface: green listening, grey paused, red an upstream is not
 answering, with a badge counting waiting approvals. "Pause gateway" stops only the listener
-and leaves the app open. The window has five screens — Approvals, Live log, Upstreams &
-actions, Identities, Access — and holds no state of record; it reads everything from the core
-and re-reads whenever the core pushes an event. The Access screen is also where publishing
-lives: which backend is running, who can reach the gateway, the URL to hand a client, whether
-anything but the bearer token stands in front of it — and a form to change all of it, because
-the alternative was telling an operator to find a TOML file.
+and leaves the app open. The window has six screens — Approvals, Live log, Upstreams &
+actions, Identities, Network, Access — and holds no state of record; it reads everything from
+the core and re-reads whenever the core pushes an event. **Network** is reachability: which
+backend is running, who can reach the gateway, the URL to hand a client, whether anything but
+the bearer token stands in front of it, and a form to change all of it — because the
+alternative was telling an operator to find a TOML file. **Access** is credentials: the super
+token, and the tokens issued to individual clients.
 
 ## Configuration
 

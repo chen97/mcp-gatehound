@@ -238,6 +238,13 @@ pub struct Published {
     pub reach: Reach,
     /// Where a client should point. Absent when the backend has not reported one yet.
     pub url: Option<String>,
+    /// Whether the backend has said it is actually carrying traffic, as opposed to merely
+    /// having started.
+    ///
+    /// A daemon that has not exited is not the same as a tunnel that registered: cloudflared
+    /// can stay up for a while failing to connect. Saying "published" for that overstates
+    /// what is known, and this is the panel's difference between "connected" and "starting".
+    pub confirmed: bool,
 }
 
 /// How a backend behaves once started. The two differ fundamentally and an abstraction that
@@ -415,6 +422,18 @@ impl PublishState {
     }
 }
 
+/// What a backend says once it is actually carrying traffic.
+///
+/// Matched case-insensitively on a substring, and its absence is never treated as failure:
+/// a log line is not an API, and a future version that words this differently should leave the
+/// gateway saying "starting", not "broken".
+fn ready_marker(via: &str) -> Option<&'static str> {
+    match via {
+        "cloudflare" => Some("registered tunnel connection"),
+        _ => None,
+    }
+}
+
 /// Forward a running backend's stderr to the log, keeping the last line for a post-mortem.
 ///
 /// Draining is not optional. An unread pipe blocks the writer once the kernel buffer fills,
@@ -424,7 +443,9 @@ fn drain(
     stderr: tokio::process::ChildStderr,
     via: &'static str,
     last: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-) {
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    let marker = ready_marker(via);
     tokio::spawn(async move {
         use tokio::io::AsyncBufReadExt;
         let mut lines = tokio::io::BufReader::new(stderr).lines();
@@ -433,52 +454,18 @@ fn drain(
             if line.is_empty() {
                 continue;
             }
+            if let Some(marker) = marker {
+                if !ready.load(std::sync::atomic::Ordering::Relaxed)
+                    && line.to_ascii_lowercase().contains(marker)
+                {
+                    tracing::info!(via, "the backend reported it is carrying traffic");
+                    ready.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             tracing::debug!(via, "{line}");
             *last.lock().unwrap() = Some(line);
         }
-    });
-}
-
-/// Whether a just-spawned daemon gave up within `grace`, and what it said if so.
-///
-/// Polled rather than awaited on `wait()`, because the child has to stay owned by the caller:
-/// stopping the gateway needs to kill it, and a `wait()` future would have taken it.
-async fn died_early(
-    child: &mut tokio::process::Child,
-    grace: std::time::Duration,
-) -> Option<String> {
-    let deadline = std::time::Instant::now() + grace;
-    let step = std::cmp::min(grace / 10, std::time::Duration::from_millis(100));
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // stderr is the only explanation a backend gives, so it is worth the read even
-                // though the process is already gone.
-                let mut why = String::new();
-                if let Some(mut err) = child.stderr.take() {
-                    use tokio::io::AsyncReadExt;
-                    let mut buf = Vec::new();
-                    if err.read_to_end(&mut buf).await.is_ok() {
-                        why = String::from_utf8_lossy(&buf).trim().to_string();
-                    }
-                }
-                // Keep the last line: cloudflared's reason is at the end, under a banner.
-                let why = why.lines().next_back().unwrap_or("").trim().to_string();
-                return Some(if why.is_empty() {
-                    format!("exited immediately ({status})")
-                } else {
-                    format!("exited immediately ({status}): {why}")
-                });
-            }
-            Ok(None) => {}
-            // Reaped by something else, or not ours to wait on. Not evidence of failure.
-            Err(_) => return None,
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(step.max(std::time::Duration::from_millis(1))).await;
-    }
+    })
 }
 
 /// Runs a publishing backend for as long as the gateway is up.
@@ -493,6 +480,9 @@ pub struct Publisher {
     state: std::sync::Mutex<PublishState>,
     /// The last line the running backend wrote, so an exit noticed later can say why.
     last_line: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Set by the drain when the backend says it is carrying traffic. Read rather than
+    /// awaited, so a backend that never says it stays "starting" instead of hanging startup.
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// How long a daemon must stay alive before it counts as published.
     ///
     /// `spawn` succeeding only means the binary exists. cloudflared with no tunnel configured,
@@ -511,6 +501,7 @@ impl Publisher {
             child: std::sync::Mutex::new(None),
             state: std::sync::Mutex::new(PublishState::NotPublished),
             last_line: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             grace: std::time::Duration::from_secs(3),
         }
     }
@@ -520,6 +511,30 @@ impl Publisher {
     pub fn with_grace(mut self, grace: std::time::Duration) -> Self {
         self.grace = grace;
         self
+    }
+
+    /// Wait out the grace window, returning the exit status if the daemon gave up inside it.
+    ///
+    /// Returns early once the backend reports it is connected — there is nothing left to learn
+    /// after that, and making every successful start pay the full window would delay the
+    /// gateway for no reason.
+    async fn watch(&self, child: &mut tokio::process::Child) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + self.grace;
+        let step = std::cmp::min(self.grace / 10, std::time::Duration::from_millis(50));
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) => {}
+                // Reaped by something else, or not ours to wait on. Not evidence of failure.
+                Err(_) => return None,
+            }
+            if self.ready.load(std::sync::atomic::Ordering::Relaxed)
+                || std::time::Instant::now() >= deadline
+            {
+                return None;
+            }
+            tokio::time::sleep(step.max(std::time::Duration::from_millis(1))).await;
+        }
     }
 
     /// What is true right now, reaping a daemon that has since given up.
@@ -541,6 +556,13 @@ impl Publisher {
         };
 
         let mut state = self.state.lock().unwrap();
+        // A backend that connected after `start` gave up waiting is still a backend that
+        // connected: the panel should stop saying "starting" without anyone having to restart.
+        if let PublishState::Published(p) = &mut *state {
+            if !p.confirmed && self.ready.load(std::sync::atomic::Ordering::Relaxed) {
+                p.confirmed = true;
+            }
+        }
         if let (Some(status), PublishState::Published(p)) = (died, &*state) {
             let why = self.last_line.lock().unwrap().clone();
             tracing::warn!(via = p.via, %status, "the publishing backend exited");
@@ -609,6 +631,9 @@ impl Publisher {
                     via: launch.via,
                     reach: launch.reach,
                     url,
+                    // `tailscale serve` exits zero only once the configuration is applied, so
+                    // succeeding is the confirmation. There is nothing further to wait for.
+                    confirmed: true,
                 }))
             }
             Lifetime::Daemon => {
@@ -617,20 +642,40 @@ impl Publisher {
                     Err(e) => return self.failed(&launch, format!("could not start: {e}")),
                 };
 
-                // Give it a moment to fall over. A daemon that is still running after this has
-                // not proved it connected, but one that has already exited has definitely
-                // failed, and that is the case worth catching: it is what happens on a machine
-                // with no tunnel set up, which is most of them.
-                if let Some(why) = died_early(&mut child, self.grace).await {
-                    return self.failed(&launch, why);
-                }
+                // Drain before waiting, not after. A pipe nobody reads fills at around 64KB
+                // and blocks the writer forever — and reading from the start is also the only
+                // way to catch the line that says the backend connected, which happens inside
+                // the window below.
+                self.ready
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                let drained = child.stderr.take().map(|stderr| {
+                    drain(
+                        stderr,
+                        launch.via,
+                        self.last_line.clone(),
+                        self.ready.clone(),
+                    )
+                });
 
-                // It stayed up, so its output has to go somewhere from here on. A pipe nobody
-                // reads fills at around 64KB and then blocks the writer forever — for
-                // cloudflared, which logs a line per connection event, that is a tunnel that
-                // silently stops serving while still looking alive.
-                if let Some(stderr) = child.stderr.take() {
-                    drain(stderr, launch.via, self.last_line.clone());
+                // Give it a moment to fall over, or to say it is connected. Neither is
+                // guaranteed: a daemon still running has not proved anything, which is what
+                // `confirmed` is for. One that has already exited has definitely failed, and
+                // that is what happens on a machine with no tunnel set up — most of them.
+                if let Some(status) = self.watch(&mut child).await {
+                    // Let the drain finish so the reason is the last thing it actually said,
+                    // rather than whatever it had got through by the time we looked.
+                    if let Some(handle) = drained {
+                        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle)
+                            .await;
+                    }
+                    let why = self.last_line.lock().unwrap().clone();
+                    return self.failed(
+                        &launch,
+                        match why {
+                            Some(line) => format!("exited immediately ({status}): {line}"),
+                            None => format!("exited immediately ({status})"),
+                        },
+                    );
                 }
 
                 *self.child.lock().unwrap() = Some(child);
@@ -644,6 +689,7 @@ impl Publisher {
                     via: launch.via,
                     reach: launch.reach,
                     url,
+                    confirmed: self.ready.load(std::sync::atomic::Ordering::Relaxed),
                 }))
             }
         }
@@ -659,6 +705,8 @@ impl Publisher {
             let _ = child.kill().await;
         }
         *self.last_line.lock().unwrap() = None;
+        self.ready
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         if let Ok(Some(l)) = launch(&self.cfg, &self.listen_addr) {
             if l.lifetime == Lifetime::Configures && !l.stop_args.is_empty() {
                 let mut cmd = tokio::process::Command::new(&l.program);
@@ -811,6 +859,7 @@ mod tests {
             via: "cloudflare",
             reach: Reach::Internet,
             url: None,
+            confirmed: false,
         });
         assert_eq!(live.reach(), Reach::Internet);
         assert_eq!(
@@ -1111,6 +1160,92 @@ fi
         assert_eq!(state.reach(), Reach::Loopback);
     }
 
+    /// A cloudflared stand-in that announces a registered connection after a delay.
+    fn announcing_daemon(delay: &str) -> (PathBuf, PublishConfig) {
+        let dir = std::env::temp_dir().join(format!("gh-ready-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("cloudflared");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\n\
+                 echo 'INF Starting tunnel' >&2\n\
+                 sleep {delay}\n\
+                 echo 'INF Registered tunnel connection connIndex=0 location=lhr01' >&2\n\
+                 sleep 30\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let cfg = PublishConfig {
+            via: PublishVia::Cloudflare,
+            binary: Some(bin),
+            cloudflare: CloudflareConfig {
+                hostname: Some("gatehound.example.com".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        (dir, cfg)
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_that_says_it_connected_is_reported_as_connected() {
+        // "Did not exit" is weaker than "is carrying traffic". cloudflared can stay up for a
+        // while failing to register, and calling that published overstates what is known.
+        let (dir, cfg) = announcing_daemon("0.1");
+        let p = Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_secs(3));
+
+        let started = std::time::Instant::now();
+        match p.start().await {
+            PublishState::Published(pub_) => assert!(pub_.confirmed, "it announced a connection"),
+            other => panic!("expected published, got {other:?}"),
+        }
+        // And confirming ends the wait rather than serving out the whole window.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}; confirming should cut the grace window short",
+            started.elapsed()
+        );
+
+        p.stop().await;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_that_connects_late_stops_being_reported_as_starting() {
+        // Slower than the window, which is the case that would otherwise read as "starting"
+        // for the rest of the session even though the tunnel came up fine.
+        let (dir, cfg) = announcing_daemon("0.6");
+        let p =
+            Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_millis(80));
+
+        match p.start().await {
+            PublishState::Published(pub_) => {
+                assert!(!pub_.confirmed, "it had not announced anything yet")
+            }
+            other => panic!("expected published, got {other:?}"),
+        }
+
+        for _ in 0..40 {
+            if matches!(p.state(), PublishState::Published(ref x) if x.confirmed) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        match p.state() {
+            PublishState::Published(pub_) => assert!(
+                pub_.confirmed,
+                "a connection announced after start must still be noticed"
+            ),
+            other => panic!("expected published, got {other:?}"),
+        }
+
+        p.stop().await;
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn a_chatty_daemon_is_not_left_blocked_on_a_pipe_nobody_reads() {
         // The failure this guards against is invisible: a backend whose stderr is piped and
@@ -1148,9 +1283,12 @@ fi
             },
             ..Default::default()
         };
+        // Not so short that a loaded machine races the spawn; the point of the test is what
+        // happens after it is up, not how fast it gets there.
         let p =
-            Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_millis(50));
-        assert!(matches!(p.start().await, PublishState::Published(_)));
+            Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_millis(200));
+        let st = p.start().await;
+        assert!(matches!(st, PublishState::Published(_)), "got {st:?}");
 
         // Far more than a pipe holds. If nothing is draining, it never gets to the end.
         for _ in 0..100 {
@@ -1223,6 +1361,8 @@ fi
                 via: "cloudflare",
                 reach: Reach::Internet,
                 url: Some("https://gatehound.example.com/mcp".into()),
+                // A bare `sleep` says nothing, so it is running but not confirmed connected.
+                confirmed: false,
             })
         );
         // And it is not left running once the gateway is done with it.
@@ -1243,6 +1383,8 @@ fi
                 via: "tailscale",
                 reach: Reach::Tailnet,
                 url: Some("https://test-node.tail0000.ts.net/mcp".into()),
+                // `tailscale serve` exiting zero is the confirmation.
+                confirmed: true,
             })
         );
         assert_eq!(p.state(), state);

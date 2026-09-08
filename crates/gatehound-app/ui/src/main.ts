@@ -90,7 +90,7 @@ type Reach = "loopback" | "tailnet" | "internet";
 // Mirrors `PublishState`, which serialises internally tagged: the discriminant is `state`.
 type PublishState =
   | { state: "not_published" }
-  | { state: "published"; via: string; reach: Reach; url: string | null }
+  | { state: "published"; via: string; reach: Reach; url: string | null; confirmed: boolean }
   | { state: "failed"; via: string; error: string };
 
 type SecondFactor =
@@ -642,6 +642,9 @@ let publishPending: Saved | null = null;
 // Set by any edit to the publish form, cleared when it is saved. A field the operator has
 // filled in but not saved must survive a background refresh.
 let publishDirty = false;
+// The URL the panel last rendered, so the copy button has something to hand over without
+// re-reading state that may have moved on.
+let publishedUrl: string | null = null;
 
 async function copy(text: string, button: HTMLElement): Promise<void> {
   try {
@@ -771,8 +774,8 @@ function publishEditor(f: PublishForm, pending: Saved | null): string {
     </div>
 
     <div class="row">
-      <button id="pub-save" class="primary">Save</button>
-      <button id="pub-discard" class="ghost">Discard</button>
+      <button id="pub-save" class="primary" disabled>Save</button>
+      <button id="pub-discard" class="ghost" disabled>Discard</button>
       <span class="meta">Leave both Access fields blank to turn it off.</span>
     </div>
     <div id="pub-paused" class="meta hidden">
@@ -784,11 +787,22 @@ function publishEditor(f: PublishForm, pending: Saved | null): string {
 
 function publishPanel(p: PublishInfo): string {
   const st = p.state;
+  publishedUrl = st.state === "published" ? st.url : null;
   const reach: Reach = st.state === "published" ? st.reach : "loopback";
   const r = REACH[reach];
 
   // The configured backend is a request; the state is the outcome. Saying both only helps
   // when they differ — otherwise it reads as the same fact twice.
+  // "Started" and "carrying traffic" are different claims, and only the backend can settle
+  // the second one. Saying "connected" for a tunnel that never registered is how the panel
+  // would send someone hunting through Cloudflare for a fault that is on this machine.
+  const liveness =
+    st.state === "published"
+      ? st.confirmed
+        ? ` <span class="pill ok">connected</span>`
+        : ` <span class="pill">starting…</span>`
+      : "";
+
   const backend =
     st.state === "not_published"
       ? p.configured === "none"
@@ -796,9 +810,10 @@ function publishPanel(p: PublishInfo): string {
         : `none — <code>${esc(p.configured)}</code> found nothing set up on this machine`
       : st.state === "failed"
         ? `<code>${esc(st.via)}</code> <span class="pill error">failed</span>`
-        : st.via === p.configured
-          ? `<code>${esc(st.via)}</code>`
-          : `<code>${esc(st.via)}</code> <span class="meta">(configured: ${esc(p.configured)})</span>`;
+        : (st.via === p.configured
+            ? `<code>${esc(st.via)}</code>`
+            : `<code>${esc(st.via)}</code> <span class="meta">(configured: ${esc(p.configured)})</span>`) +
+          liveness;
 
   const url =
     st.state === "published" && st.url
@@ -851,6 +866,15 @@ function publishPanel(p: PublishInfo): string {
          </div>`
       : "";
 
+  const starting =
+    st.state === "published" && !st.confirmed && st.via === "cloudflare"
+      ? `<div class="meta" style="margin-top:8px">
+           <code>cloudflared</code> is running but has not reported a registered connection
+           yet. That is normal for a few seconds after start; if it persists, the tunnel is up
+           locally but not reaching Cloudflare — check the tunnel's credentials or token.
+         </div>`
+      : "";
+
   const hint =
     st.state === "not_published" && p.configured !== "none"
       ? `<div class="meta" style="margin-top:8px">
@@ -873,34 +897,136 @@ function publishPanel(p: PublishInfo): string {
       <tr><td class="meta">In front of it</td><td>${factor}</td></tr>
     </tbody></table>
     <div class="meta" style="margin-top:8px">${esc(r.who)}</div>
-    ${hint}
+    ${starting}${hint}
   </div>`;
 }
 
-/// Whether rewriting the Access screen right now would destroy something the operator is in
+/// Whether rewriting the Network screen right now would destroy something the operator is in
 /// the middle of.
 ///
 /// The screen is rebuilt wholesale every five seconds. Without this, typing a 64-character AUD
 /// into the publish form is impossible: the field is replaced mid-keystroke. Editing wins over
 /// freshness here — nothing on this screen changes so fast that a few seconds' delay matters,
 /// and a save re-renders it anyway.
-function accessIsBeingEdited(): boolean {
-  if (!$("#access").innerHTML) return false;
+function networkIsBeingEdited(): boolean {
+  if (!$("#network").innerHTML) return false;
   if (publishDirty) return true;
   const el = document.activeElement;
   return (
     el instanceof HTMLElement &&
-    $("#access").contains(el) &&
+    $("#network").contains(el) &&
     (el instanceof HTMLInputElement ||
       el instanceof HTMLSelectElement ||
       el instanceof HTMLTextAreaElement)
   );
 }
 
-async function renderAccess(snap: Snapshot): Promise<void> {
-  if (accessIsBeingEdited()) return;
-  const a = await invoke<Access>("access");
+/// Everything the publish form does once it is on screen.
+///
+/// Its own function because the Network screen re-renders on a timer, so the handlers are
+/// attached fresh each time — and because it is the one screen where a background rebuild
+/// would otherwise throw away what the operator is typing.
+function wirePublishForm(): void {
+  const pubUrl = publishedUrl;
+  if (pubUrl) {
+    $("#copy-url")?.addEventListener("click", (e) => copy(pubUrl, e.currentTarget as HTMLElement));
+  }
+
+  // The backend picked decides which fields matter, so the form follows the choice rather
+  // than showing every option at once and letting the operator work out which apply.
+  const viaSelect = $("#pub-via") as HTMLSelectElement | null;
+  const syncVia = (): void => {
+    const via = viaSelect?.value ?? "";
+    $("#pub-hint").textContent = BACKENDS.find((b) => b.value === via)?.hint ?? "";
+    $("#pub-cloudflare").classList.toggle("hidden", via !== "cloudflare" && via !== "auto");
+    $("#pub-tailscale").classList.toggle("hidden", via !== "tailscale");
+  };
+  viaSelect?.addEventListener("change", syncVia);
+
+  // Marking the form dirty stops the background refresh rebuilding it, so it also has to say
+  // that the status above has gone still — otherwise the panel looks frozen for no reason.
+  const markDirty = (): void => {
+    publishDirty = true;
+    $("#pub-paused").classList.remove("hidden");
+    // Enabled only once there is something to act on, so the buttons say whether the form has
+    // been touched without a separate label for it.
+    ($("#pub-save") as HTMLButtonElement).disabled = false;
+    ($("#pub-discard") as HTMLButtonElement).disabled = false;
+  };
+  for (const el of Array.from(
+    document.querySelectorAll<HTMLElement>(
+      "#pub-via, #pub-hostname, #pub-token, #pub-funnel, #pub-team, #pub-aud",
+    ),
+  )) {
+    el.addEventListener("input", markDirty);
+    el.addEventListener("change", markDirty);
+  }
+
+  $("#pub-discard")?.addEventListener("click", () => {
+    publishDirty = false;
+    void refresh();
+  });
+
+  // Blank means "keep what is stored", so forgetting a token has to be said out loud.
+  let forgetToken = false;
+  $("#pub-forget")?.addEventListener("click", (e) => {
+    forgetToken = !forgetToken;
+    const b = e.currentTarget as HTMLButtonElement;
+    b.textContent = forgetToken ? "Will forget" : "Forget";
+    b.classList.toggle("danger", forgetToken);
+  });
+
+  $("#pub-save")?.addEventListener("click", async () => {
+    const value = (id: string): string => ($(id) as HTMLInputElement | null)?.value ?? "";
+    const typed = value("#pub-token");
+    let saved: Saved;
+    try {
+      saved = await invoke<Saved>("set_publish", {
+        edit: {
+          via: viaSelect?.value ?? "auto",
+          hostname: value("#pub-hostname"),
+          funnel: ($("#pub-funnel") as HTMLInputElement | null)?.checked ?? false,
+          // null keeps the stored token; "" forgets it. The window is never given the value,
+          // so an untouched field cannot mean "send back what you have".
+          token: typed ? typed : forgetToken ? "" : null,
+          access_team_domain: value("#pub-team"),
+          access_aud: value("#pub-aud"),
+        },
+      });
+    } catch (e) {
+      alert(String(e));
+      return;
+    }
+
+    publishPending = saved;
+    publishDirty = false;
+    const warnings = saved.warnings.length ? `\n\n${saved.warnings.join("\n\n")}` : "";
+    const restart = confirm(
+      `Saved to ${saved.config_path}.\n\n` +
+        `The gateway is still published the way it started. Restart now to apply?${warnings}`,
+    );
+    if (restart) {
+      await invoke("restart_app");
+    } else {
+      await refresh();
+    }
+  });
+
+  $("#pub-restart")?.addEventListener("click", () => void invoke("restart_app"));
+}
+
+async function renderNetwork(): Promise<void> {
+  if (networkIsBeingEdited()) return;
   const pub_ = await invoke<PublishInfo>("publish_state");
+
+  $("#network").innerHTML =
+    publishPanel(pub_) + publishEditor(publishPending?.form ?? pub_.form, publishPending);
+
+  wirePublishForm();
+}
+
+async function renderAccess(snap: Snapshot): Promise<void> {
+  const a = await invoke<Access>("access");
 
   const issuedPanel = justIssued
     ? `<div class="card">
@@ -976,8 +1102,6 @@ async function renderAccess(snap: Snapshot): Promise<void> {
     </div>
 
     ` +
-    publishPanel(pub_) +
-    publishEditor(publishPending?.form ?? pub_.form, publishPending) +
     `
 
     <div class="card">
@@ -1012,10 +1136,6 @@ async function renderAccess(snap: Snapshot): Promise<void> {
   $("#copy-super")?.addEventListener("click", (e) =>
     copy(a.super_token, e.currentTarget as HTMLElement),
   );
-  if (pub_.state.state === "published" && pub_.state.url) {
-    const url = pub_.state.url;
-    $("#copy-url")?.addEventListener("click", (e) => copy(url, e.currentTarget as HTMLElement));
-  }
   $("#copy-new")?.addEventListener("click", (e) => {
     if (justIssued) void copy(justIssued.secret, e.currentTarget as HTMLElement);
   });
@@ -1023,84 +1143,6 @@ async function renderAccess(snap: Snapshot): Promise<void> {
     justIssued = null;
     void refresh();
   });
-
-  // The backend picked decides which fields matter, so the form follows the choice rather
-  // than showing every option at once and letting the operator work out which apply.
-  const viaSelect = $("#pub-via") as HTMLSelectElement | null;
-  const syncVia = (): void => {
-    const via = viaSelect?.value ?? "";
-    $("#pub-hint").textContent = BACKENDS.find((b) => b.value === via)?.hint ?? "";
-    $("#pub-cloudflare").classList.toggle("hidden", via !== "cloudflare" && via !== "auto");
-    $("#pub-tailscale").classList.toggle("hidden", via !== "tailscale");
-  };
-  viaSelect?.addEventListener("change", syncVia);
-
-  // Marking the form dirty stops the background refresh rebuilding it, so it also has to say
-  // that the status above has gone still — otherwise the panel looks frozen for no reason.
-  const markDirty = (): void => {
-    publishDirty = true;
-    $("#pub-paused").classList.remove("hidden");
-  };
-  for (const el of Array.from(
-    document.querySelectorAll<HTMLElement>(
-      "#pub-via, #pub-hostname, #pub-token, #pub-funnel, #pub-team, #pub-aud",
-    ),
-  )) {
-    el.addEventListener("input", markDirty);
-    el.addEventListener("change", markDirty);
-  }
-
-  $("#pub-discard")?.addEventListener("click", () => {
-    publishDirty = false;
-    void refresh();
-  });
-
-  // Blank means "keep what is stored", so forgetting a token has to be said out loud.
-  let forgetToken = false;
-  $("#pub-forget")?.addEventListener("click", (e) => {
-    forgetToken = !forgetToken;
-    const b = e.currentTarget as HTMLButtonElement;
-    b.textContent = forgetToken ? "Will forget" : "Forget";
-    b.classList.toggle("danger", forgetToken);
-  });
-
-  $("#pub-save")?.addEventListener("click", async () => {
-    const value = (id: string): string => ($(id) as HTMLInputElement | null)?.value ?? "";
-    const typed = value("#pub-token");
-    let saved: Saved;
-    try {
-      saved = await invoke<Saved>("set_publish", {
-        edit: {
-          via: viaSelect?.value ?? "auto",
-          hostname: value("#pub-hostname"),
-          funnel: ($("#pub-funnel") as HTMLInputElement | null)?.checked ?? false,
-          // null keeps the stored token; "" forgets it. The window is never given the value,
-          // so an untouched field cannot mean "send back what you have".
-          token: typed ? typed : forgetToken ? "" : null,
-          access_team_domain: value("#pub-team"),
-          access_aud: value("#pub-aud"),
-        },
-      });
-    } catch (e) {
-      alert(String(e));
-      return;
-    }
-
-    publishPending = saved;
-    publishDirty = false;
-    const warnings = saved.warnings.length ? `\n\n${saved.warnings.join("\n\n")}` : "";
-    const restart = confirm(
-      `Saved to ${saved.config_path}.\n\n` +
-        `The gateway is still published the way it started. Restart now to apply?${warnings}`,
-    );
-    if (restart) {
-      await invoke("restart_app");
-    } else {
-      await refresh();
-    }
-  });
-
-  $("#pub-restart")?.addEventListener("click", () => void invoke("restart_app"));
 
   $("#issue")?.addEventListener("click", async () => {
     const name = ($("#token-name") as HTMLInputElement).value;
@@ -1132,6 +1174,14 @@ async function renderAccess(snap: Snapshot): Promise<void> {
 // ---- wiring ----------------------------------------------------------------
 
 function show(next: string): void {
+  // Leaving the Network screen mid-edit would drop the change silently, and an AUD is a
+  // 64-character paste nobody wants to do twice.
+  if (screen === "network" && next !== "network" && publishDirty) {
+    if (!confirm("You have unsaved changes to how the gateway is published. Discard them?")) {
+      return;
+    }
+    publishDirty = false;
+  }
   screen = next;
   document.querySelectorAll<HTMLElement>(".screen").forEach((s) => s.classList.add("hidden"));
   $(`#${next}`).classList.remove("hidden");
@@ -1151,6 +1201,7 @@ async function refresh(): Promise<void> {
     else if (screen === "log") await renderLog();
     else if (screen === "actions") await renderActions(snap);
     else if (screen === "identities") await renderIdentities(snap);
+    else if (screen === "network") await renderNetwork();
     else if (screen === "access") await renderAccess(snap);
   } catch (e) {
     console.error(e);
