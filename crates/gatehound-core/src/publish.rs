@@ -415,6 +415,48 @@ impl PublishState {
     }
 }
 
+/// Whether a just-spawned daemon gave up within `grace`, and what it said if so.
+///
+/// Polled rather than awaited on `wait()`, because the child has to stay owned by the caller:
+/// stopping the gateway needs to kill it, and a `wait()` future would have taken it.
+async fn died_early(
+    child: &mut tokio::process::Child,
+    grace: std::time::Duration,
+) -> Option<String> {
+    let deadline = std::time::Instant::now() + grace;
+    let step = std::cmp::min(grace / 10, std::time::Duration::from_millis(100));
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // stderr is the only explanation a backend gives, so it is worth the read even
+                // though the process is already gone.
+                let mut why = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = Vec::new();
+                    if err.read_to_end(&mut buf).await.is_ok() {
+                        why = String::from_utf8_lossy(&buf).trim().to_string();
+                    }
+                }
+                // Keep the last line: cloudflared's reason is at the end, under a banner.
+                let why = why.lines().next_back().unwrap_or("").trim().to_string();
+                return Some(if why.is_empty() {
+                    format!("exited immediately ({status})")
+                } else {
+                    format!("exited immediately ({status}): {why}")
+                });
+            }
+            Ok(None) => {}
+            // Reaped by something else, or not ours to wait on. Not evidence of failure.
+            Err(_) => return None,
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(step.max(std::time::Duration::from_millis(1))).await;
+    }
+}
+
 /// Runs a publishing backend for as long as the gateway is up.
 ///
 /// Lives in the core so the headless binary gets publishing too — an always-on machine is the
@@ -425,6 +467,14 @@ pub struct Publisher {
     listen_addr: String,
     child: std::sync::Mutex<Option<tokio::process::Child>>,
     state: std::sync::Mutex<PublishState>,
+    /// How long a daemon must stay alive before it counts as published.
+    ///
+    /// `spawn` succeeding only means the binary exists. cloudflared with no tunnel configured,
+    /// a bad token or a missing credentials file starts and exits within a moment, and
+    /// reporting that as published tells the operator their gateway is on the public internet
+    /// when nothing is listening for it — a false alarm in the direction that gets real ones
+    /// ignored.
+    grace: std::time::Duration,
 }
 
 impl Publisher {
@@ -434,11 +484,44 @@ impl Publisher {
             listen_addr: listen_addr.into(),
             child: std::sync::Mutex::new(None),
             state: std::sync::Mutex::new(PublishState::NotPublished),
+            grace: std::time::Duration::from_secs(3),
         }
     }
 
+    /// Shorten the wait a daemon gets to prove it stayed up. For tests; three seconds is the
+    /// right answer for a real backend and far too long for a test suite.
+    pub fn with_grace(mut self, grace: std::time::Duration) -> Self {
+        self.grace = grace;
+        self
+    }
+
+    /// What is true right now, reaping a daemon that has since given up.
+    ///
+    /// Checked on read rather than watched from a task: this is the only moment the answer is
+    /// wanted, the child has to stay owned here so stopping can kill it, and a tunnel that
+    /// died at minute five is otherwise reported as publishing for as long as the gateway
+    /// runs. Locks are taken child-then-state, the order `stop` uses.
     pub fn state(&self) -> PublishState {
-        self.state.lock().unwrap().clone()
+        let died = {
+            let mut child = self.child.lock().unwrap();
+            match child.as_mut().map(|c| c.try_wait()) {
+                Some(Ok(Some(status))) => {
+                    child.take();
+                    Some(status)
+                }
+                _ => None,
+            }
+        };
+
+        let mut state = self.state.lock().unwrap();
+        if let (Some(status), PublishState::Published(p)) = (died, &*state) {
+            tracing::warn!(via = p.via, %status, "the publishing backend exited");
+            *state = PublishState::Failed {
+                via: p.via.to_string(),
+                error: format!("the backend exited ({status}); the gateway is loopback only"),
+            };
+        }
+        state.clone()
     }
 
     /// Start the configured backend. Never returns an error for "not configured" — that is a
@@ -490,10 +573,19 @@ impl Publisher {
                 }))
             }
             Lifetime::Daemon => {
-                let child = match cmd.spawn() {
+                let mut child = match cmd.spawn() {
                     Ok(c) => c,
                     Err(e) => return self.failed(&launch, format!("could not start: {e}")),
                 };
+
+                // Give it a moment to fall over. A daemon that is still running after this has
+                // not proved it connected, but one that has already exited has definitely
+                // failed, and that is the case worth catching: it is what happens on a machine
+                // with no tunnel set up, which is most of them.
+                if let Some(why) = died_early(&mut child, self.grace).await {
+                    return self.failed(&launch, why);
+                }
+
                 *self.child.lock().unwrap() = Some(child);
                 let url = self
                     .cfg
@@ -898,6 +990,135 @@ fi
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.dir).ok();
         }
+    }
+
+    /// A stand-in `cloudflared`: a daemon that either falls over at once, the way a real one
+    /// does with no tunnel configured, or stays up.
+    struct FakeDaemon {
+        dir: PathBuf,
+    }
+
+    impl FakeDaemon {
+        fn new(survives: bool) -> Self {
+            let dir = std::env::temp_dir().join(format!("gh-daemon-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let body = if survives {
+                // Long enough to outlive any grace a test uses.
+                "sleep 30"
+            } else {
+                "echo 'Cannot determine default origin certificate path' >&2\nexit 255"
+            };
+            let bin = dir.join("cloudflared");
+            std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            Self { dir }
+        }
+
+        fn cfg(&self) -> PublishConfig {
+            PublishConfig {
+                via: PublishVia::Cloudflare,
+                binary: Some(self.dir.join("cloudflared")),
+                cloudflare: CloudflareConfig {
+                    hostname: Some("gatehound.example.com".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }
+    }
+
+    impl Drop for FakeDaemon {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_exits_at_once_is_not_reported_as_published() {
+        // The failure that matters: `spawn` succeeds because the binary is there, then
+        // cloudflared gives up because the machine has no tunnel. Calling that published tells
+        // the operator their tools are on the public internet with nothing in front of them,
+        // which is both false and the exact warning that must stay believable.
+        let fake = FakeDaemon::new(false);
+        let p = Publisher::new(fake.cfg(), "127.0.0.1:8790")
+            .with_grace(std::time::Duration::from_millis(400));
+
+        let state = p.start().await;
+        match &state {
+            PublishState::Failed { via, error } => {
+                assert_eq!(via, "cloudflare");
+                assert!(error.contains("exited immediately"), "{error}");
+                assert!(error.contains("255"), "{error}");
+                // The reason the backend gave, not just a number.
+                assert!(error.contains("origin certificate"), "{error}");
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert_eq!(p.state(), state);
+        // Nothing published means loopback, so the panel reports a factor rather than none.
+        assert_eq!(state.reach(), Reach::Loopback);
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_gives_up_later_stops_being_reported_as_published() {
+        // Surviving the grace window is not a promise to keep running. Without noticing the
+        // exit, the panel would say "on the public internet, nothing in front of it" for the
+        // rest of the session — about a gateway that is loopback only.
+        let dir = std::env::temp_dir().join(format!("gh-late-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("cloudflared");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 0.3\nexit 1\n").unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let cfg = PublishConfig {
+            via: PublishVia::Cloudflare,
+            binary: Some(bin),
+            cloudflare: CloudflareConfig {
+                hostname: Some("gatehound.example.com".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p =
+            Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_millis(50));
+
+        assert!(
+            matches!(p.start().await, PublishState::Published(_)),
+            "it was up when we looked"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        match p.state() {
+            PublishState::Failed { via, error } => {
+                assert_eq!(via, "cloudflare");
+                assert!(error.contains("loopback only"), "{error}");
+            }
+            other => panic!("a backend that exited must not still be published: {other:?}"),
+        }
+        assert_eq!(p.state().reach(), Reach::Loopback);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_stays_up_is_published_with_its_hostname() {
+        let fake = FakeDaemon::new(true);
+        let p = Publisher::new(fake.cfg(), "127.0.0.1:8790")
+            .with_grace(std::time::Duration::from_millis(200));
+
+        assert_eq!(
+            p.start().await,
+            PublishState::Published(Published {
+                via: "cloudflare",
+                reach: Reach::Internet,
+                url: Some("https://gatehound.example.com/mcp".into()),
+            })
+        );
+        // And it is not left running once the gateway is done with it.
+        p.stop().await;
+        assert_eq!(p.state(), PublishState::NotPublished);
     }
 
     #[tokio::test]
