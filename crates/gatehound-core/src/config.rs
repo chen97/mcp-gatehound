@@ -200,7 +200,7 @@ pub struct AccessConfig {
     pub aud: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthConfig {
     /// Shared bearer token. Always required.
     #[serde(default)]
@@ -219,6 +219,21 @@ pub struct AuthConfig {
 
 fn default_bearer_identity() -> String {
     "bearer".into()
+}
+
+// Hand-written so it agrees with the serde defaults above. A derived `Default` would give
+// `bearer_identity = ""`, and the app writes its first configuration from `Config::default()`
+// — so every super-token call would be attributed to the empty identity, in policy and in the
+// audit log, and the window would show a blank owner.
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            bearer_token: None,
+            access: None,
+            allowed_identities: Vec::new(),
+            bearer_identity: default_bearer_identity(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -304,6 +319,12 @@ impl Config {
             None => Config::default(),
         };
         cfg.apply_env();
+        // A file written by an older build carries `bearer_identity = ""`, and serde's default
+        // only fires for an absent key, not an empty one. Left alone, every call the super
+        // token makes is attributed to the empty identity — in policy and in the audit log.
+        if cfg.auth.bearer_identity.trim().is_empty() {
+            cfg.auth.bearer_identity = default_bearer_identity();
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -610,6 +631,41 @@ decision = "allow"
             _ => panic!("expected an http upstream"),
         }
         std::env::remove_var("GATEHOUND_TEST_TOKEN");
+    }
+
+    #[test]
+    fn the_owner_identity_is_never_blank() {
+        // The app writes its first configuration from `Config::default()`. A derived Default
+        // ignores `#[serde(default = ...)]`, so this used to be "" — which then went into the
+        // audit log and the policy key for every call the super token made, and showed up in
+        // the window as a blank owner.
+        assert_eq!(Config::default().auth.bearer_identity, "bearer");
+
+        // Round-tripping through the file must keep it.
+        let cfg = Config::default();
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.auth.bearer_identity, "bearer");
+    }
+
+    #[test]
+    fn a_config_written_by_an_older_build_has_its_blank_owner_repaired() {
+        // Serde's default does not fire for a key that is present and empty, so a file already
+        // on disk stays broken unless loading fixes it.
+        let dir = std::env::temp_dir().join(format!("gh-cfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gatehound.toml");
+        std::fs::write(
+            &path,
+            "listen_addr = \"127.0.0.1:8790\"\n\
+             [auth]\n\
+             bearer_token = \"0123456789abcdef0123\"\n\
+             bearer_identity = \"\"\n",
+        )
+        .unwrap();
+
+        let cfg = Config::load(Some(&path)).unwrap();
+        assert_eq!(cfg.auth.bearer_identity, "bearer");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -639,6 +639,9 @@ let revealSuper = false;
 // Saved to the file but not yet running. The status panel reports what is live; the form has
 // to keep showing what will apply, or a save the operator declined to restart for looks lost.
 let publishPending: Saved | null = null;
+// Set by any edit to the publish form, cleared when it is saved. A field the operator has
+// filled in but not saved must survive a background refresh.
+let publishDirty = false;
 
 async function copy(text: string, button: HTMLElement): Promise<void> {
   try {
@@ -769,7 +772,12 @@ function publishEditor(f: PublishForm, pending: Saved | null): string {
 
     <div class="row">
       <button id="pub-save" class="primary">Save</button>
+      <button id="pub-discard" class="ghost">Discard</button>
       <span class="meta">Leave both Access fields blank to turn it off.</span>
+    </div>
+    <div id="pub-paused" class="meta hidden">
+      The panel above has stopped refreshing so it cannot overwrite what you are typing. Save
+      or discard to see live status again.
     </div>
   </div>`;
 }
@@ -869,7 +877,28 @@ function publishPanel(p: PublishInfo): string {
   </div>`;
 }
 
+/// Whether rewriting the Access screen right now would destroy something the operator is in
+/// the middle of.
+///
+/// The screen is rebuilt wholesale every five seconds. Without this, typing a 64-character AUD
+/// into the publish form is impossible: the field is replaced mid-keystroke. Editing wins over
+/// freshness here — nothing on this screen changes so fast that a few seconds' delay matters,
+/// and a save re-renders it anyway.
+function accessIsBeingEdited(): boolean {
+  if (!$("#access").innerHTML) return false;
+  if (publishDirty) return true;
+  const el = document.activeElement;
+  return (
+    el instanceof HTMLElement &&
+    $("#access").contains(el) &&
+    (el instanceof HTMLInputElement ||
+      el instanceof HTMLSelectElement ||
+      el instanceof HTMLTextAreaElement)
+  );
+}
+
 async function renderAccess(snap: Snapshot): Promise<void> {
+  if (accessIsBeingEdited()) return;
   const a = await invoke<Access>("access");
   const pub_ = await invoke<PublishInfo>("publish_state");
 
@@ -1006,6 +1035,26 @@ async function renderAccess(snap: Snapshot): Promise<void> {
   };
   viaSelect?.addEventListener("change", syncVia);
 
+  // Marking the form dirty stops the background refresh rebuilding it, so it also has to say
+  // that the status above has gone still — otherwise the panel looks frozen for no reason.
+  const markDirty = (): void => {
+    publishDirty = true;
+    $("#pub-paused").classList.remove("hidden");
+  };
+  for (const el of Array.from(
+    document.querySelectorAll<HTMLElement>(
+      "#pub-via, #pub-hostname, #pub-token, #pub-funnel, #pub-team, #pub-aud",
+    ),
+  )) {
+    el.addEventListener("input", markDirty);
+    el.addEventListener("change", markDirty);
+  }
+
+  $("#pub-discard")?.addEventListener("click", () => {
+    publishDirty = false;
+    void refresh();
+  });
+
   // Blank means "keep what is stored", so forgetting a token has to be said out loud.
   let forgetToken = false;
   $("#pub-forget")?.addEventListener("click", (e) => {
@@ -1038,6 +1087,7 @@ async function renderAccess(snap: Snapshot): Promise<void> {
     }
 
     publishPending = saved;
+    publishDirty = false;
     const warnings = saved.warnings.length ? `\n\n${saved.warnings.join("\n\n")}` : "";
     const restart = confirm(
       `Saved to ${saved.config_path}.\n\n` +

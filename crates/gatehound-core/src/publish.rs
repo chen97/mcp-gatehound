@@ -415,6 +415,30 @@ impl PublishState {
     }
 }
 
+/// Forward a running backend's stderr to the log, keeping the last line for a post-mortem.
+///
+/// Draining is not optional. An unread pipe blocks the writer once the kernel buffer fills,
+/// so without this the backend stops doing its job after a few hundred log lines — while its
+/// process stays alive, which is the hardest kind of failure to see.
+fn drain(
+    stderr: tokio::process::ChildStderr,
+    via: &'static str,
+    last: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) {
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            tracing::debug!(via, "{line}");
+            *last.lock().unwrap() = Some(line);
+        }
+    });
+}
+
 /// Whether a just-spawned daemon gave up within `grace`, and what it said if so.
 ///
 /// Polled rather than awaited on `wait()`, because the child has to stay owned by the caller:
@@ -467,6 +491,8 @@ pub struct Publisher {
     listen_addr: String,
     child: std::sync::Mutex<Option<tokio::process::Child>>,
     state: std::sync::Mutex<PublishState>,
+    /// The last line the running backend wrote, so an exit noticed later can say why.
+    last_line: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// How long a daemon must stay alive before it counts as published.
     ///
     /// `spawn` succeeding only means the binary exists. cloudflared with no tunnel configured,
@@ -484,6 +510,7 @@ impl Publisher {
             listen_addr: listen_addr.into(),
             child: std::sync::Mutex::new(None),
             state: std::sync::Mutex::new(PublishState::NotPublished),
+            last_line: std::sync::Arc::new(std::sync::Mutex::new(None)),
             grace: std::time::Duration::from_secs(3),
         }
     }
@@ -515,10 +542,17 @@ impl Publisher {
 
         let mut state = self.state.lock().unwrap();
         if let (Some(status), PublishState::Published(p)) = (died, &*state) {
+            let why = self.last_line.lock().unwrap().clone();
             tracing::warn!(via = p.via, %status, "the publishing backend exited");
             *state = PublishState::Failed {
                 via: p.via.to_string(),
-                error: format!("the backend exited ({status}); the gateway is loopback only"),
+                error: match why {
+                    Some(line) => format!(
+                        "the backend exited ({status}); the gateway is loopback only. Last it \
+                         said: {line}"
+                    ),
+                    None => format!("the backend exited ({status}); the gateway is loopback only"),
+                },
             };
         }
         state.clone()
@@ -542,7 +576,12 @@ impl Publisher {
         let mut cmd = tokio::process::Command::new(&launch.program);
         cmd.args(&launch.args)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
+            // stdout is discarded for a daemon rather than piped: these backends log to
+            // stderr, and a second pipe would be one more thing to keep drained for nothing.
+            .stdout(match launch.lifetime {
+                Lifetime::Daemon => std::process::Stdio::null(),
+                Lifetime::Configures => std::process::Stdio::piped(),
+            })
             .stderr(std::process::Stdio::piped());
         for (k, v) in &launch.env {
             cmd.env(k, v);
@@ -586,6 +625,14 @@ impl Publisher {
                     return self.failed(&launch, why);
                 }
 
+                // It stayed up, so its output has to go somewhere from here on. A pipe nobody
+                // reads fills at around 64KB and then blocks the writer forever — for
+                // cloudflared, which logs a line per connection event, that is a tunnel that
+                // silently stops serving while still looking alive.
+                if let Some(stderr) = child.stderr.take() {
+                    drain(stderr, launch.via, self.last_line.clone());
+                }
+
                 *self.child.lock().unwrap() = Some(child);
                 let url = self
                     .cfg
@@ -605,9 +652,13 @@ impl Publisher {
     /// Stop publishing. A daemon is killed; a configured backend is told to stop, because its
     /// configuration outlives this process and would otherwise keep the hostname live.
     pub async fn stop(&self) {
-        if let Some(mut child) = self.child.lock().unwrap().take() {
-            let _ = child.start_kill();
+        // Taken out of the lock before awaiting: the guard is not held across the wait, and
+        // killing without reaping would leave a zombie for as long as this process lives.
+        let child = self.child.lock().unwrap().take();
+        if let Some(mut child) = child {
+            let _ = child.kill().await;
         }
+        *self.last_line.lock().unwrap() = None;
         if let Ok(Some(l)) = launch(&self.cfg, &self.listen_addr) {
             if l.lifetime == Lifetime::Configures && !l.stop_args.is_empty() {
                 let mut cmd = tokio::process::Command::new(&l.program);
@@ -1058,6 +1109,64 @@ fi
         assert_eq!(p.state(), state);
         // Nothing published means loopback, so the panel reports a factor rather than none.
         assert_eq!(state.reach(), Reach::Loopback);
+    }
+
+    #[tokio::test]
+    async fn a_chatty_daemon_is_not_left_blocked_on_a_pipe_nobody_reads() {
+        // The failure this guards against is invisible: a backend whose stderr is piped and
+        // never read blocks once the kernel buffer fills, at around 64KB. cloudflared logs a
+        // line per connection event, so a real tunnel stops serving after a few hundred of
+        // them — with the process still alive, so everything still claims to be published.
+        let dir = std::env::temp_dir().join(format!("gh-chatty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let done = dir.join("finished");
+        let bin = dir.join("cloudflared");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\n\
+                 i=0\n\
+                 while [ $i -lt 4000 ]; do\n\
+                   echo \"INF connection heartbeat connIndex=0 padding to make the line realistic\" >&2\n\
+                   i=$((i + 1))\n\
+                 done\n\
+                 touch '{}'\n\
+                 sleep 30\n",
+                done.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let cfg = PublishConfig {
+            via: PublishVia::Cloudflare,
+            binary: Some(bin),
+            cloudflare: CloudflareConfig {
+                hostname: Some("gatehound.example.com".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let p =
+            Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_millis(50));
+        assert!(matches!(p.start().await, PublishState::Published(_)));
+
+        // Far more than a pipe holds. If nothing is draining, it never gets to the end.
+        for _ in 0..100 {
+            if done.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            done.exists(),
+            "the backend blocked writing to a pipe nobody read"
+        );
+        assert!(matches!(p.state(), PublishState::Published(_)));
+
+        p.stop().await;
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

@@ -197,33 +197,41 @@ async fn serve(cfg: Config, db_path: Option<PathBuf>, auto_approve: bool) -> Res
     let gateway = Gateway::build(cfg, db_path)?;
     let cancel = CancellationToken::new();
 
-    let published = publisher.start().await;
-    match &published {
-        publish::PublishState::NotPublished => {
-            tracing::info!("not published; the gateway is reachable on loopback only")
-        }
-        publish::PublishState::Published(p) => tracing::info!(
-            via = p.via,
-            reach = ?p.reach,
-            url = %p.url.clone().unwrap_or_else(|| "not reported".into()),
-            "published"
-        ),
-        publish::PublishState::Failed { via, error } => {
-            tracing::warn!(%via, %error, "could not publish; loopback only")
-        }
-    }
-
-    // The config check warns about what `auto` *might* do. This is what it did: once the
-    // gateway is actually on the internet with nothing but a token in front of it, that stops
-    // being a hypothetical and the operator should be told in those terms.
-    if publish::SecondFactor::of(&gateway.cfg.auth, published.reach())
-        == publish::SecondFactor::None
+    // Alongside the listener rather than before it. Starting a backend first points a public
+    // hostname at a port nothing is listening on yet, and the wait a daemon gets to prove it
+    // stayed up would delay serving by that much on every start.
     {
-        tracing::warn!(
-            reach = ?published.reach(),
-            "the gateway is on the public internet and the bearer token is the only thing in \
-             the way; configure [auth.access], or set publish.via = \"tailscale\" or \"none\""
-        );
+        let publisher = publisher.clone();
+        let auth = gateway.cfg.auth.clone();
+        tokio::spawn(async move {
+            let published = publisher.start().await;
+            match &published {
+                publish::PublishState::NotPublished => {
+                    tracing::info!("not published; the gateway is reachable on loopback only")
+                }
+                publish::PublishState::Published(p) => tracing::info!(
+                    via = p.via,
+                    reach = ?p.reach,
+                    url = %p.url.clone().unwrap_or_else(|| "not reported".into()),
+                    "published"
+                ),
+                publish::PublishState::Failed { via, error } => {
+                    tracing::warn!(%via, %error, "could not publish; loopback only")
+                }
+            }
+
+            // The config check warns about what `auto` *might* do. This is what it did: once
+            // the gateway is actually on the internet with nothing but a token in front of it,
+            // that stops being a hypothetical and should be said in those terms.
+            if publish::SecondFactor::of(&auth, published.reach()) == publish::SecondFactor::None {
+                tracing::warn!(
+                    reach = ?published.reach(),
+                    "the gateway is on the public internet and the bearer token is the only \
+                     thing in the way; configure [auth.access], or set publish.via = \
+                     \"tailscale\" or \"none\""
+                );
+            }
+        });
     }
 
     // With no GUI, approvals would otherwise be invisible. Print them, and — only when the
