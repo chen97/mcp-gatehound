@@ -9,6 +9,19 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
+/// A tool an MCP server says it has, as reported by `tools/list`.
+///
+/// Untrusted: the name and description come from the other server, and end up in front of an
+/// operator deciding what to allow. They are data to be shown, never instructions to follow.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoveredTool {
+    pub name: String,
+    pub description: String,
+    /// The upstream's own argument schema, carried across so the gateway advertises the same
+    /// shape rather than a guess at it.
+    pub input_schema: Option<Value>,
+}
+
 pub struct McpUpstream {
     http: reqwest::Client,
     url: String,
@@ -105,6 +118,34 @@ impl McpUpstream {
             .and_then(Value::as_str)
             .unwrap_or("{}");
         Ok(serde_json::from_str(text).unwrap_or_else(|_| json!({ "text": text })))
+    }
+
+    /// What this server says it offers.
+    ///
+    /// Used when connecting one from the window, so an operator picks from a real list rather
+    /// than typing tool names and finding out they were wrong on the first call. Discovery is
+    /// a one-off read: the gateway still exposes only the tools that were explicitly declared,
+    /// because an upstream that could add to its own surface could widen the gateway's.
+    pub async fn list_tools(&self) -> Result<Vec<DiscoveredTool>> {
+        let result = self.rpc("tools/list", json!({})).await?;
+        let tools = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("MCP upstream {} returned no tools array", self.url))?;
+        Ok(tools
+            .iter()
+            .filter_map(|t| {
+                Some(DiscoveredTool {
+                    name: t.get("name").and_then(Value::as_str)?.to_string(),
+                    description: t
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    input_schema: t.get("inputSchema").cloned(),
+                })
+            })
+            .collect())
     }
 
     pub async fn healthy(&self) -> bool {

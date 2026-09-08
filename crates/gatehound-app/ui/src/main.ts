@@ -321,7 +321,7 @@ async function renderLog(): Promise<void> {
   });
 }
 
-// ---- Upstreams & actions ---------------------------------------------------
+// ---- Connections & tools ---------------------------------------------------
 
 async function renderActions(snap: Snapshot): Promise<void> {
   const configFile = await invoke<string>("config_path");
@@ -329,8 +329,12 @@ async function renderActions(snap: Snapshot): Promise<void> {
     renderPackPanel() +
     `
     <div class="card">
-      <h3>Upstreams</h3>
-      <div class="meta">Declared in <code>${esc(configFile)}</code>. Importing a pack or editing that file and restarting applies changes.</div>
+      <h3>Connected services</h3>
+      <div class="meta">
+        What this gateway can call out to. Written to <code>${esc(configFile)}</code> as
+        <code>[[upstream]]</code> — the word proxies use for a backend, and the one place it
+        still appears.
+      </div>
       <table><tbody>${snap.upstreams
         .map((u) => `<tr><td><code>${esc(u)}</code></td></tr>`)
         .join("")}</tbody></table>
@@ -374,7 +378,7 @@ let packChoices: string[] = [];
 
 function appliedList(a: Applied): string {
   const rows: [string, string[]][] = [
-    ["Upstreams", a.upstreams],
+    ["Connected services", a.upstreams],
     ["Tools", a.tools],
     ["Identity seeds", a.identities],
     ["Replaced", a.replaced],

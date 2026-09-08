@@ -71,6 +71,24 @@ fn default_exec_concurrency() -> usize {
     1
 }
 
+// Hand-written to agree with the serde defaults above, for the same reason `AuthConfig` has
+// one: a derived `Default` would silently give a zero timeout, a zero output cap and a zero
+// concurrency limit — three settings whose wrong value is a tool that can never run.
+impl Default for ExecSpec {
+    fn default() -> Self {
+        Self {
+            cmd: String::new(),
+            args: Vec::new(),
+            stdin: None,
+            timeout_secs: default_exec_timeout(),
+            max_output_bytes: default_max_output(),
+            max_concurrency: default_exec_concurrency(),
+            env: BTreeMap::new(),
+            cwd: None,
+        }
+    }
+}
+
 /// What a tool does. Declared in config, never selected by a caller.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

@@ -10,6 +10,7 @@ pub mod actions;
 pub mod approval;
 pub mod auth;
 pub mod config;
+pub mod connect;
 pub mod events;
 pub mod mcp;
 pub mod pack;
