@@ -37,6 +37,11 @@ main { padding: 14px 18px 32px; }
 
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 10px; }
 .card h3 { margin: 0 0 4px; font-size: 14px; }
+/* A service header folds its tools away. The twisty is the affordance; the whole row is the
+   target, because a 10px triangle is not one. */
+.svc-head { user-select: none; }
+.svc-head:hover code { text-decoration: underline; }
+.twist { color: var(--mut); width: 12px; flex: none; }
 .meta { color: var(--mut); font-size: 12px; }
 pre {
   background: var(--in); border-radius: 8px; padding: 8px 10px; margin: 8px 0 0;

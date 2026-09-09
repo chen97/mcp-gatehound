@@ -166,6 +166,25 @@ const esc = (s: unknown): string =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string,
   );
 
+/// A relative time that updates itself without redrawing the screen around it.
+///
+/// "just now" becoming "2m ago" changes the HTML, which would make every list containing a
+/// timestamp repaint on a timer — exactly what `paint` exists to avoid. Emitting only the
+/// instant keeps the markup stable; `tickTimes` fills in the words afterwards, and setting
+/// text on an existing node costs nothing an operator can see.
+function ago(ts: string | null): string {
+  if (!ts) return "";
+  return `<time class="ago" data-ts="${esc(ts)}">${esc(when(ts))}</time>`;
+}
+
+/// Refresh the words inside every `ago(...)`, in place.
+function tickTimes(): void {
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>("time.ago"))) {
+    const text = when(el.dataset.ts ?? null);
+    if (el.textContent !== text) el.textContent = text;
+  }
+}
+
 function when(ts: string | null): string {
   if (!ts) return "";
   const d = new Date(ts);
@@ -206,22 +225,44 @@ async function renderHeader(): Promise<Snapshot> {
   return s;
 }
 
+// ---- Painting ----------------------------------------------------------------
+
+/// What was last written into each element, so an unchanged screen can be left alone.
+///
+/// Compared against the string we intended to write rather than `el.innerHTML`, which comes
+/// back re-serialised by the browser — attribute order and quoting differ, so that comparison
+/// would never match and every repaint would happen anyway.
+const painted = new WeakMap<HTMLElement, string>();
+
+/// Write `html` into `el`, but only if it differs from what is already there.
+///
+/// The window re-reads the core every five seconds. Rewriting the DOM each time throws away
+/// scroll position, focus, text selection and anything expanded — for a screen where nothing
+/// changed, which is almost all of them. Returning whether anything was written also keeps
+/// handlers correct: the caller re-attaches them only when the elements are new, instead of
+/// stacking a second listener on every surviving button.
+function paint(el: HTMLElement, html: string): boolean {
+  if (painted.get(el) === html) return false;
+  painted.set(el, html);
+  // A repaint that does happen still should not move the page under the reader.
+  const y = window.scrollY;
+  el.innerHTML = html;
+  if (window.scrollY !== y) window.scrollTo(0, y);
+  return true;
+}
+
 // ---- Approvals -------------------------------------------------------------
 
-async function renderApprovals(): Promise<void> {
-  const rows = await invoke<Pending[]>("pending");
-  const el = $("#approvals");
+function approvalsHtml(rows: Pending[]): string {
   if (rows.length === 0) {
-    el.innerHTML =
-      '<div class="empty">Nothing waiting.<br>A call from an identity with no rule is held here until you decide.</div>';
-    return;
+    return '<div class="empty">Nothing waiting.<br>A call from an identity with no rule is held here until you decide.</div>';
   }
-  el.innerHTML = rows
+  return rows
     .map(
       (p) => `
       <div class="card" data-id="${esc(p.id)}">
         <h3>${esc(p.identity)} → <code>${esc(p.tool)}</code></h3>
-        <div class="meta">${esc(when(p.ts))}</div>
+        <div class="meta">${ago(p.ts)}</div>
         <pre>${esc(pretty(p.args_preview))}</pre>
         <div class="row">
           <button class="primary" data-act="allow_once">Allow once</button>
@@ -232,8 +273,10 @@ async function renderApprovals(): Promise<void> {
       </div>`,
     )
     .join("");
+}
 
-  el.querySelectorAll<HTMLButtonElement>("button[data-act]").forEach((btn) => {
+function wireApprovals(): void {
+  $("#approvals").querySelectorAll<HTMLButtonElement>("button[data-act]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const id = btn.closest<HTMLElement>("[data-id]")!.dataset.id!;
       const resolution = btn.dataset.act as Resolution;
@@ -262,7 +305,7 @@ async function renderLog(): Promise<void> {
     );
   });
 
-  $("#log").innerHTML = `
+  const html = `
     <div class="filters">
       <input id="logq" placeholder="filter by identity, tool or method" value="${esc(logFilter)}">
       <select id="logstatus">
@@ -283,7 +326,7 @@ async function renderLog(): Promise<void> {
              <tbody>${filtered
                .map(
                  (r) => `<tr class="clickable" data-id="${r.id}">
-                   <td>${esc(when(r.ts))}</td>
+                   <td>${ago(r.ts)}</td>
                    <td>${esc(r.identity ?? "—")}</td>
                    <td>${esc(r.method ?? "")}</td>
                    <td>${esc(r.tool ?? "")}</td>
@@ -297,6 +340,7 @@ async function renderLog(): Promise<void> {
            </table>
            <div id="detail"></div>`
     }`;
+  if (!paint($("#log"), html)) return;
 
   $<HTMLInputElement>("#logq")?.addEventListener("input", (e) => {
     logFilter = (e.target as HTMLInputElement).value;
@@ -310,7 +354,7 @@ async function renderLog(): Promise<void> {
     tr.addEventListener("click", async () => {
       const row = await invoke<RequestLog | null>("request_detail", { id: Number(tr.dataset.id) });
       if (!row) return;
-      $("#detail").innerHTML = `
+      paint($("#detail"), `
         <div class="card">
           <h3>Request #${row.id}</h3>
           <div class="meta">${esc(row.ts)} · ${esc(row.identity ?? "—")}${
@@ -321,7 +365,8 @@ async function renderLog(): Promise<void> {
           <pre>${esc(pretty(row.args_json)) || "—"}</pre>
           <div class="meta" style="margin-top:8px">Response (truncated)</div>
           <pre>${esc(pretty(row.response_json)) || "—"}</pre>
-        </div>`;
+        </div>`,
+      );
       $("#detail").scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
   });
@@ -329,10 +374,99 @@ async function renderLog(): Promise<void> {
 
 // ---- Downstream ------------------------------------------------------------
 
+/// Services the operator has expanded. Held here rather than in the DOM so it survives a
+/// repaint, and so opening one is not undone by the next five-second read.
+const expanded = new Set<string>();
+
+/// Each service, with its tools folded away underneath it.
+///
+/// Grouped rather than listed flat because a tool only means anything next to the thing it
+/// calls — and a flat table of every tool across every service is the part that got long
+/// first.
+function servicesHtml(snap: Snapshot, configFile: string): string {
+  const LOCAL = "\u0000local";
+  const groups = new Map<string, ToolInfo[]>();
+  for (const t of snap.tools) {
+    const key = t.upstream ?? LOCAL;
+    (groups.get(key) ?? groups.set(key, []).get(key)!).push(t);
+  }
+
+  const rows = snap.upstreams.map((u) => ({
+    key: u.name,
+    title: u.target,
+    sub: `${u.kind} · stored as ${u.name}`,
+    tools: groups.get(u.name) ?? [],
+  }));
+  // Local commands front no service, so they get a group of their own rather than vanishing.
+  if (groups.has(LOCAL)) {
+    rows.push({
+      key: LOCAL,
+      title: "Local commands",
+      sub: "run on this machine, argv only",
+      tools: groups.get(LOCAL)!,
+    });
+  }
+
+  if (rows.length === 0) {
+    return `<div class="card">
+      <h3>Downstream services</h3>
+      <div class="meta">Nothing yet. Add one above, or import a pack.</div>
+    </div>`;
+  }
+
+  const body = rows
+    .map((r) => {
+      const open = expanded.has(r.key);
+      const tools = r.tools.length
+        ? `<table>
+             <thead><tr><th>Tool</th><th>Action</th><th>Limits</th><th>Description</th></tr></thead>
+             <tbody>${r.tools
+               .map(
+                 (t) => `<tr>
+                   <td><code>${esc(t.name)}</code></td>
+                   <td class="meta">${esc(t.action)}</td>
+                   <td>${[
+                     t.idempotent ? "idempotent" : "",
+                     t.rate_limit
+                       ? `${t.rate_limit.per_hour}/h, ${t.rate_limit.min_spacing_secs}s apart`
+                       : "",
+                   ]
+                     .filter(Boolean)
+                     .map((x) => `<span class="pill">${esc(x)}</span>`)
+                     .join(" ")}</td>
+                   <td class="meta">${esc(t.description)}</td>
+                 </tr>`,
+               )
+               .join("")}</tbody>
+           </table>`
+        : `<div class="meta">No tools exposed from this one yet.</div>`;
+
+      return `<div class="card">
+        <div class="row svc-head" data-key="${esc(r.key)}" style="margin-top:0;cursor:pointer">
+          <span class="twist">${open ? "▾" : "▸"}</span>
+          <code>${esc(r.title)}</code>
+          <span class="pill">${r.tools.length} tool${r.tools.length === 1 ? "" : "s"}</span>
+          <span class="meta" style="margin-left:auto">${esc(r.sub)}</span>
+        </div>
+        <div class="${open ? "" : "hidden"}">${tools}</div>
+      </div>`;
+    })
+    .join("");
+
+  return `<div class="card">
+      <h3>Downstream services</h3>
+      <div class="meta">
+        What this gateway calls out to, and the tools bound to each. Stored in
+        <code>${esc(configFile)}</code> under <code>[[upstream]]</code> — proxies call a backend
+        an upstream, so that is the word in the file; it means the same thing as this screen.
+      </div>
+    </div>${body}`;
+}
+
 async function renderActions(snap: Snapshot): Promise<void> {
   if (actionsAreBeingEdited()) return;
   const configFile = await invoke<string>("config_path");
-  $("#actions").innerHTML =
+  const html =
     (draft
       ? connectForm(draft)
       : `<div class="card">
@@ -347,60 +481,21 @@ async function renderActions(snap: Snapshot): Promise<void> {
            </div>
          </div>`) +
     (draft ? "" : renderPackPlanIfAny()) +
-    `
-    <div class="card">
-      <h3>Downstream services</h3>
-      <div class="meta">
-        What this gateway calls out to. Stored in <code>${esc(configFile)}</code> under
-        <code>[[upstream]]</code> — proxies call a backend an upstream, so that is the word in
-        the file; it means the same thing as this screen.
-      </div>
-      ${
-        snap.upstreams.length
-          ? `<table>
-               <thead><tr><th>Address</th><th>Kind</th><th>Stored as</th></tr></thead>
-               <tbody>${snap.upstreams
-                 .map(
-                   (u) => `<tr>
-                     <td><code>${esc(u.target)}</code></td>
-                     <td class="meta">${esc(u.kind)}</td>
-                     <td class="meta"><code>${esc(u.name)}</code></td>
-                   </tr>`,
-                 )
-                 .join("")}</tbody>
-             </table>`
-          : `<div class="meta">Nothing yet. Add one above, or import a pack.</div>`
-      }
-    </div>
-    <div class="card">
-      <h3>Tools</h3>
-      <div class="meta">Each tool is bound to a fixed action. A caller names a tool; it never chooses an action.</div>
-      <table>
-        <thead><tr><th>Tool</th><th>Action</th><th>Target</th><th>Limits</th><th>Description</th></tr></thead>
-        <tbody>${snap.tools
-          .map(
-            (t) => `<tr>
-              <td><code>${esc(t.name)}</code></td>
-              <td>${esc(t.action)}</td>
-              <td>${esc(t.upstream ?? "local")}</td>
-              <td>${[
-                t.idempotent ? "idempotent" : "",
-                t.rate_limit ? `${t.rate_limit.per_hour}/h, ${t.rate_limit.min_spacing_secs}s apart` : "",
-              ]
-                .filter(Boolean)
-                .map((x) => `<span class="pill">${esc(x)}</span>`)
-                .join(" ")}</td>
-              <td class="meta">${esc(t.description)}</td>
-            </tr>`,
-          )
-          .join("")}</tbody>
-      </table>
-    </div>`;
+    servicesHtml(snap, configFile);
+  if (!paint($("#actions"), html)) return;
+
   $("#c-open")?.addEventListener("click", () => {
     draft = newDraft("mcp");
     connDirty = false;
     void refresh();
   });
+  for (const h of Array.from(document.querySelectorAll<HTMLElement>(".svc-head"))) {
+    h.addEventListener("click", () => {
+      const key = h.dataset.key!;
+      if (!expanded.delete(key)) expanded.add(key);
+      void refresh();
+    });
+  }
   if (draft) wireConnectForm();
   wirePackPanel();
 }
@@ -1211,11 +1306,23 @@ function toolFaceCard(snap: Snapshot): string {
 
 async function renderUpstream(snap: Snapshot): Promise<void> {
   if (upstreamIsBeingEdited() && !editingTool) return;
-  $("#upstream").innerHTML =
-    `<div id="approvals"></div>` + toolFaceCard(snap) + `<div id="identities"></div>`;
-  await renderApprovals();
-  await renderIdentities(snap);
+  const [pending, rules] = await Promise.all([
+    invoke<Pending[]>("pending"),
+    invoke<IdentityRule[]>("identities"),
+  ]);
+
+  // Composed and written as one string. Painting the three parts separately would mean the
+  // wrapper's own HTML never matching what is in the DOM, so the screen would rebuild every
+  // five seconds however little had changed — which is the thing this is here to stop.
+  const html =
+    `<div id="approvals">${approvalsHtml(pending)}</div>` +
+    toolFaceCard(snap) +
+    `<div id="identities">${identitiesHtml(snap, rules)}</div>`;
+  if (!paint($("#upstream"), html)) return;
+
+  wireApprovals();
   wireToolFace();
+  wireIdentities();
 }
 
 function wireToolFace(): void {
@@ -1266,13 +1373,12 @@ function wireToolFace(): void {
   });
 }
 
-async function renderIdentities(snap: Snapshot): Promise<void> {
-  const rules = await invoke<IdentityRule[]>("identities");
+function identitiesHtml(snap: Snapshot, rules: IdentityRule[]): string {
   const toolOptions = ['<option value="*">* (every tool)</option>']
     .concat(snap.tools.map((t) => `<option value="${esc(t.name)}">${esc(t.name)}</option>`))
     .join("");
 
-  $("#identities").innerHTML = `
+  return `
     <div class="card">
       <h3>Add a rule</h3>
       <div class="meta">Exact <code>(identity, tool)</code> wins over <code>(identity, *)</code>. With no rule at all, a call is held for your decision.</div>
@@ -1298,14 +1404,16 @@ async function renderIdentities(snap: Snapshot): Promise<void> {
                    <td>${esc(r.identity)}</td>
                    <td><code>${esc(r.tool)}</code></td>
                    <td><span class="pill ${esc(r.decision)}">${esc(r.decision)}</span></td>
-                   <td class="meta">${esc(when(r.updated_at))}</td>
+                   <td class="meta">${ago(r.updated_at)}</td>
                    <td><button class="danger ghost" data-identity="${esc(r.identity)}" data-tool="${esc(r.tool)}">Revoke</button></td>
                  </tr>`,
                )
                .join("")}</tbody>
            </table>`
     }`;
+}
 
+function wireIdentities(): void {
   $("#addrule")?.addEventListener("click", async () => {
     const identity = $<HTMLInputElement>("#newid").value.trim();
     if (!identity) return;
@@ -1374,7 +1482,7 @@ function tokenRow(t: TokenInfo): string {
     <td><code>ghd_${esc(t.id)}…</code></td>
     <td>${esc(t.name)}</td>
     <td><code>${esc(t.identity)}</code></td>
-    <td class="meta">${t.last_used_at ? when(t.last_used_at) : "never used"}</td>
+    <td class="meta">${t.last_used_at ? ago(t.last_used_at) : "never used"}</td>
     <td>${state}</td>
     <td>${
       t.revoked_at
@@ -1729,8 +1837,9 @@ async function renderNetwork(): Promise<void> {
   if (networkIsBeingEdited()) return;
   const pub_ = await invoke<PublishInfo>("publish_state");
 
-  $("#network").innerHTML =
+  const html =
     publishPanel(pub_) + publishEditor(publishPending?.form ?? pub_.form, publishPending);
+  if (!paint($("#network"), html)) return;
 
   wirePublishForm();
 }
@@ -1788,7 +1897,7 @@ async function renderAccess(snap: Snapshot): Promise<void> {
         .join("")
     : `<div class="meta">No tools are configured yet. Import a pack first, then issue tokens for it.</div>`;
 
-  $("#access").innerHTML =
+  const html =
     issuedPanel +
     `
     <div class="card">
@@ -1838,6 +1947,7 @@ async function renderAccess(snap: Snapshot): Promise<void> {
           : `<div class="meta">None yet. Only the super token can reach this gateway.</div>`
       }
     </div>`;
+  if (!paint($("#access"), html)) return;
 
   $("#reveal")?.addEventListener("click", () => {
     revealSuper = !revealSuper;
@@ -1913,6 +2023,7 @@ async function refresh(): Promise<void> {
     else if (screen === "actions") await renderActions(snap);
     else if (screen === "network") await renderNetwork();
     else if (screen === "access") await renderAccess(snap);
+    tickTimes();
   } catch (e) {
     console.error(e);
   } finally {
