@@ -650,13 +650,46 @@ fn issue_token(
 }
 
 #[tauri::command]
-fn revoke_token(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
-    if state.gateway.store.revoke_token(&id).map_err(err)? {
-        tracing::info!(token = %id, "revoked an access token");
-        Ok(())
-    } else {
-        Err("that token is already revoked, or was never issued".into())
+fn revoke_token(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    forget_rules: bool,
+) -> Result<Revoked, String> {
+    // Read the identity before revoking, so the rules can be dropped by name afterwards.
+    let identity = state
+        .gateway
+        .store
+        .list_tokens()
+        .map_err(err)?
+        .into_iter()
+        .find(|t| t.id == id)
+        .map(|t| t.identity);
+
+    if !state.gateway.store.revoke_token(&id).map_err(err)? {
+        return Err("that token is already revoked, or was never issued".into());
     }
+    tracing::info!(token = %id, "revoked an access token");
+
+    // Revoking kills the credential; the rules are keyed by the identity it authenticated as
+    // and outlive it. Usually that is what you want — another token for the same name still
+    // works — but when this was the last one, the rules sit there reading as live access.
+    let mut forgot = Vec::new();
+    if forget_rules {
+        if let Some(identity) = &identity {
+            forgot = state.gateway.store.forget_identity(identity).map_err(err)?;
+            tracing::info!(%identity, rules = forgot.len(), "forgot an identity's rules");
+        }
+    }
+    Ok(Revoked { identity, forgot })
+}
+
+/// What revoking did.
+#[derive(Serialize)]
+struct Revoked {
+    /// The identity the token authenticated as, whose rules outlive it.
+    identity: Option<String>,
+    /// Rules dropped, when asked to.
+    forgot: Vec<String>,
 }
 
 /// A readable identity from the token's name, kept unique so two clients called the same thing

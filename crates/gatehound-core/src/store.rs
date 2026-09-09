@@ -454,6 +454,31 @@ impl Store {
         Ok(())
     }
 
+    /// Drop every rule for one identity, reporting what went.
+    ///
+    /// Revoking a token kills the credential, not the name it authenticated as — and the
+    /// rules are keyed by the name. Left behind they read as live access on the Upstream
+    /// screen, and they would genuinely apply again to anything else that resolves to the
+    /// same identity, which a Cloudflare service token of that name would.
+    pub fn forget_identity(&self, identity: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let gone: Vec<String> = conn
+            .prepare("SELECT tool, decision FROM identities WHERE identity = ?1")?
+            .query_map(params![identity], |r| {
+                Ok(format!(
+                    "{} → {}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        conn.execute(
+            "DELETE FROM identities WHERE identity = ?1",
+            params![identity],
+        )?;
+        Ok(gone)
+    }
+
     pub fn forget_decision(&self, identity: &str, tool: &str) -> Result<usize> {
         let conn = self.lock();
         Ok(conn.execute(

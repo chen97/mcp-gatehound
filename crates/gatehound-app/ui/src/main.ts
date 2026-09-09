@@ -244,10 +244,13 @@ const painted = new WeakMap<HTMLElement, string>();
 function paint(el: HTMLElement, html: string): boolean {
   if (painted.get(el) === html) return false;
   painted.set(el, html);
-  // A repaint that does happen still should not move the page under the reader.
-  const y = window.scrollY;
+  // A repaint that does happen still should not move the page under the reader. `main` is the
+  // scrolling element, not the window — the window itself does not scroll, so `window.scrollY`
+  // would read zero and restore nothing.
+  const scroller = document.querySelector("main");
+  const y = scroller?.scrollTop ?? 0;
   el.innerHTML = html;
-  if (window.scrollY !== y) window.scrollTo(0, y);
+  if (scroller && scroller.scrollTop !== y) scroller.scrollTop = y;
   return true;
 }
 
@@ -1306,9 +1309,10 @@ function toolFaceCard(snap: Snapshot): string {
 
 async function renderUpstream(snap: Snapshot): Promise<void> {
   if (upstreamIsBeingEdited() && !editingTool) return;
-  const [pending, rules] = await Promise.all([
+  const [pending, rules, access] = await Promise.all([
     invoke<Pending[]>("pending"),
     invoke<IdentityRule[]>("identities"),
+    invoke<Access>("access"),
   ]);
 
   // Composed and written as one string. Painting the three parts separately would mean the
@@ -1317,7 +1321,7 @@ async function renderUpstream(snap: Snapshot): Promise<void> {
   const html =
     `<div id="approvals">${approvalsHtml(pending)}</div>` +
     toolFaceCard(snap) +
-    `<div id="identities">${identitiesHtml(snap, rules)}</div>`;
+    `<div id="identities">${identitiesHtml(snap, rules, access)}</div>`;
   if (!paint($("#upstream"), html)) return;
 
   wireApprovals();
@@ -1373,7 +1377,16 @@ function wireToolFace(): void {
   });
 }
 
-function identitiesHtml(snap: Snapshot, rules: IdentityRule[]): string {
+function identitiesHtml(snap: Snapshot, rules: IdentityRule[], access: Access): string {
+  // Revoking a token does not remove the rules for the name it authenticated as, and a rule
+  // with nothing able to present it reads exactly like live access. Flag those: an identity
+  // that once had tokens and has none left.
+  const hadToken = new Set(access.tokens.map((t) => t.identity));
+  const hasLiveToken = new Set(
+    access.tokens.filter((t) => !t.revoked_at).map((t) => t.identity),
+  );
+  const stranded = (identity: string): boolean =>
+    hadToken.has(identity) && !hasLiveToken.has(identity);
   const toolOptions = ['<option value="*">* (every tool)</option>']
     .concat(snap.tools.map((t) => `<option value="${esc(t.name)}">${esc(t.name)}</option>`))
     .join("");
@@ -1401,7 +1414,11 @@ function identitiesHtml(snap: Snapshot, rules: IdentityRule[]): string {
              <tbody>${rules
                .map(
                  (r) => `<tr>
-                   <td>${esc(r.identity)}</td>
+                   <td>${esc(r.identity)}${
+                     stranded(r.identity)
+                       ? ` <span class="pill error" title="Every token for this identity is revoked, so nothing can present these rules — until something else authenticates as the same name.">no live token</span>`
+                       : ""
+                   }</td>
                    <td><code>${esc(r.tool)}</code></td>
                    <td><span class="pill ${esc(r.decision)}">${esc(r.decision)}</span></td>
                    <td class="meta">${ago(r.updated_at)}</td>
@@ -1450,6 +1467,9 @@ function wireIdentities(): void {
 // afterwards, so it is never re-fetched and never stored.
 let justIssued: Issued | null = null;
 let revealSuper = false;
+/// The token list the Access screen last drew, so revoking can tell whether it is taking the
+/// final credential for an identity.
+let lastAccess: Access | null = null;
 // Saved to the file but not yet running. The status panel reports what is live; the form has
 // to keep showing what will apply, or a save the operator declined to restart for looks lost.
 let publishPending: Saved | null = null;
@@ -1487,7 +1507,7 @@ function tokenRow(t: TokenInfo): string {
     <td>${
       t.revoked_at
         ? ""
-        : `<button class="ghost revoke" data-id="${esc(t.id)}" data-name="${esc(t.name)}">Revoke</button>`
+        : `<button class="ghost revoke" data-id="${esc(t.id)}" data-name="${esc(t.name)}" data-identity="${esc(t.identity)}">Revoke</button>`
     }</td>
   </tr>`;
 }
@@ -1846,6 +1866,7 @@ async function renderNetwork(): Promise<void> {
 
 async function renderAccess(snap: Snapshot): Promise<void> {
   const a = await invoke<Access>("access");
+  lastAccess = a;
 
   const issuedPanel = justIssued
     ? `<div class="card">
@@ -1980,11 +2001,36 @@ async function renderAccess(snap: Snapshot): Promise<void> {
 
   document.querySelectorAll<HTMLButtonElement>(".revoke").forEach((b) => {
     b.addEventListener("click", async () => {
+      const identity = b.dataset.identity ?? "";
       if (!confirm(`Revoke "${b.dataset.name}"? Its next request is refused.`)) return;
+
+      // Revoking kills the credential, not the name it authenticated as — and the permissions
+      // are keyed by the name. Leaving them is right when another token still uses it, and
+      // misleading when this was the last one, so the choice has to be put rather than
+      // guessed. Offered only when nothing else can still authenticate as that identity.
+      const lastOne = !lastAccess?.tokens.some(
+        (t) => t.identity === identity && !t.revoked_at && t.id !== b.dataset.id,
+      );
+      const forgetRules =
+        lastOne &&
+        identity !== "" &&
+        confirm(
+          `That was the last token for "${identity}".\n\n` +
+            `Its permissions stay unless you remove them — nothing can use them while no ` +
+            `credential resolves to that name, but they will apply again to anything that ` +
+            `later does, and until then they read as live access.\n\n` +
+            `Remove them too?`,
+        );
+
+      let out: { identity: string | null; forgot: string[] };
       try {
-        await invoke("revoke_token", { id: b.dataset.id });
+        out = await invoke("revoke_token", { id: b.dataset.id, forgetRules });
       } catch (e) {
         alert(String(e));
+        return;
+      }
+      if (out.forgot.length) {
+        alert(`Removed ${out.forgot.length} rule(s) for ${out.identity}:\n\n${out.forgot.join("\n")}`);
       }
       await refresh();
     });

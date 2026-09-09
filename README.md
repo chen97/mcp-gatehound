@@ -276,6 +276,12 @@ that was previously fixed.
   yields no working credential, and a lost token is replaced rather than recovered.
 - **Revoking takes effect on the next request** and keeps the row — the audit log names the
   identity, and deleting it would orphan every entry that mentions it.
+- **Revoking kills the credential, not the identity's permissions.** The rules are keyed by the
+  name the token authenticated as, and another token for the same name still uses them. When
+  the revoked one was the last, the app offers to remove them too: nothing can present them
+  meanwhile, but they would apply again to anything that later resolves to that name — a
+  Cloudflare service token of the same name would — and until then they read as live access.
+  Rules whose identity has no live token are marked on **Upstream**.
 - **A token that looks like ours but is unknown, revoked or wrong is refused**, never quietly
   compared against the super token instead.
 
