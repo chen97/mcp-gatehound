@@ -1476,6 +1476,9 @@ let publishPending: Saved | null = null;
 // Set by any edit to the publish form, cleared when it is saved. A field the operator has
 // filled in but not saved must survive a background refresh.
 let publishDirty = false;
+/// Set when the operator asks for the Access fields on a reach that does not need them —
+/// defence in depth is theirs to choose, it just should not be the default clutter.
+let accessAnyway = false;
 // Restarting relaunches the process, so the window disappears and comes back. Said out loud in
 // every prompt that offers it: unannounced, it reads as the app having crashed.
 const RESTART_WARNS = "The window will close and reopen — the gateway restarts with it.";
@@ -1594,20 +1597,33 @@ function publishEditor(f: PublishForm, pending: Saved | null): string {
     </div>
 
     <h3 style="margin-top:14px">Cloudflare Access</h3>
-    <div class="meta">
-      The second factor: every request is checked at Cloudflare's edge before it reaches this
-      machine. Required for anything on the public internet. Both fields come from the Access
-      application guarding the gateway's hostname — not the one guarding any other site.
+
+    <!-- Shown when it is needed or already set. Hidden, never removed: the fields are read
+         back by id on save, so a missing one would read as blank and quietly clear whatever
+         was configured. -->
+    <div id="pub-access-off" class="hidden">
+      <div class="meta">
+        Not needed for this — nothing that could reach the gateway would get past it without
+        already having proved something.
+        <button id="pub-access-anyway" class="ghost">Set it up anyway</button>
+      </div>
     </div>
-    <div class="row">
-      <label class="meta" for="pub-team" style="min-width:120px">Team domain</label>
-      <input id="pub-team" type="text" style="min-width:320px"
-             placeholder="yourteam.cloudflareaccess.com" value="${esc(f.access_team_domain)}" />
-    </div>
-    <div class="row">
-      <label class="meta" for="pub-aud" style="min-width:120px">AUD tag</label>
-      <input id="pub-aud" type="text" style="min-width:320px"
-             placeholder="from the application's Overview tab" value="${esc(f.access_aud)}" />
+    <div id="pub-access">
+      <div class="meta">
+        The second factor: every request is checked at Cloudflare's edge before it reaches this
+        machine. Required for anything on the public internet. Both fields come from the Access
+        application guarding the gateway's hostname — not the one guarding any other site.
+      </div>
+      <div class="row">
+        <label class="meta" for="pub-team" style="min-width:120px">Team domain</label>
+        <input id="pub-team" type="text" style="min-width:320px"
+               placeholder="yourteam.cloudflareaccess.com" value="${esc(f.access_team_domain)}" />
+      </div>
+      <div class="row">
+        <label class="meta" for="pub-aud" style="min-width:120px">AUD tag</label>
+        <input id="pub-aud" type="text" style="min-width:320px"
+               placeholder="from the application's Overview tab" value="${esc(f.access_aud)}" />
+      </div>
     </div>
 
     <div class="row">
@@ -1777,8 +1793,32 @@ function wirePublishForm(): void {
     $("#pub-hint").textContent = BACKENDS.find((b) => b.value === via)?.hint ?? "";
     $("#pub-cloudflare").classList.toggle("hidden", via !== "cloudflare" && via !== "auto");
     $("#pub-tailscale").classList.toggle("hidden", via !== "tailscale");
+
+    // Access only earns its space when something could reach the gateway that has not already
+    // proved anything. Loopback and a tailnet have; `auto` might resolve to a tunnel, so it
+    // counts. Still shown when it is already configured, or nobody could ever turn it off.
+    const funnel = ($("#pub-funnel") as HTMLInputElement | null)?.checked ?? false;
+    const needed =
+      via === "cloudflare" || via === "auto" || (via === "tailscale" && funnel);
+    const configured =
+      (($("#pub-team") as HTMLInputElement | null)?.value.trim() ?? "") !== "" ||
+      (($("#pub-aud") as HTMLInputElement | null)?.value.trim() ?? "") !== "";
+    const show = needed || configured || accessAnyway;
+    $("#pub-access").classList.toggle("hidden", !show);
+    $("#pub-access-off").classList.toggle("hidden", show);
   };
   viaSelect?.addEventListener("change", syncVia);
+  // Funnel turns a tailnet into the public internet, so it changes the answer.
+  $("#pub-funnel")?.addEventListener("change", syncVia);
+  $("#pub-access-anyway")?.addEventListener("click", () => {
+    accessAnyway = true;
+    syncVia();
+  });
+
+  // The kind-specific blocks carry their initial state in the markup; the Access block cannot,
+  // because whether to show it depends on the Funnel checkbox and on whether the fields
+  // already hold anything. Settle it once, here.
+  syncVia();
 
   // Marking the form dirty stops the background refresh rebuilding it, so it also has to say
   // that the status above has gone still — otherwise the panel looks frozen for no reason.
