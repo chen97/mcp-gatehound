@@ -19,7 +19,13 @@ interface Snapshot {
   auth: string;
   pending: number;
   tools: ToolInfo[];
-  upstreams: string[];
+  upstreams: Downstream[];
+}
+
+interface Downstream {
+  name: string;
+  kind: string;
+  target: string;
 }
 
 interface ToolInfo {
@@ -321,7 +327,7 @@ async function renderLog(): Promise<void> {
   });
 }
 
-// ---- Connections & tools ---------------------------------------------------
+// ---- Downstream ------------------------------------------------------------
 
 async function renderActions(snap: Snapshot): Promise<void> {
   if (actionsAreBeingEdited()) return;
@@ -330,28 +336,41 @@ async function renderActions(snap: Snapshot): Promise<void> {
     (draft
       ? connectForm(draft)
       : `<div class="card">
-           <h3>Add something for the gateway to call</h3>
+           <h3>Add a downstream</h3>
            <div class="meta">
-             A connection is one service and the tools bound to it. Build it here, or import a
-             pack someone else wrote — both end up as the same thing.
+             One service and the tools bound to it. Build it here, or import a pack someone
+             else wrote — both end up as the same thing.
            </div>
            <div class="row">
-             <button id="c-open" class="primary">Add a connection…</button>
+             <button id="c-open" class="primary">Add a downstream…</button>
              <button id="pack-pick" class="ghost">Import a pack…</button>
            </div>
          </div>`) +
     (draft ? "" : renderPackPlanIfAny()) +
     `
     <div class="card">
-      <h3>Connected services</h3>
+      <h3>Downstream services</h3>
       <div class="meta">
-        What this gateway can call out to. Written to <code>${esc(configFile)}</code> as
-        <code>[[upstream]]</code> — the word proxies use for a backend, and the one place it
-        still appears.
+        What this gateway calls out to. Stored in <code>${esc(configFile)}</code> under
+        <code>[[upstream]]</code> — proxies call a backend an upstream, so that is the word in
+        the file; it means the same thing as this screen.
       </div>
-      <table><tbody>${snap.upstreams
-        .map((u) => `<tr><td><code>${esc(u)}</code></td></tr>`)
-        .join("")}</tbody></table>
+      ${
+        snap.upstreams.length
+          ? `<table>
+               <thead><tr><th>Address</th><th>Kind</th><th>Stored as</th></tr></thead>
+               <tbody>${snap.upstreams
+                 .map(
+                   (u) => `<tr>
+                     <td><code>${esc(u.target)}</code></td>
+                     <td class="meta">${esc(u.kind)}</td>
+                     <td class="meta"><code>${esc(u.name)}</code></td>
+                   </tr>`,
+                 )
+                 .join("")}</tbody>
+             </table>`
+          : `<div class="meta">Nothing yet. Add one above, or import a pack.</div>`
+      }
     </div>
     <div class="card">
       <h3>Tools</h3>
@@ -401,7 +420,7 @@ function actionsAreBeingEdited(): boolean {
   );
 }
 
-// ---- Adding a connection ---------------------------------------------------
+// ---- Adding a downstream ---------------------------------------------------
 // The same thing importing a pack produces, collected from a form instead of a file. For an
 // MCP server the tool list is discovered rather than typed, because a name typed from memory
 // is a name you find out was wrong on the first call.
@@ -505,12 +524,33 @@ const KINDS: { value: ConnKind; label: string; hint: string }[] = [
 ];
 
 /// The token row, shared by the two kinds that have one.
+/// Just the token. No variable name, because an app opened from Finder inherits no shell
+/// environment — the same reason the app writes its own bearer token into the config rather
+/// than asking for GATEHOUND_TOKEN to be exported. Offering a field that can only ever resolve
+/// to nothing is worse than not offering it.
+function tokenField(d: Draft): string {
+  return `
+    <div class="row">
+      <label class="meta" style="min-width:130px">Token</label>
+      <input id="c-token" type="password" style="min-width:300px"
+             placeholder="only if the server needs one" value="${esc(d.token)}" />
+    </div>
+    <div class="meta">
+      Stored in the config file, which lives in your own user directory. To keep it out of the
+      file instead, set <code>token_env</code> on the upstream by hand — useful for
+      <code>gatehound-headless</code>, which is started from a shell and does have an
+      environment.
+    </div>`;
+}
+
+/// The HTTP form keeps both: a REST upstream is the kind that tends to arrive as a pack, and
+/// a pack names a variable rather than carrying the secret.
 function tokenFields(d: Draft): string {
   return `
     <div class="row">
       <label class="meta" style="min-width:130px">Token from variable</label>
       <input id="c-tokenenv" type="text" style="min-width:260px"
-             placeholder="e.g. BEEPER_TOKEN" value="${esc(d.token_env)}" />
+             placeholder="e.g. TRACKER_TOKEN" value="${esc(d.token_env)}" />
     </div>
     <div class="row">
       <label class="meta" style="min-width:130px">…or paste one</label>
@@ -519,8 +559,8 @@ function tokenFields(d: Draft): string {
     </div>
     <div class="meta">
       A variable keeps the secret out of the config file, which is what makes that file safe to
-      share or commit. A pasted token is written into it — fine for a file in your own user
-      directory, not for one you hand to anyone.
+      share. It is only read when the gateway is started from a shell — an app opened from
+      Finder has no environment to read it from, so paste the token there instead.
     </div>`;
 }
 
@@ -572,6 +612,32 @@ function manualTools(d: Draft): string {
   return `${rows}<div class="row"><button id="c-add-tool" class="ghost">Add another tool</button></div>`;
 }
 
+/// What the core will store this downstream under. Mirrors `NewConnection::derived_name`, only
+/// so the form can show it before saving — the value actually written is the core's. Both read
+/// tests_fixtures/derived_names.json, and check-derived-names.mjs fails the build if this half
+/// drifts, because a wrong preview is a lie in the place an operator looks to check.
+function derivedName(d: Draft): string {
+  if (d.kind === "exec") {
+    const cmd = d.tools.find((t) => t.cmd.trim())?.cmd.trim() ?? "";
+    return slug(cmd.split("/").pop() ?? "");
+  }
+  const url = (d.kind === "mcp" ? d.url : d.base_url).trim();
+  const rest = url.includes("://") ? url.slice(url.indexOf("://") + 3) : url;
+  const authority = (rest.split(/[/?#]/)[0] ?? "").split("@").pop() ?? "";
+  const m = /^(.*?)(?::(\d+))?$/.exec(authority);
+  const host = (m?.[1] ?? "").replace(/^\[|\]$/g, "");
+  if (!host) return "";
+  const local = ["127.0.0.1", "localhost", "0.0.0.0", "::1"].includes(host);
+  return slug(local && m?.[2] ? `localhost-${m[2]}` : local ? "localhost" : host);
+}
+
+function slug(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 function connectForm(d: Draft): string {
   const kind = KINDS.find((k) => k.value === d.kind)!;
   const body =
@@ -582,7 +648,7 @@ function connectForm(d: Draft): string {
                   placeholder="http://127.0.0.1:23373/mcp" value="${esc(d.url)}" />
            <button id="c-discover" class="ghost">List its tools</button>
          </div>
-         ${tokenFields(d)}
+         ${tokenField(d)}
          ${discoveredList(d)}`
       : d.kind === "http"
         ? `<div class="row">
@@ -612,7 +678,7 @@ function connectForm(d: Draft): string {
            ${manualTools(d)}`;
 
   return `<div class="card">
-    <h3>Add a connection</h3>
+    <h3>Add a downstream</h3>
     <div class="meta">${esc(kind.hint)}</div>
 
     <div class="row">
@@ -621,13 +687,14 @@ function connectForm(d: Draft): string {
         ${KINDS.map((k) => `<option value="${k.value}"${k.value === d.kind ? " selected" : ""}>${esc(k.label)}</option>`).join("")}
       </select>
     </div>
-    <div class="row">
-      <label class="meta" style="min-width:130px">Name</label>
-      <input id="c-name" type="text" style="width:200px" placeholder="beeper" value="${esc(d.name)}" />
-      <span class="meta">An identifier, no spaces. Tools refer to it.</span>
-    </div>
 
     ${body}
+
+    <div class="meta" style="margin-top:10px">
+      Stored as <code>${esc(derivedName(d) || "…")}</code> in the config file. Tools refer to it
+      by that; it comes from the address, so there is nothing to invent and re-adding the same
+      address updates the same entry.
+    </div>
 
     <h3 style="margin-top:14px">The first time a client calls these</h3>
     <div class="row">
@@ -656,7 +723,7 @@ function connectForm(d: Draft): string {
     }
 
     <div class="row">
-      <button id="c-save" class="primary">Add connection</button>
+      <button id="c-save" class="primary">Add downstream</button>
       <button id="c-cancel" class="ghost">Cancel</button>
       <label class="check" style="margin-left:8px">
         <input id="c-replace" type="checkbox" ${d.replace ? "checked" : ""} />
@@ -670,7 +737,6 @@ function connectForm(d: Draft): string {
 function readDraft(d: Draft): void {
   const val = (sel: string): string =>
     (document.querySelector(sel) as HTMLInputElement | HTMLSelectElement | null)?.value ?? "";
-  d.name = val("#c-name");
   d.url = val("#c-url");
   d.base_url = val("#c-baseurl");
   d.auth = val("#c-auth") || d.auth;
@@ -768,9 +834,7 @@ function wireConnectForm(): void {
     // Changing kind changes which fields exist, so the draft restarts rather than carrying
     // over half-filled values that no longer mean anything.
     const kind = (e.currentTarget as HTMLSelectElement).value as ConnKind;
-    const name = ($("#c-name") as HTMLInputElement | null)?.value ?? "";
     draft = newDraft(kind);
-    draft.name = name;
     connDirty = false;
     void refresh();
   });
@@ -816,14 +880,6 @@ function wireConnectForm(): void {
         description: t.description,
         input_schema: t.input_schema ?? null,
       }));
-      // A server usually knows its own name better than the operator does at this point.
-      if (!d.name.trim()) {
-        try {
-          d.name = new URL(d.url).hostname.split(".")[0].replace(/[^A-Za-z0-9_-]/g, "");
-        } catch {
-          /* a URL we cannot parse is the server's problem to report, not a naming failure */
-        }
-      }
     } catch (e) {
       d.discovered = null;
       d.error = String(e);
@@ -865,7 +921,8 @@ function wireConnectForm(): void {
       : "";
     const restart = confirm(
       `Added to ${result.config_path}.\n\n` +
-        `The gateway is still serving what it started with. Restart now to apply?${env}${asked}`,
+        `The gateway is still serving what it started with. Restart now to apply?\n\n` +
+        `${RESTART_WARNS}${env}${asked}`,
     );
     if (restart) {
       await invoke("restart_app");
@@ -887,7 +944,7 @@ let packChoices: string[] = [];
 
 function appliedList(a: Applied): string {
   const rows: [string, string[]][] = [
-    ["Connected services", a.upstreams],
+    ["Downstream services", a.upstreams],
     ["Tools", a.tools],
     ["Identity seeds", a.identities],
     ["Replaced", a.replaced],
@@ -1066,7 +1123,7 @@ function wirePackPanel(): void {
       const restart = confirm(
         `Imported into ${result.config_path}.\n\n` +
           `The gateway is still serving the configuration it started with. ` +
-          `Restart now to apply?${env}`,
+          `Restart now to apply?\n\n${RESTART_WARNS}${env}`,
       );
       if (restart) {
         await invoke("restart_app");
@@ -1161,6 +1218,9 @@ let publishPending: Saved | null = null;
 // Set by any edit to the publish form, cleared when it is saved. A field the operator has
 // filled in but not saved must survive a background refresh.
 let publishDirty = false;
+// Restarting relaunches the process, so the window disappears and comes back. Said out loud in
+// every prompt that offers it: unannounced, it reads as the app having crashed.
+const RESTART_WARNS = "The window will close and reopen — the gateway restarts with it.";
 // The URL the panel last rendered, so the copy button has something to hand over without
 // re-reading state that may have moved on.
 let publishedUrl: string | null = null;
@@ -1522,7 +1582,8 @@ function wirePublishForm(): void {
     const warnings = saved.warnings.length ? `\n\n${saved.warnings.join("\n\n")}` : "";
     const restart = confirm(
       `Saved to ${saved.config_path}.\n\n` +
-        `The gateway is still published the way it started. Restart now to apply?${warnings}`,
+        `The gateway is still published the way it started. Restart now to apply?\n\n` +
+        `${RESTART_WARNS}${warnings}`,
     );
     if (restart) {
       await invoke("restart_app");

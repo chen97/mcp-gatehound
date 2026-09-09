@@ -1,0 +1,20 @@
+{
+  "_comment": "One table, two readers: the Rust that decides the stored name and the TypeScript that previews it in the form. A preview that disagreed with what gets written would be a lie in the one place an operator looks to check.",
+  "url": [
+    ["http://127.0.0.1:23373/v0/mcp", "localhost-23373"],
+    ["http://localhost:8080/mcp", "localhost-8080"],
+    ["http://[::1]:9000/mcp", "localhost-9000"],
+    ["http://0.0.0.0:7000/", "localhost-7000"],
+    ["https://api.example.com/mcp", "api-example-com"],
+    ["https://api.example.com:443/mcp", "api-example-com"],
+    ["https://user:pw@api.example.com/mcp", "api-example-com"],
+    ["https://Api.Example.COM/mcp", "api-example-com"],
+    ["api.example.com/mcp", "api-example-com"],
+    ["http://127.0.0.1/mcp", "localhost"]
+  ],
+  "command": [
+    ["/usr/bin/df", "df"],
+    ["df", "df"],
+    ["/opt/tools/my_tool", "my-tool"]
+  ]
+}

@@ -327,10 +327,16 @@ only burned by a call that actually succeeded, so a failed call can be retried w
 key. Any tool may also carry a **rate limit** — a per-hour cap and a minimum gap — which is a
 second, independent brake on a runaway agent.
 
-### Connecting a service from the window
+### Adding a downstream from the window
 
-**Connections & tools** adds a service without a text editor. Three kinds, matching the actions
+**Downstream** adds a service without a text editor. Three kinds, matching the actions
 above: another MCP server, a REST API, or local commands.
+
+You give it the address — `http://127.0.0.1:23373/v0/mcp`, an API's base URL, or a command —
+and nothing else. The config file needs a name because tools refer to their target by one, but
+it is derived from the address rather than asked for, so `127.0.0.1:23373` is stored as
+`localhost-23373` and re-adding the same address updates the same entry instead of quietly
+making a second one.
 
 For an MCP server the tool list is **discovered, not typed** — the app calls `tools/list` on it
 and you tick what to expose. Everything unticked stays unreachable through the gateway however
@@ -341,7 +347,7 @@ What the form produces is a pack, applied through the same merge an import uses.
 deliberate — collisions, replacement and the report of what changed behave identically whether
 a definition arrived as a file or a form. Importing a pack is still there, next to it.
 
-A connection also asks what a client's **first call** to its tools should do:
+It also asks what a client's **first call** to its tools should do:
 
 - **Ask** — the call waits in Approvals for your decision. This is already what happens for a
   client with no rule; choosing it here also writes a rule per tool for clients holding issued
@@ -356,7 +362,7 @@ someone else, and it does not bend for one built locally.
 ### Packs: importing and exporting an integration
 
 Everything the gateway knows about a service is data, so it can travel. In the desktop app,
-**Connections & tools → Import a pack** picks a file and shows what it would change before
+**Downstream → Import a pack** picks a file and shows what it would change before
 anything is written; on the command line:
 
 ```sh
@@ -402,8 +408,8 @@ WAL.
 
 The tray is the primary surface: green listening, grey paused, red an upstream is not
 answering, with a badge counting waiting approvals. "Pause gateway" stops only the listener
-and leaves the app open. The window has six screens — Approvals, Live log, Connections &
-tools, Identities, Network, Access — and holds no state of record; it reads everything from
+and leaves the app open. The window has six screens — Approvals, Live log, Downstream,
+Identities, Network, Access — and holds no state of record; it reads everything from
 the core and re-reads whenever the core pushes an event. **Network** is reachability: which
 backend is running, who can reach the gateway, the URL to hand a client, whether anything but
 the bearer token stands in front of it, and a form to change all of it — because the

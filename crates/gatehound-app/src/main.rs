@@ -54,7 +54,19 @@ struct Snapshot {
     auth: String,
     pending: usize,
     tools: Vec<serde_json::Value>,
-    upstreams: Vec<String>,
+    upstreams: Vec<Downstream>,
+}
+
+/// One thing the gateway can call, as the window lists it.
+///
+/// Carries the address rather than only the name: the address is what the operator typed and
+/// recognises, and the name is an identifier derived from it so nobody had to invent one.
+#[derive(Serialize)]
+struct Downstream {
+    name: String,
+    kind: &'static str,
+    /// Where it is. Empty for local commands, which have no address.
+    target: String,
 }
 
 // ---- IPC commands ---------------------------------------------------------
@@ -77,11 +89,21 @@ fn snapshot(state: tauri::State<'_, AppState>) -> Result<Snapshot, String> {
         pending: gw.pending().map_err(err)?.len(),
         tools: gw.catalog(),
         upstreams: gw
-            .engine
-            .upstreams()
-            .names()
-            .into_iter()
-            .map(str::to_string)
+            .cfg
+            .upstreams
+            .iter()
+            .map(|u| match &u.kind {
+                gatehound_core::config::UpstreamKind::Mcp { url, .. } => Downstream {
+                    name: u.name.clone(),
+                    kind: "MCP server",
+                    target: url.clone(),
+                },
+                gatehound_core::config::UpstreamKind::Http { base_url, .. } => Downstream {
+                    name: u.name.clone(),
+                    kind: "REST API",
+                    target: base_url.clone(),
+                },
+            })
             .collect(),
     })
 }

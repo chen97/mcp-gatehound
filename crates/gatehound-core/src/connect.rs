@@ -107,6 +107,10 @@ fn get() -> String {
 /// A service and the tools to expose from it, as the form collected them.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NewConnection {
+    /// Usually absent. The configuration needs a name because tools refer to their target by
+    /// one, but asking for it makes an operator invent an identifier before they can type the
+    /// thing they actually know — the URL. Left empty, one is derived from the target.
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub description: String,
@@ -122,10 +126,8 @@ impl NewConnection {
     /// Rejects here rather than at merge time where the message would be about TOML: a name
     /// with a space in it is a form mistake, and should read like one.
     pub fn to_pack(&self) -> Result<Pack> {
-        let name = self.name.trim();
-        if name.is_empty() {
-            bail!("the connection needs a name");
-        }
+        let derived = self.derived_name()?;
+        let name = derived.as_str();
         if name.contains(char::is_whitespace) {
             bail!("'{name}' has a space in it; a connection name is an identifier, like 'beeper'");
         }
@@ -265,6 +267,41 @@ impl NewConnection {
         })
     }
 
+    /// The identifier this connection is stored under.
+    ///
+    /// Taken from what the operator actually typed — the host and, when it does not identify
+    /// the service on its own, the port — so `http://127.0.0.1:23373/v0/mcp` is `localhost-23373`
+    /// and `https://api.example.com/mcp` is `api-example-com`. Stable, because it is a pure
+    /// function of the target: re-adding the same URL lands on the same entry rather than
+    /// silently creating a second one.
+    pub fn derived_name(&self) -> Result<String> {
+        if !self.name.trim().is_empty() {
+            return Ok(self.name.trim().to_string());
+        }
+        let from = match &self.service {
+            Service::Mcp { url, .. } => name_from_url(url),
+            Service::Http { base_url, .. } => name_from_url(base_url),
+            // Local commands front no service, so the first command is the closest thing to
+            // an address they have.
+            Service::Exec => self
+                .tools
+                .iter()
+                .find_map(|t| match &t.binding {
+                    Binding::Exec { cmd, .. } => std::path::Path::new(cmd.trim())
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .map(slug),
+                    _ => None,
+                })
+                .filter(|s| !s.is_empty()),
+        };
+        from.ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not work out a name from that target — give the connection one explicitly"
+            )
+        })
+    }
+
     /// A token typed into the form rather than named as a variable, if there was one.
     pub fn inline_token(&self) -> Option<&str> {
         match &self.service {
@@ -274,6 +311,51 @@ impl NewConnection {
             Service::Exec => None,
         }
     }
+}
+
+/// A connection name from a URL: the host, plus the port when the host alone says nothing.
+///
+/// Loopback is the case that matters — every local service shares `127.0.0.1`, so the port is
+/// the only part that distinguishes them, while `api.example.com` identifies itself and a port
+/// would just be noise.
+fn name_from_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, a)| a)
+        .unwrap_or(authority);
+    let (host, port) = match authority.rsplit_once(':') {
+        // Not a port: an unbracketed IPv6 literal, or a stray colon.
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => (h, Some(p)),
+        _ => (authority, None),
+    };
+    let host = host.trim_matches(['[', ']']);
+    if host.is_empty() {
+        return None;
+    }
+    let local = matches!(host, "127.0.0.1" | "localhost" | "0.0.0.0" | "::1");
+    let base = if local { "localhost" } else { host };
+    let name = match (local, port) {
+        (true, Some(p)) => format!("{base}-{p}"),
+        _ => base.to_string(),
+    };
+    let name = slug(&name);
+    (!name.is_empty()).then_some(name)
+}
+
+/// Lowercase, and nothing that would need quoting in a config file or a tool's action.
+fn slug(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 /// Put a pasted token on the merged upstream.
@@ -446,8 +528,87 @@ mod tests {
     }
 
     #[test]
+    fn the_stored_name_matches_the_one_the_form_previews() {
+        // The window computes this too, to show "stored as …" before saving. Both read the
+        // same table so a preview cannot drift from what actually gets written — which would
+        // be a lie in the one place an operator looks to check.
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests_fixtures/derived_names.json"
+        ))
+        .expect("the shared table");
+        let table: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        for case in table["url"].as_array().unwrap() {
+            let (url, want) = (case[0].as_str().unwrap(), case[1].as_str().unwrap());
+            assert_eq!(name_from_url(url).as_deref(), Some(want), "for {url}");
+        }
+        for case in table["command"].as_array().unwrap() {
+            let (cmd, want) = (case[0].as_str().unwrap(), case[1].as_str().unwrap());
+            let got = std::path::Path::new(cmd)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .map(slug);
+            assert_eq!(got.as_deref(), Some(want), "for {cmd}");
+        }
+    }
+
+    #[test]
+    fn the_name_comes_from_the_target_so_nobody_has_to_invent_one() {
+        let named = |url: &str| {
+            let mut c = mcp("", &["x"]);
+            c.service = Service::Mcp {
+                url: url.into(),
+                token_env: None,
+                token: None,
+            };
+            c.derived_name().unwrap()
+        };
+
+        // Loopback: every local service shares the host, so the port is what tells them apart.
+        assert_eq!(named("http://127.0.0.1:23373/v0/mcp"), "localhost-23373");
+        assert_eq!(named("http://localhost:8080/mcp"), "localhost-8080");
+        assert_eq!(named("http://[::1]:9000/mcp"), "localhost-9000");
+
+        // A real hostname identifies itself; the port would be noise.
+        assert_eq!(named("https://api.example.com/mcp"), "api-example-com");
+        assert_eq!(named("https://api.example.com:443/mcp"), "api-example-com");
+        assert_eq!(
+            named("https://user:pw@api.example.com/mcp"),
+            "api-example-com"
+        );
+
+        // Same target, same name — re-adding lands on the existing entry rather than making
+        // a second one that quietly shadows it.
+        assert_eq!(
+            named("http://127.0.0.1:23373/v0/mcp"),
+            named("http://127.0.0.1:23373/other")
+        );
+
+        // An explicit name still wins, for anyone who wants one.
+        let mut c = mcp("beeper", &["x"]);
+        c.name = "beeper".into();
+        assert_eq!(c.derived_name().unwrap(), "beeper");
+    }
+
+    #[test]
+    fn local_commands_are_named_after_the_command() {
+        let mut c = mcp("", &["free"]);
+        c.service = Service::Exec;
+        c.tools[0].binding = Binding::Exec {
+            cmd: "/usr/bin/df".into(),
+            args: vec!["-h".into()],
+            stdin: None,
+        };
+        // The path is not the name; the program is.
+        assert_eq!(c.derived_name().unwrap(), "df");
+        assert_eq!(c.to_pack().unwrap().pack.name, "df");
+    }
+
+    #[test]
     fn a_form_mistake_reads_like_one() {
-        let mut c = mcp("my beeper", &["x"]);
+        let mut c = mcp("beeper", &["x"]);
+        c.name = "my beeper".into();
         assert!(c.to_pack().unwrap_err().to_string().contains("space in it"));
 
         c.name = "beeper".into();

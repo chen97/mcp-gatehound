@@ -280,5 +280,12 @@ jobs:
       # The shell is not a default workspace member, so `cargo test` above never reaches it.
       # What it holds that is worth testing is the settings the window writes back: a config
       # the gateway then refuses to start from cannot be fixed from the window that caused it.
+      # The form previews the name a downstream is stored under; the Rust decides it. Both
+      # read the same table, and a preview that drifted would be wrong exactly where an
+      # operator looks to check.
+      - name: The form's preview agrees with the stored name
+        working-directory: crates/gatehound-app/ui
+        run: node check-derived-names.mjs
+
       - name: Test the shell
         run: cargo test -p gatehound-app --bin gatehound-app
