@@ -1232,6 +1232,229 @@ function wirePackPanel(): void {
   }
 }
 
+// ---- Clients (rendered inside Upstream) -------------------------------------
+// One row per caller, folded away. A client's credentials and its permissions were on two
+// screens, and both are per-client: what it may call, and what it presents to prove it is
+// itself. Splitting them meant answering "what can Message Desk do?" in two places, and
+// listing every (identity, tool) pair flat meant a page that grew with the product.
+
+/// Clients the operator has opened. Outside the DOM so a background read cannot close them.
+const expandedClients = new Set<string>();
+/// Whether the issue-a-token form is showing.
+let issuingToken = false;
+
+interface Client {
+  identity: string;
+  rules: IdentityRule[];
+  tokens: TokenInfo[];
+}
+
+function clientsOf(rules: IdentityRule[], access: Access): Client[] {
+  const by = new Map<string, Client>();
+  const of = (identity: string): Client => {
+    let c = by.get(identity);
+    if (!c) by.set(identity, (c = { identity, rules: [], tokens: [] }));
+    return c;
+  };
+  // A client can appear through either half: rules seeded by a pack with no token yet, or a
+  // token issued before anything was granted to it.
+  for (const r of rules) of(r.identity).rules.push(r);
+  for (const t of access.tokens) of(t.identity).tokens.push(t);
+  return [...by.values()].sort((a, b) => a.identity.localeCompare(b.identity));
+}
+
+/// One line saying what this client can do and what it holds, so the row is worth reading
+/// without opening it.
+function clientSummary(c: Client, owner: string): string {
+  const live = c.tokens.filter((t) => !t.revoked_at).length;
+  const allowed = c.rules.filter((r) => r.decision === "allow");
+  const wildcard = allowed.some((r) => r.tool === "*");
+
+  const can = wildcard
+    ? `<span class="pill allow">every tool</span>`
+    : allowed.length
+      ? `<span class="pill allow">${allowed.length} tool${allowed.length === 1 ? "" : "s"}</span>`
+      : `<span class="pill">nothing yet</span>`;
+
+  const holds =
+    c.identity === owner
+      ? `<span class="meta">the super token</span>`
+      : live
+        ? `<span class="meta">${live} live token${live === 1 ? "" : "s"}</span>`
+        : c.tokens.length
+          ? `<span class="pill error" title="Every token for this name is revoked. Nothing can present these rules — until something else authenticates as the same name.">no live token</span>`
+          : `<span class="meta">no token — authenticates through Access</span>`;
+
+  return `${can} ${holds}`;
+}
+
+function clientCard(c: Client, snap: Snapshot, owner: string): string {
+  const open = expandedClients.has(c.identity);
+  const toolOptions = ['<option value="*">* (every tool)</option>']
+    .concat(snap.tools.map((t) => `<option value="${esc(t.name)}">${esc(t.name)}</option>`))
+    .join("");
+
+  const rules = c.rules.length
+    ? `<table>
+         <thead><tr><th>Tool</th><th>May</th><th>Changed</th><th></th></tr></thead>
+         <tbody>${c.rules
+           .map(
+             (r) => `<tr>
+               <td><code>${esc(r.tool)}</code></td>
+               <td><span class="pill ${esc(r.decision)}">${esc(r.decision)}</span></td>
+               <td class="meta">${ago(r.updated_at)}</td>
+               <td><button class="danger ghost cl-forget" data-identity="${esc(r.identity)}" data-tool="${esc(r.tool)}">Remove</button></td>
+             </tr>`,
+           )
+           .join("")}</tbody>
+       </table>`
+    : `<div class="meta">No rules. Its first call waits here for your decision.</div>`;
+
+  const tokens = c.tokens.length
+    ? `<table>
+         <thead><tr><th>Token</th><th>Last used</th><th></th><th></th></tr></thead>
+         <tbody>${c.tokens.map(tokenRow).join("")}</tbody>
+       </table>`
+    : "";
+
+  return `<div class="card">
+    <div class="row svc-head" data-client="${esc(c.identity)}" style="margin-top:0;cursor:pointer">
+      <span class="twist">${open ? "▾" : "▸"}</span>
+      <code>${esc(c.identity)}</code>
+      <span style="margin-left:auto">${clientSummary(c, owner)}</span>
+    </div>
+    <div class="${open ? "" : "hidden"}">
+      ${rules}
+      <div class="row">
+        <select class="cl-tool" data-identity="${esc(c.identity)}">${toolOptions}</select>
+        <select class="cl-decision" data-identity="${esc(c.identity)}">
+          <option value="allow">allow</option>
+          <option value="deny">deny</option>
+          <option value="ask">ask</option>
+        </select>
+        <button class="ghost cl-add" data-identity="${esc(c.identity)}">Add rule</button>
+        <span class="meta">
+          An exact tool beats <code>*</code>. With no rule at all, a call waits for you.
+        </span>
+      </div>
+      ${tokens ? `<h3 style="margin-top:14px">Tokens</h3>${tokens}` : ""}
+    </div>
+  </div>`;
+}
+
+/// The gateway's own address and owner credential. Three rows, and nothing per-client, so it
+/// sits above the list rather than pretending to be a client of itself.
+function gatewayCard(a: Access): string {
+  return `<div class="card">
+    <h3>This gateway</h3>
+    <table><tbody>
+      <tr><td class="meta">Endpoint</td><td><code>${esc(a.endpoint)}</code></td></tr>
+      <tr>
+        <td class="meta">Super token</td>
+        <td>
+          <code class="secret">${revealSuper ? esc(a.super_token) : "•".repeat(24)}</code>
+          <button id="reveal" class="ghost">${revealSuper ? "Hide" : "Reveal"}</button>
+          <button id="copy-super" class="ghost">Copy</button>
+        </td>
+      </tr>
+      <tr><td class="meta">Authenticates as</td><td><code>${esc(a.owner)}</code></td></tr>
+    </tbody></table>
+    <div class="meta" style="margin-top:8px">
+      The super token can call every tool. Give a client its own instead, so you can see what
+      it did and take it away without changing anything else.
+    </div>
+  </div>`;
+}
+
+function clientsHtml(snap: Snapshot, rules: IdentityRule[], access: Access): string {
+  const clients = clientsOf(rules, access);
+  const issued = justIssued ? issuedPanelHtml() : "";
+
+  const issueForm = issuingToken
+    ? `<div class="card">
+         <h3>Issue a token</h3>
+         <div class="meta">
+           A new token starts able to do nothing. Tick what this client may call; you can
+           change it later on its own row.
+         </div>
+         <div class="row">
+           <input id="token-name" type="text" placeholder="What is it for? e.g. Claude Desktop" />
+           <button id="issue" class="primary">Issue</button>
+           <button id="issue-cancel" class="ghost">Cancel</button>
+         </div>
+         <div class="checks">${
+           snap.tools.length
+             ? snap.tools
+                 .map(
+                   (t) => `<label class="check">
+                     <input type="checkbox" class="grant" value="${esc(t.name)}" />
+                     <code>${esc(t.name)}</code>
+                     <span class="meta">${esc(t.description)}</span>
+                   </label>`,
+                 )
+                 .join("")
+             : `<div class="meta">No tools yet. Add a downstream first, then issue tokens for it.</div>`
+         }</div>
+       </div>`
+    : "";
+
+  return `${issued}<div class="card">
+      <h3>Clients</h3>
+      <div class="meta">
+        Who calls this gateway: what each may do, and what it presents to prove it is itself.
+      </div>
+      <div class="row">
+        <button id="issue-open" class="primary" ${issuingToken ? "disabled" : ""}>Issue a token…</button>
+      </div>
+    </div>${issueForm}${
+      clients.length
+        ? clients.map((c) => clientCard(c, snap, access.owner)).join("")
+        : `<div class="card"><div class="meta">
+             Nobody yet. Issue a token, or let a client call and answer the approval.
+           </div></div>`
+    }`;
+}
+
+/// The one-time reveal of a freshly minted token.
+function issuedPanelHtml(): string {
+  if (!justIssued) return "";
+  return `<div class="card">
+         <h3>Token issued</h3>
+         <div class="notice warn">
+           <strong>Copy it now — this is the only time it is shown.</strong>
+           <div class="meta">
+             Only a digest is stored, so it cannot be recovered. If it is lost, revoke it and
+             issue another.
+           </div>
+         </div>
+         <div class="row">
+           <code id="new-secret" class="secret">${esc(justIssued.secret)}</code>
+           <button id="copy-new" class="primary">Copy</button>
+         </div>
+         ${
+           justIssued.replaced.length
+             ? `<div class="notice">
+                  <strong>That identity already had rules, now replaced by what you ticked.</strong>
+                  <div class="meta">
+                    Was: ${justIssued.replaced.map((r) => `<code>${esc(r)}</code>`).join(", ")}.
+                    An identity can arrive pre-seeded by a pack; keeping a wildcard allow would
+                    have made this token wider than you asked for.
+                  </div>
+                </div>`
+             : ""
+         }
+         <div class="meta" style="margin-top:8px">
+           Authenticates as <code>${esc(justIssued.identity)}</code>.
+           ${
+             justIssued.allowed.length
+               ? `It may call ${justIssued.allowed.map((t) => `<code>${esc(t)}</code>`).join(", ")}.`
+               : `It can call nothing yet — grant tools on the Upstream screen.`
+           }
+         </div>
+         <div class="row"><button id="dismiss-new" class="ghost">Done</button></div>
+       </div>`;
+}
+
 // ---- Who may call what (rendered inside Upstream) ---------------------------
 
 // ---- Upstream --------------------------------------------------------------
@@ -1321,12 +1544,13 @@ async function renderUpstream(snap: Snapshot): Promise<void> {
   const html =
     `<div id="approvals">${approvalsHtml(pending)}</div>` +
     toolFaceCard(snap) +
-    `<div id="identities">${identitiesHtml(snap, rules, access)}</div>`;
+    gatewayCard(access) +
+    `<div id="identities">${clientsHtml(snap, rules, access)}</div>`;
   if (!paint($("#upstream"), html)) return;
 
   wireApprovals();
   wireToolFace();
-  wireIdentities();
+  wireClients();
 }
 
 function wireToolFace(): void {
@@ -1377,76 +1601,36 @@ function wireToolFace(): void {
   });
 }
 
-function identitiesHtml(snap: Snapshot, rules: IdentityRule[], access: Access): string {
-  // Revoking a token does not remove the rules for the name it authenticated as, and a rule
-  // with nothing able to present it reads exactly like live access. Flag those: an identity
-  // that once had tokens and has none left.
-  const hadToken = new Set(access.tokens.map((t) => t.identity));
-  const hasLiveToken = new Set(
-    access.tokens.filter((t) => !t.revoked_at).map((t) => t.identity),
-  );
-  const stranded = (identity: string): boolean =>
-    hadToken.has(identity) && !hasLiveToken.has(identity);
-  const toolOptions = ['<option value="*">* (every tool)</option>']
-    .concat(snap.tools.map((t) => `<option value="${esc(t.name)}">${esc(t.name)}</option>`))
-    .join("");
+function wireClients(): void {
+  for (const h of Array.from(document.querySelectorAll<HTMLElement>(".svc-head[data-client]"))) {
+    h.addEventListener("click", () => {
+      const key = h.dataset.client!;
+      if (!expandedClients.delete(key)) expandedClients.add(key);
+      void refresh();
+    });
+  }
 
-  return `
-    <div class="card">
-      <h3>Add a rule</h3>
-      <div class="meta">Exact <code>(identity, tool)</code> wins over <code>(identity, *)</code>. With no rule at all, a call is held for your decision.</div>
-      <div class="row">
-        <input id="newid" placeholder="identity (email or service-token name)" style="min-width:280px">
-        <select id="newtool">${toolOptions}</select>
-        <select id="newdecision">
-          <option value="allow">allow</option>
-          <option value="deny">deny</option>
-          <option value="ask">ask</option>
-        </select>
-        <button class="primary" id="addrule">Save</button>
-      </div>
-    </div>
-    ${
-      rules.length === 0
-        ? '<div class="empty">No rules yet. Every identity is held for approval.</div>'
-        : `<table>
-             <thead><tr><th>Identity</th><th>Tool</th><th>Decision</th><th>Updated</th><th></th></tr></thead>
-             <tbody>${rules
-               .map(
-                 (r) => `<tr>
-                   <td>${esc(r.identity)}${
-                     stranded(r.identity)
-                       ? ` <span class="pill error" title="Every token for this identity is revoked, so nothing can present these rules — until something else authenticates as the same name.">no live token</span>`
-                       : ""
-                   }</td>
-                   <td><code>${esc(r.tool)}</code></td>
-                   <td><span class="pill ${esc(r.decision)}">${esc(r.decision)}</span></td>
-                   <td class="meta">${ago(r.updated_at)}</td>
-                   <td><button class="danger ghost" data-identity="${esc(r.identity)}" data-tool="${esc(r.tool)}">Revoke</button></td>
-                 </tr>`,
-               )
-               .join("")}</tbody>
-           </table>`
-    }`;
-}
+  for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>(".cl-add"))) {
+    b.addEventListener("click", async () => {
+      const identity = b.dataset.identity!;
+      const pick = (cls: string): string =>
+        (document.querySelector(`.${cls}[data-identity="${CSS.escape(identity)}"]`) as
+          | HTMLSelectElement
+          | null)?.value ?? "";
+      try {
+        await invoke("set_identity", {
+          identity,
+          tool: pick("cl-tool"),
+          decision: pick("cl-decision") as Decision,
+        });
+      } catch (e) {
+        alert(String(e));
+      }
+      await refresh();
+    });
+  }
 
-function wireIdentities(): void {
-  $("#addrule")?.addEventListener("click", async () => {
-    const identity = $<HTMLInputElement>("#newid").value.trim();
-    if (!identity) return;
-    try {
-      await invoke("set_identity", {
-        identity,
-        tool: $<HTMLSelectElement>("#newtool").value,
-        decision: $<HTMLSelectElement>("#newdecision").value as Decision,
-      });
-    } catch (e) {
-      alert(String(e));
-    }
-    await refresh();
-  });
-
-  document.querySelectorAll<HTMLButtonElement>("#identities button[data-identity]").forEach((b) => {
+  for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>(".cl-forget"))) {
     b.addEventListener("click", async () => {
       try {
         await invoke("forget_identity", { identity: b.dataset.identity, tool: b.dataset.tool });
@@ -1455,7 +1639,27 @@ function wireIdentities(): void {
       }
       await refresh();
     });
+  }
+
+  $("#reveal")?.addEventListener("click", () => {
+    revealSuper = !revealSuper;
+    void refresh();
   });
+  $("#copy-super")?.addEventListener("click", (e) => {
+    if (lastAccess) void copy(lastAccess.super_token, e.currentTarget as HTMLElement);
+  });
+
+  $("#issue-open")?.addEventListener("click", () => {
+    issuingToken = true;
+    void refresh();
+  });
+  $("#issue-cancel")?.addEventListener("click", () => {
+    issuingToken = false;
+    void refresh();
+  });
+  wireIssue();
+  wireIssuedPanel();
+  wireRevoke();
 }
 
 // ---- Access ----------------------------------------------------------------
@@ -1497,14 +1701,15 @@ async function copy(text: string, button: HTMLElement): Promise<void> {
   }
 }
 
+/// One token, inside the card for the client it belongs to — so it says nothing about which
+/// identity that is. The prefix is shown because it is the only part of a token that survives
+/// issuing, and it is how a row is matched to a client's own records.
 function tokenRow(t: TokenInfo): string {
   const state = t.revoked_at
     ? `<span class="pill error">revoked</span>`
     : `<span class="pill ok">active</span>`;
   return `<tr>
-    <td><code>ghd_${esc(t.id)}…</code></td>
-    <td>${esc(t.name)}</td>
-    <td><code>${esc(t.identity)}</code></td>
+    <td>${esc(t.name)} <code class="meta">ghd_${esc(t.id)}…</code></td>
     <td class="meta">${t.last_used_at ? ago(t.last_used_at) : "never used"}</td>
     <td>${state}</td>
     <td>${
@@ -1904,127 +2109,7 @@ async function renderNetwork(): Promise<void> {
   wirePublishForm();
 }
 
-async function renderAccess(snap: Snapshot): Promise<void> {
-  const a = await invoke<Access>("access");
-  lastAccess = a;
-
-  const issuedPanel = justIssued
-    ? `<div class="card">
-         <h3>Token issued</h3>
-         <div class="notice warn">
-           <strong>Copy it now — this is the only time it is shown.</strong>
-           <div class="meta">
-             Only a digest is stored, so it cannot be recovered. If it is lost, revoke it and
-             issue another.
-           </div>
-         </div>
-         <div class="row">
-           <code id="new-secret" class="secret">${esc(justIssued.secret)}</code>
-           <button id="copy-new" class="primary">Copy</button>
-         </div>
-         ${
-           justIssued.replaced.length
-             ? `<div class="notice">
-                  <strong>That identity already had rules, now replaced by what you ticked.</strong>
-                  <div class="meta">
-                    Was: ${justIssued.replaced.map((r) => `<code>${esc(r)}</code>`).join(", ")}.
-                    An identity can arrive pre-seeded by a pack; keeping a wildcard allow would
-                    have made this token wider than you asked for.
-                  </div>
-                </div>`
-             : ""
-         }
-         <div class="meta" style="margin-top:8px">
-           Authenticates as <code>${esc(justIssued.identity)}</code>.
-           ${
-             justIssued.allowed.length
-               ? `It may call ${justIssued.allowed.map((t) => `<code>${esc(t)}</code>`).join(", ")}.`
-               : `It can call nothing yet — grant tools on the Upstream screen.`
-           }
-         </div>
-         <div class="row"><button id="dismiss-new" class="ghost">Done</button></div>
-       </div>`
-    : "";
-
-  const toolChecks = snap.tools.length
-    ? snap.tools
-        .map(
-          (t) => `<label class="check">
-            <input type="checkbox" class="grant" value="${esc(t.name)}" />
-            <code>${esc(t.name)}</code>
-            <span class="meta">${esc(t.description)}</span>
-          </label>`,
-        )
-        .join("")
-    : `<div class="meta">No tools are configured yet. Import a pack first, then issue tokens for it.</div>`;
-
-  const html =
-    issuedPanel +
-    `
-    <div class="card">
-      <h3>This gateway</h3>
-      <table><tbody>
-        <tr><td class="meta">Endpoint</td><td><code>${esc(a.endpoint)}</code></td></tr>
-        <tr>
-          <td class="meta">Super token</td>
-          <td>
-            <code class="secret">${revealSuper ? esc(a.super_token) : "•".repeat(24)}</code>
-            <button id="reveal" class="ghost">${revealSuper ? "Hide" : "Reveal"}</button>
-            <button id="copy-super" class="ghost">Copy</button>
-          </td>
-        </tr>
-        <tr><td class="meta">Authenticates as</td><td><code>${esc(a.owner)}</code></td></tr>
-      </tbody></table>
-      <div class="meta" style="margin-top:8px">
-        The super token can call every tool. Give a client its own token instead, so you can see
-        what it did and take it away without changing anything else.
-      </div>
-    </div>
-
-    ` +
-    `
-
-    <div class="card">
-      <h3>Issue a token</h3>
-      <div class="meta">
-        A new token starts able to do nothing. Tick what this client may call; you can change it
-        later on Upstream.
-      </div>
-      <div class="row">
-        <input id="token-name" type="text" placeholder="What is it for? e.g. Claude Desktop" />
-        <button id="issue" class="primary">Issue</button>
-      </div>
-      <div class="checks">${toolChecks}</div>
-    </div>
-
-    <div class="card">
-      <h3>Issued tokens</h3>
-      ${
-        a.tokens.length
-          ? `<table>
-               <thead><tr><th>Token</th><th>Name</th><th>Identity</th><th>Last used</th><th></th><th></th></tr></thead>
-               <tbody>${a.tokens.map(tokenRow).join("")}</tbody>
-             </table>`
-          : `<div class="meta">None yet. Only the super token can reach this gateway.</div>`
-      }
-    </div>`;
-  if (!paint($("#access"), html)) return;
-
-  $("#reveal")?.addEventListener("click", () => {
-    revealSuper = !revealSuper;
-    void refresh();
-  });
-  $("#copy-super")?.addEventListener("click", (e) =>
-    copy(a.super_token, e.currentTarget as HTMLElement),
-  );
-  $("#copy-new")?.addEventListener("click", (e) => {
-    if (justIssued) void copy(justIssued.secret, e.currentTarget as HTMLElement);
-  });
-  $("#dismiss-new")?.addEventListener("click", () => {
-    justIssued = null;
-    void refresh();
-  });
-
+function wireIssue(): void {
   $("#issue")?.addEventListener("click", async () => {
     const name = ($("#token-name") as HTMLInputElement).value;
     const tools = Array.from(
@@ -2032,13 +2117,27 @@ async function renderAccess(snap: Snapshot): Promise<void> {
     ).map((c) => c.value);
     try {
       justIssued = await invoke<Issued>("issue_token", { name, tools });
+      issuingToken = false;
     } catch (e) {
       alert(String(e));
       return;
     }
     await refresh();
   });
+}
 
+/// The one-time reveal: copying it, and dismissing it.
+function wireIssuedPanel(): void {
+  $("#copy-new")?.addEventListener("click", (e) => {
+    if (justIssued) void copy(justIssued.secret, e.currentTarget as HTMLElement);
+  });
+  $("#dismiss-new")?.addEventListener("click", () => {
+    justIssued = null;
+    void refresh();
+  });
+}
+
+function wireRevoke(): void {
   document.querySelectorAll<HTMLButtonElement>(".revoke").forEach((b) => {
     b.addEventListener("click", async () => {
       const identity = b.dataset.identity ?? "";
@@ -2108,7 +2207,6 @@ async function refresh(): Promise<void> {
     else if (screen === "log") await renderLog();
     else if (screen === "actions") await renderActions(snap);
     else if (screen === "network") await renderNetwork();
-    else if (screen === "access") await renderAccess(snap);
     tickTimes();
   } catch (e) {
     console.error(e);

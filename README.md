@@ -264,7 +264,7 @@ the log key off.
 ### Tokens, and telling one client from another
 
 A shared secret makes every caller the same caller. Issue a token per client instead — in the
-app's **Access** screen, or `gatehound-headless token issue "Claude Desktop" read_note` — and
+app's **Upstream** screen, or `gatehound-headless token issue "Claude Desktop" read_note` — and
 each one authenticates as its own identity, which is what the policy below already decides
 against. There is no second permission model: a token is just the half of `(identity, tool)`
 that was previously fixed.
@@ -426,15 +426,15 @@ WAL.
 
 The tray is the primary surface: green listening, grey paused, red an upstream is not
 answering, with a badge counting waiting approvals. "Pause gateway" stops only the listener
-and leaves the app open. The window has five screens — Upstream, Downstream, Network, Access,
-Live log — and holds no state of record; it reads everything from the core and re-reads
-whenever the core pushes an event. **Upstream** is the caller's side: what is waiting on a
-decision, the names and descriptions callers see, and which client may call what — one screen
-because an approval *is* a client asking for access, and answering it with "allow always"
-writes exactly the kind of rule listed below it. **Downstream** is what the gateway calls out
-to. **Network** is reachability, with a form to change it, because the alternative was telling
-an operator to find a TOML file. **Access** is credentials: the super token, and the tokens
-issued to individual clients.
+and leaves the app open. The window has four screens — Upstream, Downstream, Network, Live
+log — and holds no state of record; it reads everything from the core and re-reads whenever
+the core pushes an event. **Upstream** is the caller's side: what is waiting on a decision,
+the names and descriptions callers see, and one folded row per client carrying both what it
+may call and the tokens it presents. Those belong together — an approval *is* a client asking
+for access, "allow always" writes the rule on its row, and a credential shown apart from its
+permissions answers half a question. **Downstream** is what the gateway calls out to, each
+service's tools folded underneath it. **Network** is reachability, with a form to change it,
+because the alternative was telling an operator to find a TOML file.
 
 ## Configuration
 
