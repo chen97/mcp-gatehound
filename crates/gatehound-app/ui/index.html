@@ -16,7 +16,8 @@
     </header>
 
     <nav>
-      <button data-screen="upstream" class="active">Upstream <span id="badge" class="badge">0</span></button>
+      <button data-screen="home" class="active">Home</button>
+      <button data-screen="upstream">Upstream <span id="badge" class="badge">0</span></button>
       <button data-screen="actions">Downstream</button>
       <button data-screen="network">Network</button>
       <button data-screen="log">Live log</button>
@@ -24,7 +25,8 @@
     </div>
 
     <main>
-      <section id="upstream" class="screen"></section>
+      <section id="home" class="screen"></section>
+      <section id="upstream" class="screen hidden"></section>
       <section id="log" class="screen hidden"></section>
       <section id="actions" class="screen hidden"></section>
       <section id="network" class="screen hidden"></section>

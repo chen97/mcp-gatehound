@@ -426,9 +426,13 @@ WAL.
 
 The tray is the primary surface: green listening, grey paused, red an upstream is not
 answering, with a badge counting waiting approvals. "Pause gateway" stops only the listener
-and leaves the app open. The window has four screens — Upstream, Downstream, Network, Live
-log — and holds no state of record; it reads everything from the core and re-reads whenever
-the core pushes an event. **Upstream** is the caller's side: what is waiting on a decision,
+and leaves the app open. The window has five screens — Home, Upstream, Downstream, Network,
+Live log — and holds no state of record; it reads everything from the core and re-reads whenever
+the core pushes an event. **Home** is one picture of the gateway: callers on the left, the
+services it calls on the right, and a dot crossing a wire when a call actually crosses it.
+The motion is driven by logged requests and nothing else — an idle gateway is a still picture,
+which is the point. A loop running regardless would look identical whether or not anything was
+happening. **Upstream** is the caller's side: what is waiting on a decision,
 the names and descriptions callers see, and one folded row per client carrying both what it
 may call and the tokens it presents. Those belong together — an approval *is* a client asking
 for access, "allow always" writes the rule on its row, and a credential shown apart from its

@@ -205,7 +205,7 @@ function pretty(json: string | null): string {
   }
 }
 
-let screen = "upstream";
+let screen = "home";
 let logFilter = "";
 let statusFilter = "";
 
@@ -252,6 +252,184 @@ function paint(el: HTMLElement, html: string): boolean {
   el.innerHTML = html;
   if (scroller && scroller.scrollTop !== y) scroller.scrollTop = y;
   return true;
+}
+
+// ---- Home --------------------------------------------------------------------
+// One picture of what this gateway is: who calls it, what it calls, and whether
+// anything is moving between them right now.
+//
+// The motion is the point, and so is its absence. A pulse fires when a real request
+// is logged — never on a timer — so an idle gateway is a still picture and a busy one
+// is visibly busy. A loop running regardless would look identical in both cases,
+// which is worse than no animation: it would be an indicator that indicates nothing.
+
+/// Rows on the flow, in render order, so a pulse can find the wire belonging to a caller
+/// or a service without re-querying the whole screen.
+let flowRows: { callers: string[]; services: string[] } = { callers: [], services: [] };
+
+function flowNode(title: string, sub: string): string {
+  return `<div class="node">
+    <code class="who">${esc(title)}</code>
+    <span class="meta who">${esc(sub)}</span>
+  </div>`;
+}
+
+/// The last handful of calls.
+///
+/// The flow only speaks while you are watching it; this says what happened before you opened
+/// the window, which is most of the time. Deliberately short — the Live log is the place to
+/// actually read, and a home page that reprints it has two of the same screen.
+function recentHtml(rows: RequestLog[]): string {
+  if (rows.length === 0) {
+    return `<div class="card">
+      <h3>Recent calls</h3>
+      <div class="meta">Nothing yet. Calls appear here as clients make them.</div>
+    </div>`;
+  }
+  return `<div class="card">
+    <h3>Recent calls</h3>
+    <table><tbody>${rows
+      .slice(0, 6)
+      .map(
+        (r) => `<tr>
+          <td class="meta">${ago(r.ts)}</td>
+          <td><code>${esc(r.identity ?? "—")}</code></td>
+          <td><code>${esc(r.tool ?? r.method ?? "")}</code></td>
+          <td><span class="pill ${esc(r.decision ?? "")}">${esc(r.decision ?? "")}</span></td>
+          <td><span class="pill ${esc(r.status ?? "")}">${esc(r.status ?? "")}</span></td>
+          <td class="meta">${r.duration_ms != null ? `${r.duration_ms}ms` : ""}</td>
+        </tr>`,
+      )
+      .join("")}</tbody></table>
+  </div>`;
+}
+
+function homeHtml(snap: Snapshot, clients: Client[], access: Access, recent: RequestLog[]): string {
+  // Callers worth drawing: anything holding a live token, plus the owner. A client whose
+  // every token is revoked is not currently a caller, and drawing it would overstate.
+  const callers = clients.filter(
+    (c) => c.identity === access.owner || c.tokens.some((t) => !t.revoked_at),
+  );
+  flowRows = {
+    callers: callers.map((c) => c.identity),
+    services: snap.upstreams.map((u) => u.name),
+  };
+
+  // Node and wire share a grid row, so the line always meets the box it belongs to —
+  // two independent columns would drift apart the moment one side had taller content.
+  const left = callers.length
+    ? callers
+        .map((c) => {
+          const allowed = c.rules.filter((r) => r.decision === "allow");
+          const what = allowed.some((r) => r.tool === "*")
+            ? "every tool"
+            : `${allowed.length} tool${allowed.length === 1 ? "" : "s"}`;
+          return `<div class="flow-row" data-caller="${esc(c.identity)}">
+              ${flowNode(c.identity, c.identity === access.owner ? "super token" : what)}
+            </div>
+            <div class="wire" data-caller="${esc(c.identity)}"></div>`;
+        })
+        .join("")
+    : `<div class="node"><span class="meta">Nobody yet. Issue a token on Upstream.</span></div>
+       <div class="wire"></div>`;
+
+  const right = snap.upstreams.length
+    ? snap.upstreams
+        .map((u) => {
+          const n = snap.tools.filter((t) => t.upstream === u.name).length;
+          return `<div class="wire back" data-service="${esc(u.name)}"></div>
+            <div class="flow-row" data-service="${esc(u.name)}">
+              ${flowNode(u.target, `${u.kind} · ${n} tool${n === 1 ? "" : "s"}`)}
+            </div>`;
+        })
+        .join("")
+    : `<div class="wire back"></div>
+       <div class="node"><span class="meta">Nothing yet. Add one on Downstream.</span></div>`;
+
+  const local = snap.tools.filter((t) => !t.upstream).length;
+
+  return `<div class="card">
+    <div class="flow">
+      <div class="flow-side left">
+        <div class="flow-head">Callers</div><div></div>
+        ${left}
+      </div>
+      <div class="hub" id="flow-hub">
+        <div><span class="dot ${esc(snap.colour)}"></span><span class="name">MCP Gatehound</span></div>
+        <div class="meta">${esc(snap.listen_addr)}</div>
+        <div class="meta">${esc(snap.auth)}</div>
+        ${snap.pending ? `<div class="pill hot" style="margin-top:6px">${snap.pending} waiting</div>` : ""}
+      </div>
+      <div class="flow-side right">
+        <div></div><div class="flow-head">Services</div>
+        ${right}
+      </div>
+    </div>
+    <div class="meta" style="margin-top:12px">
+      ${snap.tools.length} tool${snap.tools.length === 1 ? "" : "s"} exposed${
+        local ? `, ${local} of them local commands` : ""
+      }. A dot crosses a wire when a call actually does — nothing moves while nothing is
+      happening.
+    </div>
+  </div>${recentHtml(recent)}`;
+}
+
+/// Send one dot down a wire. Called from a real request, never from a timer.
+///
+/// A fresh element per call rather than restarting one animation: two requests a moment
+/// apart are two dots, and retargeting a single keyframe animation would make the second
+/// one snap back to the start.
+function pulse(sel: string, kind: string, delayMs: number): void {
+  const wire = document.querySelector<HTMLElement>(sel);
+  if (!wire) return;
+  window.setTimeout(() => {
+    const dot = document.createElement("span");
+    dot.className = `pulse ${kind}`;
+    dot.addEventListener("animationend", () => dot.remove(), { once: true });
+    wire.appendChild(dot);
+  }, delayMs);
+}
+
+/// Briefly mark a node as part of the call in flight.
+function light(sel: string, delayMs: number): void {
+  const el = document.querySelector<HTMLElement>(sel);
+  if (!el) return;
+  window.setTimeout(() => {
+    el.classList.add("lit");
+    window.setTimeout(() => el.classList.remove("lit"), 600);
+  }, delayMs);
+}
+
+/// Trace one logged request across the picture: caller to gateway, then gateway to the
+/// service it reached. The second leg waits for the first, because that is the order it
+/// happened in and the whole point is to show the path.
+function traceRequest(row: RequestLog): void {
+  if (screen !== "home") return;
+  const kind =
+    row.status === "error" ? "err" : row.decision === "deny" || row.decision === "ask" ? "held" : "";
+
+  const caller = row.identity ?? "";
+  if (caller && flowRows.callers.includes(caller)) {
+    pulse(`.wire[data-caller="${CSS.escape(caller)}"]`, kind, 0);
+    light(`.flow-row[data-caller="${CSS.escape(caller)}"] .node`, 0);
+  }
+  light("#flow-hub", 250);
+
+  // Denied and held calls never reach a service, so nothing should suggest they did.
+  const service = row.upstream ?? "";
+  if (kind === "" && service && flowRows.services.includes(service)) {
+    pulse(`.wire.back[data-service="${CSS.escape(service)}"]`, kind, 700);
+    light(`.flow-row[data-service="${CSS.escape(service)}"] .node`, 1200);
+  }
+}
+
+async function renderHome(snap: Snapshot): Promise<void> {
+  const [rules, access, recent] = await Promise.all([
+    invoke<IdentityRule[]>("identities"),
+    invoke<Access>("access"),
+    invoke<RequestLog[]>("requests", { limit: 6 }),
+  ]);
+  paint($("#home"), homeHtml(snap, clientsOf(rules, access), access, recent));
 }
 
 // ---- Approvals -------------------------------------------------------------
@@ -2203,7 +2381,8 @@ async function refresh(): Promise<void> {
   try {
     const snap = await renderHeader();
     lastSnapshot = snap;
-    if (screen === "upstream") await renderUpstream(snap);
+    if (screen === "home") await renderHome(snap);
+    else if (screen === "upstream") await renderUpstream(snap);
     else if (screen === "log") await renderLog();
     else if (screen === "actions") await renderActions(snap);
     else if (screen === "network") await renderNetwork();
@@ -2230,10 +2409,18 @@ $("#pause").addEventListener("click", async () => {
 });
 
 // The core pushes; the window re-reads. Nothing is inferred from the event payload itself.
-void listen("gateway", () => void refresh());
+// The payload was previously discarded and the whole screen re-read. A logged request is
+// the one event with something to say beyond "look again": it names the caller, the service
+// and the outcome, which is exactly the path Home draws.
+void listen<{ event: string } & Record<string, unknown>>("gateway", (e) => {
+  if (e.payload?.event === "request_logged") {
+    traceRequest(e.payload as unknown as RequestLog);
+  }
+  void refresh();
+});
 void listen("tray", () => void renderHeader());
 void listen<string>("navigate", (e) => show(e.payload));
 
-show("upstream");
+show("home");
 // A slow safety net for anything an event did not cover (a timed-out hold, say).
 setInterval(() => void refresh(), 5000);

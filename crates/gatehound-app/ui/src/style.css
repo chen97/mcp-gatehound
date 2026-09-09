@@ -6,6 +6,13 @@
 @media (prefers-color-scheme: light) {
   :root { --bg: #f4f6f9; --panel: #fff; --in: #edf0f4; --line: #dce1e8; --tx: #161a20; --mut: #5c6672; --am: #c8880a; }
 }
+/* Motion tokens. Taken as-is from Emil Kowalski's animation guidance rather than hand-rolled:
+   the built-in CSS easings are too weak to read as intentional. */
+:root {
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+}
+
 * { box-sizing: border-box; }
 body {
   margin: 0; background: var(--bg); color: var(--tx);
@@ -114,3 +121,94 @@ tr.clickable:hover td { background: var(--panel); }
 .pill.ask { color: var(--am); border-color: var(--am); }
 .empty { color: var(--mut); text-align: center; padding: 40px 12px; }
 .filters { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+
+/* ---- The flow on Home -------------------------------------------------------
+   Callers on the left, the gateway in the middle, services on the right, with a
+   line per row. Straight lines on purpose: a pulse travelling one is a plain
+   translateX, which stays on the GPU and needs no measuring of the DOM. */
+
+.flow { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 6px 0; }
+
+/* Two columns per side — the box and the wire leaving it — so both sit on one grid row and
+   the line meets the box whatever height the text takes. */
+.flow-side { display: grid; align-items: center; row-gap: 8px; min-width: 0; }
+.flow-side.left { grid-template-columns: minmax(0, 1fr) clamp(40px, 8vw, 90px); }
+.flow-side.right { grid-template-columns: clamp(40px, 8vw, 90px) minmax(0, 1fr); }
+
+@media (max-width: 720px) {
+  /* Stacked, and the wires stop earning their space. */
+  .flow { grid-template-columns: 1fr; }
+  .flow-side.left, .flow-side.right { grid-template-columns: minmax(0, 1fr); }
+  .flow .wire { display: none; }
+  .hub { margin: 10px 0; }
+}
+
+.node {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; min-width: 0;
+  /* State indication when this node is part of a call. Transition, not keyframes:
+     a busy client fires repeatedly and must retarget, not restart. */
+  transition: border-color 200ms var(--ease-out), transform 200ms var(--ease-out);
+}
+.node.lit { border-color: var(--am); transform: scale(1.015); }
+.node .who { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The wire a pulse runs along. */
+/* Overlapping the boxes by a hair on each side: a line that stops short of what it connects
+   reads as two stubs rather than one connection. */
+.wire { position: relative; height: 34px; display: flex; align-items: center; margin: 0 -1px; }
+.wire::before {
+  content: ""; position: absolute; left: 0; right: 0; height: 1px;
+  background: var(--line);
+}
+/* Direction has to read when nothing is moving, or the picture only makes sense mid-call. */
+.wire::after {
+  content: ""; position: absolute; top: 50%; width: 0; height: 0;
+  border-top: 3px solid transparent; border-bottom: 3px solid transparent;
+  transform: translateY(-50%);
+}
+.flow-side.left .wire::after { right: 0; border-left: 5px solid var(--line); }
+.flow-side.right .wire::after { right: 0; border-left: 5px solid var(--line); }
+.wire .pulse {
+  position: absolute; left: 0; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ok); will-change: transform, opacity;
+  animation: travel 700ms linear forwards;
+}
+.wire .pulse.err { background: var(--bad); }
+.wire .pulse.held { background: var(--am); }
+.wire.back .pulse { animation-name: travel-back; }
+
+/* Constant motion, so linear — an eased pulse would read as accelerating traffic. */
+@keyframes travel {
+  from { transform: translateX(0); opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  to   { transform: translateX(calc(100cqw - 6px)); opacity: 0; }
+}
+@keyframes travel-back {
+  from { transform: translateX(calc(100cqw - 6px)); opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  to   { transform: translateX(0); opacity: 0; }
+}
+.wire { container-type: inline-size; }
+
+.hub {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 16px 18px; text-align: center; min-width: 160px;
+}
+.hub .pill { display: inline-block; }
+.hub .dot { display: inline-block; margin-right: 6px; }
+.hub .name { font-weight: 700; }
+.hub.lit { border-color: var(--am); }
+
+.flow-head { color: var(--mut); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+
+/* A travelling dot is the wrong idea when motion is unwelcome; the wire still says a call
+   happened, by brightening and fading on its own. */
+@media (prefers-reduced-motion: reduce) {
+  .wire .pulse { animation: flash 400ms ease forwards; left: 0; right: 0; width: auto; border-radius: 1px; height: 1px; }
+  .wire.back .pulse { animation-name: flash; }
+  .node.lit { transform: none; }
+  @keyframes flash { from { opacity: 0; } 40% { opacity: 1; } to { opacity: 0; } }
+}
