@@ -441,15 +441,16 @@ function approvalsHtml(rows: Pending[]): string {
   return rows
     .map(
       (p) => `
-      <div class="card" data-id="${esc(p.id)}">
-        <h3>${esc(p.identity)} → <code>${esc(p.tool)}</code></h3>
-        <div class="meta">${ago(p.ts)}</div>
+      <div class="card approval" data-id="${esc(p.id)}">
+        <h3><code>${esc(p.identity)}</code> wants to run <code>${esc(p.tool)}</code></h3>
+        <div class="meta">Waiting since ${ago(p.ts)}</div>
         <pre>${esc(pretty(p.args_preview))}</pre>
         <div class="row">
           <button class="primary" data-act="allow_once">Allow once</button>
-          <button data-act="allow_always">Allow + whitelist</button>
-          <button class="danger" data-act="reject">Reject</button>
-          <button class="danger ghost" data-act="reject_always">Reject + never ask</button>
+          <button data-act="allow_always">Always allow this</button>
+          <span style="flex:1"></span>
+          <button class="ghost" data-act="reject">Reject</button>
+          <button class="danger" data-act="reject_always">Never allow this</button>
         </div>
       </div>`,
     )
@@ -487,8 +488,9 @@ async function renderLog(): Promise<void> {
   });
 
   const html = `
+    <div class="card">
     <div class="filters">
-      <input id="logq" placeholder="filter by identity, tool or method" value="${esc(logFilter)}">
+      <input id="logq" placeholder="filter by identity, tool or method" style="min-width:280px" value="${esc(logFilter)}">
       <select id="logstatus">
         <option value=""${statusFilter === "" ? " selected" : ""}>any status</option>
         <option value="ok"${statusFilter === "ok" ? " selected" : ""}>ok</option>
@@ -502,7 +504,7 @@ async function renderLog(): Promise<void> {
         : `<table>
              <thead><tr>
                <th>When</th><th>Identity</th><th>Method</th><th>Tool</th>
-               <th>Decision</th><th>Action</th><th>Status</th><th>ms</th>
+               <th>Decision</th><th>Action</th><th>Status</th><th>Took</th>
              </tr></thead>
              <tbody>${filtered
                .map(
@@ -520,7 +522,7 @@ async function renderLog(): Promise<void> {
                .join("")}</tbody>
            </table>
            <div id="detail"></div>`
-    }`;
+    }</div>`;
   if (!paint($("#log"), html)) return;
 
   $<HTMLInputElement>("#logq")?.addEventListener("input", (e) => {
@@ -637,10 +639,11 @@ function servicesHtml(snap: Snapshot, configFile: string): string {
   return `<div class="card">
       <h3>Downstream services</h3>
       <div class="meta">
-        What this gateway calls out to, and the tools bound to each. Stored in
-        <code>${esc(configFile)}</code> under <code>[[upstream]]</code> — proxies call a backend
-        an upstream, so that is the word in the file; it means the same thing as this screen.
+        What this gateway calls out to, and the tools bound to each. Written to the config file
+        under <code>[[upstream]]</code> — proxies call a backend an upstream, so that is the
+        word in the file; it means the same thing as this screen.
       </div>
+      <div class="meta" style="margin-top:6px;opacity:.75"><code>${esc(configFile)}</code></div>
     </div>${body}`;
 }
 
@@ -1525,7 +1528,7 @@ function clientCard(c: Client, snap: Snapshot, owner: string): string {
 function gatewayCard(a: Access): string {
   return `<div class="card">
     <h3>This gateway</h3>
-    <table><tbody>
+    <table class="kv"><tbody>
       <tr><td class="meta">Endpoint</td><td><code>${esc(a.endpoint)}</code></td></tr>
       <tr>
         <td class="meta">Super token</td>
@@ -2123,7 +2126,7 @@ function publishPanel(p: PublishInfo): string {
   return `<div class="card">
     <h3>Reachable from</h3>
     ${failed}${exposed}
-    <table><tbody>
+    <table class="kv"><tbody>
       <tr>
         <td class="meta">Who can reach it</td>
         <td><span class="pill ${r.pill}">${esc(r.label)}</span></td>
