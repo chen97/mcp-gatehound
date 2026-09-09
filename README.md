@@ -283,6 +283,18 @@ Behind Cloudflare Access the issued identity wins, which is what lets one servic
 the tunnel while many issued tokens distinguish the clients behind it. Access stays a gate that
 must still pass.
 
+### The name a caller sees is yours to choose
+
+A caller names a tool; it never names an action. Those being separate is what lets the exposed
+name and description be edited on the **Upstream** screen without touching what the tool does —
+a tool proxied to an MCP server keeps calling the same operation on it whatever you call it here.
+
+Renaming carries each client's permission across with it. Policy is keyed by the name callers
+use, so leaving the rules behind would mean every client silently falling back to its wildcard
+or to `ask` — a permission change nobody asked for, arriving from an edit that looks cosmetic.
+Where the new name already had a rule for a client, that one wins and the move is reported
+rather than applied, because a rename must never turn a deny into an allow.
+
 ### Tool filtering, and what a caller can see
 
 `(identity, tool)` resolves to `allow`, `deny` or `ask` — exact match first, then
@@ -353,7 +365,7 @@ It also asks what a client's **first call** to its tools should do:
   client with no rule; choosing it here also writes a rule per tool for clients holding issued
   tokens, which otherwise deny everything by default and would make the new tools silently
   invisible rather than prompting.
-- **Deny** — the tools do not appear for anyone until you grant them on Identities.
+- **Deny** — the tools do not appear for anyone until you grant them on Upstream.
 
 A pasted credential is written to the config file; naming an environment variable instead keeps
 it out. Either way it never reaches a pack — that rule is what makes a pack safe to accept from
@@ -408,13 +420,15 @@ WAL.
 
 The tray is the primary surface: green listening, grey paused, red an upstream is not
 answering, with a badge counting waiting approvals. "Pause gateway" stops only the listener
-and leaves the app open. The window has six screens — Approvals, Live log, Downstream,
-Identities, Network, Access — and holds no state of record; it reads everything from
-the core and re-reads whenever the core pushes an event. **Network** is reachability: which
-backend is running, who can reach the gateway, the URL to hand a client, whether anything but
-the bearer token stands in front of it, and a form to change all of it — because the
-alternative was telling an operator to find a TOML file. **Access** is credentials: the super
-token, and the tokens issued to individual clients.
+and leaves the app open. The window has five screens — Upstream, Downstream, Network, Access,
+Live log — and holds no state of record; it reads everything from the core and re-reads
+whenever the core pushes an event. **Upstream** is the caller's side: what is waiting on a
+decision, the names and descriptions callers see, and which client may call what — one screen
+because an approval *is* a client asking for access, and answering it with "allow always"
+writes exactly the kind of rule listed below it. **Downstream** is what the gateway calls out
+to. **Network** is reachability, with a form to change it, because the alternative was telling
+an operator to find a TOML file. **Access** is credentials: the super token, and the tokens
+issued to individual clients.
 
 ## Configuration
 

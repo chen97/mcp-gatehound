@@ -238,7 +238,7 @@ struct Connected {
 /// Add a service and the tools chosen from it, writing them to the configuration.
 ///
 /// `on_first_call` says what a client's first call to these tools does: `Ask` holds it for a
-/// decision here, `Deny` makes them invisible until granted on Identities.
+/// decision here, `Deny` makes them invisible until granted on the Upstream screen.
 #[tauri::command]
 fn add_connection(
     state: tauri::State<'_, AppState>,
@@ -304,10 +304,90 @@ fn add_connection(
     })
 }
 
+// ---- What callers see -----------------------------------------------------
+
+/// What renaming a tool did.
+#[derive(Serialize)]
+struct Renamed {
+    config_path: String,
+    /// Clients whose permission for this tool came across with it.
+    moved: Vec<String>,
+    /// Clients whose rule was dropped because the new name already had one, which wins.
+    kept: Vec<String>,
+}
+
+/// Change the name and description callers see for a tool.
+///
+/// Only the face of it: the action underneath is untouched, so a tool proxied to an MCP server
+/// keeps calling the same operation on it. Callers name a tool, never an action, which is what
+/// makes the two separable at all.
+#[tauri::command]
+fn set_tool_face(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    new_name: String,
+    description: String,
+) -> Result<Renamed, String> {
+    let new_name = new_name.trim().to_string();
+    if new_name.is_empty() {
+        return Err("a tool needs a name".into());
+    }
+    if new_name.contains(char::is_whitespace) {
+        return Err(format!(
+            "'{new_name}' has a space in it — callers name a tool as an identifier, like \
+             'search_messages'"
+        ));
+    }
+
+    let mut cfg = (*state.gateway.cfg).clone();
+    if new_name != name && cfg.tools.iter().any(|t| t.name == new_name) {
+        return Err(format!(
+            "another tool is already called '{new_name}'; two tools with one name would make \
+             a caller's request ambiguous"
+        ));
+    }
+    let Some(tool) = cfg.tools.iter_mut().find(|t| t.name == name) else {
+        return Err(format!("no tool called '{name}'"));
+    };
+    tool.name = new_name.clone();
+    tool.description = description.trim().to_string();
+
+    let body = toml::to_string_pretty(&cfg)
+        .context("serializing the configuration")
+        .map_err(err)?;
+    if let Some(dir) = state.config_path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating {}", dir.display()))
+            .map_err(err)?;
+    }
+    std::fs::write(&state.config_path, body)
+        .with_context(|| format!("writing {}", state.config_path.display()))
+        .map_err(err)?;
+
+    // Policy is keyed by the name callers use, so the rules have to follow the rename or
+    // every client silently loses its access to a tool that only changed its label.
+    let rules = if new_name != name {
+        state
+            .gateway
+            .store
+            .rename_tool_rules(&name, &new_name)
+            .map_err(err)?
+    } else {
+        Default::default()
+    };
+
+    tracing::info!(from = %name, to = %new_name, moved = rules.moved.len(), "renamed a tool");
+    Ok(Renamed {
+        config_path: state.config_path.display().to_string(),
+        moved: rules.moved,
+        kept: rules.kept,
+    })
+}
+
 // ---- Access tokens --------------------------------------------------------
 // The configured bearer is the super token: it authenticates as the owner and can call
 // everything. A token issued here authenticates as an identity of its own, and the policy
-// rules on the Identities screen decide what it may do — so "a token with narrower
+// rules on the Upstream screen decide what it may do — so "a token with narrower
 // permissions" is the existing mechanism, not a second one.
 
 #[derive(Serialize)]
@@ -957,6 +1037,7 @@ fn main() {
             apply_pack,
             discover_tools,
             add_connection,
+            set_tool_face,
             restart_app,
             access,
             publish_state,

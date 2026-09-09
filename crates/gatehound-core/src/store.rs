@@ -120,6 +120,15 @@ pub struct IdentityRule {
     pub updated_at: String,
 }
 
+/// What renaming a tool did to the rules that referred to it.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RenamedRules {
+    /// Rules carried across, so the clients that had access keep it.
+    pub moved: Vec<String>,
+    /// Rules dropped because the new name already had one for that client, which wins.
+    pub kept: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingRow {
     pub id: String,
@@ -391,6 +400,47 @@ impl Store {
             params![identity, tool, decision.as_str(), now()],
         )?;
         Ok(())
+    }
+
+    /// Move every policy rule from one tool name to another, reporting what moved.
+    ///
+    /// Renaming the name callers see would otherwise orphan the rules keyed to the old one:
+    /// every `(identity, old)` stops matching, and each client silently falls back to its
+    /// wildcard or to `ask`. That is a permission change nobody asked for, arriving as a
+    /// side effect of an edit that looks cosmetic.
+    ///
+    /// A rule already present under the new name wins and is left alone — it is the more
+    /// specific statement about the tool as it is now, and overwriting it would be the same
+    /// silent widening in the other direction. Those are reported rather than applied.
+    pub fn rename_tool_rules(&self, from: &str, to: &str) -> Result<RenamedRules> {
+        let conn = self.lock();
+        let mut moved = Vec::new();
+        let mut kept = Vec::new();
+
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT identity, decision FROM identities WHERE tool = ?1")?
+            .query_map(params![from], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+
+        for (identity, decision) in rows {
+            let already: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM identities WHERE identity = ?1 AND tool = ?2",
+                params![identity, to],
+                |r| r.get(0),
+            )?;
+            if already > 0 {
+                kept.push(format!("{identity} → {decision}"));
+                continue;
+            }
+            conn.execute(
+                "UPDATE identities SET tool = ?1, updated_at = ?2 WHERE identity = ?3 AND tool = ?4",
+                params![to, now(), identity, from],
+            )?;
+            moved.push(format!("{identity} → {decision}"));
+        }
+        // Anything left under the old name is a duplicate of a rule the new name already had.
+        conn.execute("DELETE FROM identities WHERE tool = ?1", params![from])?;
+        Ok(RenamedRules { moved, kept })
     }
 
     /// Insert a rule only if the pair has none. Used to seed config-declared identities
@@ -699,5 +749,64 @@ mod tests {
         s.prune(30).unwrap();
         let row = s.get_request(id).unwrap().unwrap();
         assert!(row.args_json.is_none() && row.response_json.is_none());
+    }
+}
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use crate::config::Decision;
+
+    #[test]
+    fn renaming_a_tool_carries_its_permissions_with_it() {
+        // The trap this exists for: rules are keyed by the name callers see, so renaming one
+        // would leave every rule pointing at a tool that no longer exists. Each client then
+        // falls back to its wildcard or to `ask` — a permission change nobody asked for,
+        // arriving from an edit that looks cosmetic.
+        let store = Store::open_memory().unwrap();
+        store
+            .set_decision("desktop", "search", Decision::Allow)
+            .unwrap();
+        store
+            .set_decision("worker", "search", Decision::Deny)
+            .unwrap();
+        store
+            .set_decision("other", "unrelated", Decision::Allow)
+            .unwrap();
+
+        let out = store.rename_tool_rules("search", "find").unwrap();
+        assert_eq!(out.moved.len(), 2, "both rules move: {:?}", out.moved);
+        assert!(out.kept.is_empty());
+
+        let policy = crate::policy::Policy::new(std::sync::Arc::new(store));
+        assert_eq!(policy.resolve("desktop", "find"), Decision::Allow);
+        assert_eq!(policy.resolve("worker", "find"), Decision::Deny);
+        // And nothing answers to the old name any more.
+        assert_eq!(policy.resolve("desktop", "search"), Decision::Ask);
+        // An unrelated tool is untouched.
+        assert_eq!(policy.resolve("other", "unrelated"), Decision::Allow);
+    }
+
+    #[test]
+    fn a_rule_the_new_name_already_had_is_not_overwritten() {
+        // Renaming onto a name that already has rules must not widen them. The existing rule
+        // is the more specific statement about the tool as it is now.
+        let store = Store::open_memory().unwrap();
+        store
+            .set_decision("desktop", "search", Decision::Allow)
+            .unwrap();
+        store
+            .set_decision("desktop", "find", Decision::Deny)
+            .unwrap();
+
+        let out = store.rename_tool_rules("search", "find").unwrap();
+        assert!(out.moved.is_empty());
+        assert_eq!(out.kept.len(), 1, "the caller is told what it dropped");
+
+        let policy = crate::policy::Policy::new(std::sync::Arc::new(store));
+        assert_eq!(
+            policy.resolve("desktop", "find"),
+            Decision::Deny,
+            "a rename must never turn a deny into an allow"
+        );
     }
 }

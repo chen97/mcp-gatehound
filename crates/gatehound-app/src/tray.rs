@@ -65,7 +65,7 @@ pub fn build(app: &AppHandle) -> Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" | "pending" => {
                 show_window(app);
-                let _ = app.emit("navigate", "approvals");
+                let _ = app.emit("navigate", "upstream");
             }
             "pause" => {
                 let app = app.clone();
@@ -152,5 +152,5 @@ pub fn notify_pending(app: &AppHandle, row: &PendingRow) {
         .title("Approve this call?")
         .body(format!("{} wants to run {}", row.identity, row.tool))
         .show();
-    let _ = app.emit("navigate", "approvals");
+    let _ = app.emit("navigate", "upstream");
 }

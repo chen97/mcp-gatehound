@@ -1285,6 +1285,12 @@ fi
         };
         // Not so short that a loaded machine races the spawn; the point of the test is what
         // happens after it is up, not how fast it gets there.
+        //
+        // Seen failing twice on a machine also running a full build, and not reproduced in
+        // fifteen runs since. If it fails again, the assertion below prints the state: a
+        // `Failed { error: "could not start: ..." }` is the OS refusing to fork under load
+        // rather than anything about draining, and the test wants making cheaper. Anything
+        // else is real.
         let p =
             Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_millis(200));
         let st = p.start().await;

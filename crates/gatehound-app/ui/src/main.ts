@@ -186,7 +186,7 @@ function pretty(json: string | null): string {
   }
 }
 
-let screen = "approvals";
+let screen = "upstream";
 let logFilter = "";
 let statusFilter = "";
 
@@ -706,7 +706,7 @@ function connectForm(d: Draft): string {
     <div class="row">
       <label class="check">
         <input type="radio" name="c-first" value="deny" ${d.on_first_call === "deny" ? "checked" : ""} />
-        <span>Deny — the tools stay invisible until I grant them on Identities</span>
+        <span>Deny — the tools stay invisible until I grant them below</span>
       </label>
     </div>
     <div class="meta">
@@ -1134,7 +1134,137 @@ function wirePackPanel(): void {
   }
 }
 
-// ---- Identities ------------------------------------------------------------
+// ---- Who may call what (rendered inside Upstream) ---------------------------
+
+// ---- Upstream --------------------------------------------------------------
+// The caller's side of the gateway: what is waiting on a decision, the tools callers can see,
+// and which of them each client may use. An approval is a client asking for access and
+// "allow always" writes a rule, so keeping the three apart would have split one job across
+// three screens.
+
+/// The tool being re-labelled, if any. Editing one at a time keeps the rest of the screen
+/// live, which matters when an approval can arrive while you are typing.
+let editingTool: { name: string; new_name: string; description: string } | null = null;
+/// The snapshot the screen was last drawn from, so a click can find the row it belongs to
+/// without another round trip.
+let lastSnapshot: Snapshot | null = null;
+
+function upstreamIsBeingEdited(): boolean {
+  if (!$("#upstream").innerHTML) return false;
+  if (editingTool) return true;
+  const el = document.activeElement;
+  return (
+    el instanceof HTMLElement &&
+    $("#upstream").contains(el) &&
+    (el instanceof HTMLInputElement ||
+      el instanceof HTMLSelectElement ||
+      el instanceof HTMLTextAreaElement)
+  );
+}
+
+function toolFaceCard(snap: Snapshot): string {
+  const rows = snap.tools.length
+    ? snap.tools
+        .map((t) => {
+          if (editingTool?.name === t.name) {
+            return `<tr>
+              <td colspan="4">
+                <div class="row">
+                  <input id="tf-name" style="width:190px" value="${esc(editingTool.new_name)}" />
+                  <input id="tf-desc" style="min-width:340px" value="${esc(editingTool.description)}"
+                         placeholder="what a caller should understand this does" />
+                </div>
+                <div class="row">
+                  <button id="tf-save" class="primary">Save</button>
+                  <button id="tf-cancel" class="ghost">Cancel</button>
+                  <span class="meta">
+                    Renaming carries each client's permission across with it. What it calls
+                    downstream does not change.
+                  </span>
+                </div>
+              </td>
+            </tr>`;
+          }
+          return `<tr>
+            <td><code>${esc(t.name)}</code></td>
+            <td class="meta">${esc(t.description)}</td>
+            <td class="meta">${esc(t.upstream ?? "local command")}</td>
+            <td><button class="ghost tf-edit" data-name="${esc(t.name)}">Edit</button></td>
+          </tr>`;
+        })
+        .join("")
+    : `<tr><td class="meta">No tools yet. Add a downstream, or import a pack.</td></tr>`;
+
+  return `<div class="card">
+    <h3>Tools callers see</h3>
+    <div class="meta">
+      The name and description a client reads in <code>tools/list</code>. Both are yours to
+      choose — a caller names a tool and never an action, so re-labelling one changes nothing
+      about what it does or where it goes.
+    </div>
+    <table>
+      <thead><tr><th>Tool</th><th>Description</th><th>Goes to</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+async function renderUpstream(snap: Snapshot): Promise<void> {
+  if (upstreamIsBeingEdited() && !editingTool) return;
+  $("#upstream").innerHTML =
+    `<div id="approvals"></div>` + toolFaceCard(snap) + `<div id="identities"></div>`;
+  await renderApprovals();
+  await renderIdentities(snap);
+  wireToolFace();
+}
+
+function wireToolFace(): void {
+  for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>(".tf-edit"))) {
+    b.addEventListener("click", () => {
+      const t = lastSnapshot?.tools.find((x) => x.name === b.dataset.name);
+      if (!t) return;
+      editingTool = { name: t.name, new_name: t.name, description: t.description };
+      void refresh();
+    });
+  }
+  $("#tf-cancel")?.addEventListener("click", () => {
+    editingTool = null;
+    void refresh();
+  });
+  $("#tf-save")?.addEventListener("click", async () => {
+    const e = editingTool;
+    if (!e) return;
+    const newName = ($("#tf-name") as HTMLInputElement).value;
+    const description = ($("#tf-desc") as HTMLInputElement).value;
+    let out: { config_path: string; moved: string[]; kept: string[] };
+    try {
+      out = await invoke("set_tool_face", { name: e.name, newName, description });
+    } catch (err) {
+      alert(String(err));
+      return;
+    }
+    editingTool = null;
+
+    const moved = out.moved.length
+      ? `\n\nPermissions carried across: ${out.moved.join(", ")}`
+      : "";
+    // Worth saying plainly: a dropped rule means a client's access is whatever the new name
+    // already said, which may not be what it had a moment ago.
+    const kept = out.kept.length
+      ? `\n\nThese clients already had a rule for that name, which was kept instead: ${out.kept.join(", ")}`
+      : "";
+    const restart = confirm(
+      `Saved to ${out.config_path}.\n\n` +
+        `Callers still see the old name until the gateway restarts. Restart now?\n\n` +
+        `${RESTART_WARNS}${moved}${kept}`,
+    );
+    if (restart) {
+      await invoke("restart_app");
+    } else {
+      await refresh();
+    }
+  });
+}
 
 async function renderIdentities(snap: Snapshot): Promise<void> {
   const rules = await invoke<IdentityRule[]>("identities");
@@ -1205,7 +1335,7 @@ async function renderIdentities(snap: Snapshot): Promise<void> {
 
 // ---- Access ----------------------------------------------------------------
 // The super token can call everything. An issued token authenticates as an identity of its
-// own, and the rules on Identities decide what it may do — so this screen mints and revokes,
+// own, and the rules on Upstream decide what it may do — so this screen mints and revokes,
 // and permissions live where permissions already live.
 
 // A freshly issued secret, held only until the operator dismisses it. It cannot be recovered
@@ -1639,7 +1769,7 @@ async function renderAccess(snap: Snapshot): Promise<void> {
            ${
              justIssued.allowed.length
                ? `It may call ${justIssued.allowed.map((t) => `<code>${esc(t)}</code>`).join(", ")}.`
-               : `It can call nothing yet — grant tools on the Identities screen.`
+               : `It can call nothing yet — grant tools on the Upstream screen.`
            }
          </div>
          <div class="row"><button id="dismiss-new" class="ghost">Done</button></div>
@@ -1688,7 +1818,7 @@ async function renderAccess(snap: Snapshot): Promise<void> {
       <h3>Issue a token</h3>
       <div class="meta">
         A new token starts able to do nothing. Tick what this client may call; you can change it
-        later on Identities.
+        later on Upstream.
       </div>
       <div class="row">
         <input id="token-name" type="text" placeholder="What is it for? e.g. Claude Desktop" />
@@ -1777,10 +1907,10 @@ async function refresh(): Promise<void> {
   refreshing = true;
   try {
     const snap = await renderHeader();
-    if (screen === "approvals") await renderApprovals();
+    lastSnapshot = snap;
+    if (screen === "upstream") await renderUpstream(snap);
     else if (screen === "log") await renderLog();
     else if (screen === "actions") await renderActions(snap);
-    else if (screen === "identities") await renderIdentities(snap);
     else if (screen === "network") await renderNetwork();
     else if (screen === "access") await renderAccess(snap);
   } catch (e) {
@@ -1809,6 +1939,6 @@ void listen("gateway", () => void refresh());
 void listen("tray", () => void renderHeader());
 void listen<string>("navigate", (e) => show(e.payload));
 
-show("approvals");
+show("upstream");
 // A slow safety net for anything an event did not cover (a timed-out hold, say).
 setInterval(() => void refresh(), 5000);
