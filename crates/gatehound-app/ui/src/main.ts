@@ -663,8 +663,15 @@ const expanded = new Set<string>();
 /// Grouped rather than listed flat because a tool only means anything next to the thing it
 /// calls — and a flat table of every tool across every service is the part that got long
 /// first.
+/// The key standing for "not from any downstream service" — a tool that runs a local command.
+///
+/// It becomes a `data-key` attribute and is read back out to decide which service is expanded,
+/// so it is a prefixed name rather than a sentinel: a NUL does not survive that round trip
+/// intact, and an upstream genuinely called `local` should not collide with it either.
+const LOCAL_KEY = "local:commands";
+
 function servicesHtml(snap: Snapshot, configFile: string): string {
-  const LOCAL = "\u0000local";
+  const LOCAL = LOCAL_KEY;
   const groups = new Map<string, ToolInfo[]>();
   for (const t of snap.tools) {
     const key = t.upstream ?? LOCAL;
@@ -699,26 +706,14 @@ function servicesHtml(snap: Snapshot, configFile: string): string {
       const open = expanded.has(r.key);
       const tools = r.tools.length
         ? `<table>
-             <thead><tr><th>Tool</th><th>Action</th><th>Limits</th><th>Description</th></tr></thead>
-             <tbody>${r.tools
-               .map(
-                 (t) => `<tr>
-                   <td><code>${esc(t.name)}</code></td>
-                   <td class="meta">${esc(t.action)}</td>
-                   <td>${[
-                     t.idempotent ? "idempotent" : "",
-                     t.rate_limit
-                       ? `${t.rate_limit.per_hour}/h, ${t.rate_limit.min_spacing_secs}s apart`
-                       : "",
-                   ]
-                     .filter(Boolean)
-                     .map((x) => `<span class="pill">${esc(x)}</span>`)
-                     .join(" ")}</td>
-                   <td class="meta">${esc(t.description)}</td>
-                 </tr>`,
-               )
-               .join("")}</tbody>
-           </table>`
+             <thead><tr><th>Tool</th><th>Action</th><th>Limits</th><th>Description</th><th></th></tr></thead>
+             <tbody>${r.tools.map(toolRow).join("")}</tbody>
+           </table>
+           <div class="meta">
+             The name and description are what a client reads in <code>tools/list</code>, and
+             both are yours to change. A caller names a tool and never an action, so
+             re-labelling one changes nothing about what it does or where it goes.
+           </div>`
         : `<div class="meta">No tools exposed from this one yet.</div>`;
 
       return `<div class="card">
@@ -796,8 +791,7 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
          </div>`) +
     (draft || scriptDraft ? "" : renderPackPlanIfAny()) +
     (draft || scriptDraft ? "" : scriptsHtml(scriptList)) +
-    servicesHtml(snap, configFile) +
-    (draft || scriptDraft ? "" : toolFaceCard(snap));
+    servicesHtml(snap, configFile);
   if (!paint($("#actions"), html)) return;
 
   $("#c-open")?.addEventListener("click", () => {
@@ -2475,52 +2469,45 @@ function upstreamIsBeingEdited(): boolean {
   );
 }
 
-function toolFaceCard(snap: Snapshot): string {
-  const rows = snap.tools.length
-    ? snap.tools
-        .map((t) => {
-          if (editingTool?.name === t.name) {
-            return `<tr>
-              <td colspan="4">
-                <div class="row">
-                  <input id="tf-name" style="width:190px" value="${esc(editingTool.new_name)}" />
-                  <input id="tf-desc" style="min-width:340px" value="${esc(editingTool.description)}"
-                         placeholder="what a caller should understand this does" />
-                </div>
-                <div class="row">
-                  <button id="tf-save" class="primary">Save</button>
-                  <button id="tf-cancel" class="ghost">Cancel</button>
-                  <span class="meta">
-                    Renaming carries each client's permission across with it. What it calls
-                    downstream does not change.
-                  </span>
-                </div>
-              </td>
-            </tr>`;
-          }
-          return `<tr>
-            <td><code>${esc(t.name)}</code></td>
-            <td class="meta">${esc(t.description)}</td>
-            <td class="meta">${esc(t.upstream ?? "local command")}</td>
-            <td><button class="ghost tf-edit" data-name="${esc(t.name)}">Edit</button></td>
-          </tr>`;
-        })
-        .join("")
-    : `<tr><td class="meta">No tools yet. Add a downstream, or import a pack.</td></tr>`;
-
-  return `<div class="card">
-    <h3>What upstream clients see</h3>
-    <div class="meta">
-      The name and description a client reads in <code>tools/list</code>. Both are yours to
-      choose — a caller names a tool and never an action, so re-labelling one changes nothing
-      about what it does or where it goes. It sits here because this is where the tool comes
-      from: the face is downstream's, the audience is upstream's.
-    </div>
-    <table>
-      <thead><tr><th>Tool</th><th>Description</th><th>Goes to</th><th></th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  </div>`;
+/// One tool inside its service's list, or the editor when that is the tool being renamed.
+///
+/// This used to be a separate card listing every tool in the gateway, which meant the same
+/// tools appeared twice on one screen — once under the service they come from, and once in a
+/// flat table that repeated the service in a "Goes to" column. Editing belongs where the tool
+/// already is.
+function toolRow(t: ToolInfo): string {
+  if (editingTool?.name === t.name) {
+    return `<tr>
+      <td colspan="5">
+        <div class="row">
+          <input id="tf-name" style="width:190px" value="${esc(editingTool.new_name)}" />
+          <input id="tf-desc" style="min-width:340px" value="${esc(editingTool.description)}"
+                 placeholder="what a caller should understand this does" />
+        </div>
+        <div class="row">
+          <button id="tf-save" class="primary">Save</button>
+          <button id="tf-cancel" class="ghost">Cancel</button>
+          <span class="meta">
+            Renaming carries each client's permission across with it. What it calls downstream
+            does not change.
+          </span>
+        </div>
+      </td>
+    </tr>`;
+  }
+  return `<tr>
+    <td><code>${esc(t.name)}</code></td>
+    <td class="meta">${esc(t.action)}</td>
+    <td>${[
+      t.idempotent ? "idempotent" : "",
+      t.rate_limit ? `${t.rate_limit.per_hour}/h, ${t.rate_limit.min_spacing_secs}s apart` : "",
+    ]
+      .filter(Boolean)
+      .map((x) => `<span class="pill">${esc(x)}</span>`)
+      .join(" ")}</td>
+    <td class="meta">${esc(t.description)}</td>
+    <td><button class="ghost tf-edit" data-name="${esc(t.name)}">Edit</button></td>
+  </tr>`;
 }
 
 async function renderUpstream(snap: Snapshot): Promise<void> {
@@ -2545,6 +2532,9 @@ function wireToolFace(): void {
       const t = lastSnapshot?.tools.find((x) => x.name === b.dataset.name);
       if (!t) return;
       editingTool = { name: t.name, new_name: t.name, description: t.description };
+      // The editor renders inside the service's own list, so that list has to stay open —
+      // otherwise clicking Edit collapses the very row you are editing.
+      expanded.add(t.upstream ?? LOCAL_KEY);
       redrawActions();
     });
   }
