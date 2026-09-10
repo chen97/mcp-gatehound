@@ -348,6 +348,19 @@ function recentHtml(rows: RequestLog[]): string {
   </div>`;
 }
 
+/// The faint band that drifts along a wire while nothing is happening.
+///
+/// Motion on something permanently on screen has to be near-imperceptible or it becomes noise,
+/// so this is deliberately not a signal: no dot, no colour, a third of the opacity of the line
+/// it travels. It says the paths are live. A real call says everything else, and outranks it —
+/// the band hides for as long as one is crossing, so the two can never be confused.
+///
+/// Offset per row, because several wires pulsing in lockstep reads as one mechanism ticking
+/// rather than as separate paths.
+function flux(i: number): string {
+  return `<i class="flux" style="animation-delay:-${(i * 900) % 3200}ms"></i>`;
+}
+
 /// How far apart the flow's pieces arrive. Under the 30–80ms band that reads as a group
 /// assembling rather than a queue forming.
 const STAGGER_MS = 45;
@@ -376,7 +389,8 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
           return `<div class="flow-row" data-caller="${esc(c.identity)}" style="--d:${d}ms">
               ${flowNode(c.identity, c.identity === access.owner ? "super token" : what)}
             </div>
-            <div class="wire" data-caller="${esc(c.identity)}" style="--d:${d + 90}ms"></div>`;
+            <div class="wire" data-caller="${esc(c.identity)}" style="--d:${d + 90}ms"
+                 >${flux(i)}</div>`;
         })
         .join("")
     : `<div class="node"><span class="meta">Nothing yet. Issue a token on the Upstream tab.</span></div>
@@ -391,7 +405,8 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
         .map((u, i) => {
           const n = snap.tools.filter((t) => t.upstream === u.name).length;
           const d = gateAt + 130 + i * STAGGER_MS;
-          return `<div class="wire back" data-service="${esc(u.name)}" style="--d:${d}ms"></div>
+          return `<div class="wire back" data-service="${esc(u.name)}" style="--d:${d}ms"
+                 >${flux(i + 1)}</div>
             <div class="flow-row" data-service="${esc(u.name)}" style="--d:${d + 90}ms">
               ${flowNode(u.target, `${u.kind} · ${n} tool${n === 1 ? "" : "s"}`)}
             </div>`;
@@ -403,7 +418,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
   const local = snap.tools.filter((t) => !t.upstream).length;
 
   return `<div class="card">
-    <div class="flow">
+    <div class="flow${snap.running ? "" : " paused"}">
       <div class="flow-side left">
         <div class="flow-head">Upstream clients</div><div></div>
         ${left}
@@ -422,8 +437,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
     <div class="meta" style="margin-top:12px">
       ${snap.tools.length} tool${snap.tools.length === 1 ? "" : "s"} exposed${
         local ? `, ${local} of them local commands` : ""
-      }. A dot crosses a wire when a call actually does — nothing moves while nothing is
-      happening.
+      }. The wires drift while they are idle; a dot crosses one when a call actually does.
     </div>
   </div>`;
 }

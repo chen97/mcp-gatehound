@@ -567,3 +567,32 @@ pre {
 
 .check .grow { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .check .grow code { word-break: break-all; }
+
+/* ---- Idle drift ---------------------------------------------------------------------
+   The wires are alive without anything being sent. Everything about this is chosen to stay
+   underneath a real call rather than compete with it: no dot, no accent colour, a third of the
+   line's own opacity, and gone entirely for as long as a call is crossing. Transform only, so
+   it costs a composite and nothing else however many wires there are. */
+
+.flux {
+  position: absolute; left: 0; top: 50%; width: 34px; height: 1px;
+  margin-top: -0.5px; pointer-events: none;
+  background: linear-gradient(to right, transparent,
+    color-mix(in srgb, var(--tx) 45%, transparent), transparent);
+  opacity: .32;
+  will-change: transform;
+  animation: drift 3.2s linear infinite;
+}
+@keyframes drift {
+  from { transform: translateX(-34px); }
+  to   { transform: translateX(100cqw); }
+}
+/* A call outranks it. Hidden rather than dimmed: two things moving along one line at different
+   speeds is the one reading that would be worse than either alone. */
+.wire.live .flux { opacity: 0; }
+/* A paused gateway is not carrying anything, and should not look as though it is. */
+.flow.paused .flux { animation-play-state: paused; opacity: .12; }
+
+@media (prefers-reduced-motion: reduce) {
+  .flux { display: none; }
+}
