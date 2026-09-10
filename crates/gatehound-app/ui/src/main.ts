@@ -2150,7 +2150,8 @@ function clientCard(c: Client, snap: Snapshot, owner: string): string {
       <span style="margin-left:auto">${clientSummary(c, owner)}</span>
     </div>
     <div class="${open ? "" : "hidden"}">
-      ${rules}
+      ${tokens ? `<h3 style="margin-top:0">Tokens</h3>${tokens}` : ""}
+      <h3 style="margin-top:${tokens ? "14px" : "0"}">Tools it may call</h3>
       <div class="row">
         <select class="cl-tool" data-identity="${esc(c.identity)}">${toolOptions}</select>
         <select class="cl-decision" data-identity="${esc(c.identity)}">
@@ -2163,7 +2164,7 @@ function clientCard(c: Client, snap: Snapshot, owner: string): string {
           An exact tool beats <code>*</code>. With no rule at all, a call waits for you.
         </span>
       </div>
-      ${tokens ? `<h3 style="margin-top:14px">Tokens</h3>${tokens}` : ""}
+      ${rules}
     </div>
   </div>`;
 }
