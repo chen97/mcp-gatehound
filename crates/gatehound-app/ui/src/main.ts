@@ -720,12 +720,40 @@ function servicesHtml(snap: Snapshot, configFile: string): string {
     </div>${body}`;
 }
 
+/// What the Downstream screen last read from the core, so a local edit can redraw without
+/// going back for it. Reading a script means reading and scanning every file on disk, which is
+/// far too much work to sit between a dropdown and its own options changing.
+let cachedConfigPath = "";
+let cachedScripts: ScriptView[] = [];
+
 async function renderActions(snap: Snapshot): Promise<void> {
   if (actionsAreBeingEdited()) return;
   const [configFile, scriptList] = await Promise.all([
     invoke<string>("config_path"),
     invoke<ScriptView[]>("scripts"),
   ]);
+  cachedConfigPath = configFile;
+  cachedScripts = scriptList;
+  paintActions(snap, configFile, scriptList);
+}
+
+/// Redraw the screen from what is already in hand.
+///
+/// Everything about a half-built connection is local: which kind, which fields, which tools.
+/// None of it lives in the core, so redrawing it should not wait on a snapshot, the config
+/// path and a re-read of every script from disk — which is what going through `refresh` did,
+/// and why changing Kind felt slow. Worse, if the five-second re-read happened to be in
+/// flight, `refresh` dropped the request on the floor and the dropdown appeared to do nothing
+/// at all until the next tick came round.
+function redrawActions(): void {
+  if (screen !== "actions" || !lastSnapshot) {
+    void refresh();
+    return;
+  }
+  paintActions(lastSnapshot, cachedConfigPath, cachedScripts);
+}
+
+function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView[]): void {
   const html =
     (draft
       ? connectForm(draft)
@@ -750,13 +778,13 @@ async function renderActions(snap: Snapshot): Promise<void> {
   $("#c-open")?.addEventListener("click", () => {
     draft = newDraft("mcp");
     connDirty = false;
-    void refresh();
+    redrawActions();
   });
   for (const h of Array.from(document.querySelectorAll<HTMLElement>(".svc-head"))) {
     h.addEventListener("click", () => {
       const key = h.dataset.key!;
       if (!expanded.delete(key)) expanded.add(key);
-      void refresh();
+      redrawActions();
     });
   }
   if (draft) wireConnectForm();
@@ -1205,20 +1233,20 @@ function wireConnectForm(): void {
     const kind = (e.currentTarget as HTMLSelectElement).value as ConnKind;
     draft = newDraft(kind);
     connDirty = false;
-    void refresh();
+    redrawActions();
   });
 
   $("#c-cancel")?.addEventListener("click", () => {
     draft = null;
     connDirty = false;
-    void refresh();
+    redrawActions();
   });
 
   $("#c-add-tool")?.addEventListener("click", () => {
     readDraft(d);
     d.tools.push(blankTool());
     connDirty = false;
-    void refresh();
+    redrawActions();
   });
 
   for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>(".c-drop"))) {
@@ -1227,7 +1255,7 @@ function wireConnectForm(): void {
       d.tools.splice(Number(b.dataset.i), 1);
       if (d.tools.length === 0) d.tools.push(blankTool());
       connDirty = false;
-      void refresh();
+      redrawActions();
     });
   }
 
@@ -1236,7 +1264,7 @@ function wireConnectForm(): void {
     d.busy = true;
     d.error = null;
     connDirty = false;
-    await refresh();
+    redrawActions();
     try {
       const found = await invoke<{ tools: { name: string; description: string; input_schema: unknown }[] }>(
         "discover_tools",
@@ -1255,7 +1283,7 @@ function wireConnectForm(): void {
     }
     d.busy = false;
     connDirty = false;
-    await refresh();
+    redrawActions();
   });
 
   $("#c-save")?.addEventListener("click", async () => {
@@ -1276,7 +1304,7 @@ function wireConnectForm(): void {
     } catch (e) {
       d.error = String(e);
       connDirty = false;
-      await refresh();
+      redrawActions();
       return;
     }
 
@@ -1548,7 +1576,7 @@ function wireScripts(list: ScriptView[]): void {
     h.addEventListener("click", () => {
       const name = h.dataset.name!;
       if (!expandedScripts.delete(name)) expandedScripts.add(name);
-      void refresh();
+      redrawActions();
     });
   }
 
@@ -1566,7 +1594,7 @@ function wireScripts(list: ScriptView[]): void {
     };
     scriptReview = null;
     scriptDirty = false;
-    void refresh();
+    redrawActions();
   });
 
   for (const b of Array.from(document.querySelectorAll<HTMLElement>(".script-edit"))) {
@@ -1585,7 +1613,7 @@ function wireScripts(list: ScriptView[]): void {
       };
       scriptReview = null;
       scriptDirty = false;
-      void refresh();
+      redrawActions();
     });
   }
 
@@ -1688,7 +1716,7 @@ function wireScriptEditor(): void {
       d.body = SCRIPT_STARTER[d.interpreter] ?? "";
       if (body) body.value = d.body;
     }
-    void refresh();
+    redrawActions();
   });
 
   body?.addEventListener("input", () => {
@@ -1717,7 +1745,7 @@ function wireScriptEditor(): void {
     scriptDraft = null;
     scriptReview = null;
     scriptDirty = false;
-    void refresh();
+    redrawActions();
   });
 
   $("#sd-save")?.addEventListener("click", async () => {
@@ -1948,7 +1976,7 @@ function wirePackPanel(): void {
     packChoices = [];
     allowScripts = false;
     allowDangerousScripts = false;
-    void refresh();
+    redrawActions();
   });
 
   for (const [id, set] of [
@@ -1957,7 +1985,7 @@ function wirePackPanel(): void {
   ] as const) {
     $(id)?.addEventListener("change", (e) => {
       set((e.target as HTMLInputElement).checked);
-      void refresh();
+      redrawActions();
     });
   }
 
@@ -2964,22 +2992,34 @@ function show(next: string): void {
 }
 
 let refreshing = false;
+/// A refresh asked for while one was already running. Dropping it silently was a quiet way to
+/// lose a redraw somebody was waiting on: click during the five-second re-read and the screen
+/// simply did not change until the next tick.
+let refreshQueued = false;
+
 async function refresh(): Promise<void> {
-  if (refreshing) return;
+  if (refreshing) {
+    refreshQueued = true;
+    return;
+  }
   refreshing = true;
   try {
-    const snap = await renderHeader();
-    lastSnapshot = snap;
-    if (screen === "home") await renderHome(snap);
-    else if (screen === "upstream") await renderUpstream(snap);
-    else if (screen === "log") await renderLog();
-    else if (screen === "actions") await renderActions(snap);
-    else if (screen === "network") await renderNetwork();
-    tickTimes();
+    do {
+      refreshQueued = false;
+      const snap = await renderHeader();
+      lastSnapshot = snap;
+      if (screen === "home") await renderHome(snap);
+      else if (screen === "upstream") await renderUpstream(snap);
+      else if (screen === "log") await renderLog();
+      else if (screen === "actions") await renderActions(snap);
+      else if (screen === "network") await renderNetwork();
+      tickTimes();
+    } while (refreshQueued);
   } catch (e) {
     console.error(e);
   } finally {
     refreshing = false;
+    refreshQueued = false;
   }
 }
 
