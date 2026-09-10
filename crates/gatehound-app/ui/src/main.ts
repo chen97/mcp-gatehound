@@ -264,6 +264,10 @@ async function renderHeader(): Promise<Snapshot> {
   const badge = $("#badge");
   badge.textContent = String(s.pending);
   badge.className = s.pending > 0 ? "badge hot" : "badge";
+  // A count appearing or going widens the tab it sits in, so the bar has to follow. `keep`,
+  // not `jump`: this runs every five seconds, and forcing transitions off would land in the
+  // middle of a slide and stop it dead.
+  syncTabBar("keep");
   const pause = $<HTMLButtonElement>("#pause");
   pause.textContent = s.running ? "Pause gateway" : "Resume gateway";
   return s;
@@ -3153,6 +3157,40 @@ function wireRevoke(): void {
 
 // ---- wiring ----------------------------------------------------------------
 
+/// Put the nav's underline beneath the active tab.
+///
+/// Measured rather than declared, because the tabs are text and their widths depend on the
+/// font that actually loaded and on whether the badge is showing a number. `still` suppresses
+/// the transition for the placements nobody asked to watch — the first one, and the ones that
+/// follow a resize.
+/// Three modes, because there are three reasons to place it and they are not the same.
+///
+/// `slide` is a tab change, the one movement anybody wants to see. `jump` is a placement nobody
+/// asked to watch — the first one, and the ones after a resize. `keep` re-measures without
+/// touching the transition at all, which matters more than it sounds: the badge widens its own
+/// tab, and a five-second re-read that forced `jump` while a slide was in flight killed the
+/// slide outright. That was why the bar teleported instead of travelling.
+type TabBarMode = "slide" | "jump" | "keep";
+
+function syncTabBar(mode: TabBarMode): void {
+  const bar = document.querySelector<HTMLElement>("#tab-bar");
+  const active = document.querySelector<HTMLElement>("nav button.active");
+  if (!bar || !active) return;
+  const nav = active.parentElement!.getBoundingClientRect();
+  const b = active.getBoundingClientRect();
+  // Inset to match the button's own padding, so the bar underlines the label rather than the
+  // whole hit area.
+  const inset = 12;
+  if (mode !== "keep") bar.classList.toggle("still", mode === "jump");
+  bar.style.width = `${Math.max(b.width - inset * 2, 0)}px`;
+  bar.style.transform = `translateX(${b.left - nav.left + inset}px)`;
+  if (mode === "jump") {
+    // Let the placement land before transitions are allowed again, or the next move would
+    // start from wherever this one was interrupted.
+    requestAnimationFrame(() => bar.classList.remove("still"));
+  }
+}
+
 async function show(next: string): Promise<void> {
   // Leaving the Network screen mid-edit would drop the change silently, and an AUD is a
   // 64-character paste nobody wants to do twice. Asking natively means awaiting, so the switch
@@ -3170,6 +3208,7 @@ async function show(next: string): Promise<void> {
   document
     .querySelectorAll<HTMLButtonElement>("nav button")
     .forEach((b) => b.classList.toggle("active", b.dataset.screen === next));
+  syncTabBar("slide");
   void refresh();
 }
 
@@ -3233,5 +3272,7 @@ void listen("tray", () => void renderHeader());
 void listen<string>("navigate", (e) => void show(e.payload));
 
 void show("home");
+syncTabBar("jump");
+window.addEventListener("resize", () => syncTabBar("jump"));
 // A slow safety net for anything an event did not cover (a timed-out hold, say).
 setInterval(() => void refresh(), 5000);

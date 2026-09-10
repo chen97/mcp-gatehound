@@ -78,7 +78,7 @@ header .ghost { margin-left: auto; }
 .dot.grey  { background: var(--mut); }
 .dot.red   { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent); }
 
-nav { display: flex; gap: var(--s1); padding: 0 var(--s5); }
+nav { display: flex; gap: var(--s1); padding: 0 var(--s5); position: relative; }
 nav button {
   background: none; border: none; color: var(--mut); cursor: pointer;
   padding: var(--s2) var(--s3); font: inherit; font-weight: 500; border-radius: var(--r) var(--r) 0 0;
@@ -87,10 +87,25 @@ nav button {
 nav button:hover { color: var(--tx); }
 nav button.active { color: var(--tx); }
 /* A bar under the active tab rather than a border on the button: it lines up with the
-   header's rule instead of interrupting it. */
-nav button.active::after {
-  content: ""; position: absolute; left: var(--s3); right: var(--s3); bottom: -1px;
-  height: 2px; background: var(--am); border-radius: 2px 2px 0 0;
+   header's rule instead of interrupting it.
+   
+   One element for the whole nav rather than a mark on each button, so it can travel between
+   them. Switching tabs is something you do dozens of times a day, which puts it in the band
+   where motion has to be quick or absent — 200ms, and eased for on-screen movement rather than
+   for an entrance, because this is the same object moving rather than a new one arriving. */
+.tab-bar {
+  position: absolute; bottom: -1px; left: 0; height: 2px; width: 0;
+  background: var(--am); border-radius: 2px 2px 0 0;
+  transform: translateX(0);
+  transition: transform 200ms var(--ease-in-out), width 200ms var(--ease-in-out);
+  pointer-events: none;
+}
+/* Placing it for the first time, or after the window resized, is not a movement anybody
+   asked to watch. */
+.tab-bar.still { transition: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-bar { transition: none; }
 }
 
 .badge {
@@ -126,9 +141,13 @@ main::-webkit-scrollbar-thumb:hover { background: var(--mut); background-clip: p
 .card > .meta { max-width: 68ch; }
 
 .meta { color: var(--mut); font-size: 12px; }
+/* An empty state stands in for a card, so it is spaced like one. Without the matching margin
+   it sat flush against whatever followed — on Home, the approvals placeholder and the Recent
+   calls card were touching. */
 .empty {
   color: var(--mut); text-align: center; padding: var(--s6) var(--s4);
   border: 1px dashed var(--line); border-radius: var(--r-lg); background: var(--panel);
+  margin-bottom: var(--s3);
 }
 
 .notice {
