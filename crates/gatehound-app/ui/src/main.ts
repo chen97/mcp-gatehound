@@ -379,7 +379,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
             <div class="wire" data-caller="${esc(c.identity)}" style="--d:${d + 90}ms"></div>`;
         })
         .join("")
-    : `<div class="node"><span class="meta">Nobody yet. Issue a token on Upstream.</span></div>
+    : `<div class="node"><span class="meta">Nothing yet. Issue a token on the Upstream tab.</span></div>
        <div class="wire"></div>`;
 
   // The gate lands after the last caller's wire reaches it, and the services after the gate —
@@ -398,14 +398,14 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
         })
         .join("")
     : `<div class="wire back"></div>
-       <div class="node"><span class="meta">Nothing yet. Add one on Downstream.</span></div>`;
+       <div class="node"><span class="meta">Nothing yet. Add one on the Downstream tab.</span></div>`;
 
   const local = snap.tools.filter((t) => !t.upstream).length;
 
   return `<div class="card">
     <div class="flow">
       <div class="flow-side left">
-        <div class="flow-head">Callers</div><div></div>
+        <div class="flow-head">Upstream</div><div></div>
         ${left}
       </div>
       <div class="hub" id="flow-hub" style="--d:${gateAt}ms">
@@ -415,7 +415,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
         ${snap.pending ? `<div class="pill hot" style="margin-top:6px">${snap.pending} waiting</div>` : ""}
       </div>
       <div class="flow-side right">
-        <div></div><div class="flow-head">Services</div>
+        <div></div><div class="flow-head">Downstream</div>
         ${right}
       </div>
     </div>
