@@ -272,173 +272,182 @@ pre {
 .svc-head code { transition: color 160ms var(--ease-out); }
 .twist { color: var(--mut); width: 12px; flex: none; font-size: 10px; }
 
-/* ---- The flow on Home --------------------------------------------------------
-   Callers on the left, the gate in the middle, services on the right, one line per row.
-   Straight lines on purpose: a pulse travelling one is a plain translateX, which stays on the
-   GPU and needs no measuring of the DOM.
+/* ---- The board on Home ------------------------------------------------------------
+   One chip in the middle, and everything that talks to it around the edge. Every tile is a
+   button: the picture is the navigation, not an illustration beside it.
 
-   Motion here is rationed by how often it is seen. The entrance runs once per real change and
-   is allowed to be the thing that catches the eye — it assembles the picture in the direction
-   a call travels, so it explains the shape on the way in. Everything that sits on screen
-   permanently is near-imperceptible or still: an aura that breathed or a wire that shimmered
-   would be motion on something you are looking at the whole time you are on this tab, which is
-   the case the frequency rule exists to refuse. The one loop that earns its place is the
-   waiting badge, because it is the only thing here asking you to act. */
+   Motion is rationed by how often it is seen. The entrance runs once per real change and may
+   be the thing that catches the eye — it assembles in the direction a call travels. Anything
+   permanently on screen is faint or still: a drift along the traces, and nothing else. A real
+   call outranks both. */
 
-.flow { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: var(--s2) 0 var(--s3); }
-/* Two columns per side — the box and the wire leaving it — so both sit on one grid row and the
-   line meets the box whatever height the text takes. */
-.flow-side { display: grid; align-items: center; row-gap: var(--s2); min-width: 0; }
-.flow-side.left { grid-template-columns: minmax(0, 1fr) clamp(48px, 9vw, 110px); }
-.flow-side.right { grid-template-columns: clamp(48px, 9vw, 110px) minmax(0, 1fr); }
-
-.flow-head {
-  color: var(--mut); font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em;
-  font-weight: 600; padding-bottom: var(--s1);
-}
-
-.node {
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r);
-  padding: 9px 12px; min-width: 0;
-  /* State indication when this node is part of a call. Transition, not keyframes: a busy
-     client fires repeatedly and must retarget, not restart. */
-  transition: border-color 200ms var(--ease-out), transform 200ms var(--ease-out),
-              background 200ms var(--ease-out);
-}
-.node.lit { border-color: var(--am); background: color-mix(in srgb, var(--am) 7%, var(--panel-2)); transform: scale(1.015); }
-.node .who { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* Overlapping the boxes by a hair on each side: a line that stops short of what it connects
-   reads as two stubs rather than one connection. */
-.wire { position: relative; height: 38px; display: flex; align-items: center; margin: 0 -1px; container-type: inline-size; }
-/* A gradient rather than a flat hairline. At one weight the wires read as table rules between
-   two lists; brightening toward the arrowhead makes them read as a direction even at rest. */
-.wire::before {
-  content: ""; position: absolute; left: 0; right: 0; height: 1px;
-  background: linear-gradient(to right,
-    color-mix(in srgb, var(--line-strong) 35%, transparent),
-    var(--line-strong));
-  transition: background 220ms var(--ease-out);
-}
-/* Direction has to read when nothing is moving, or the picture only makes sense mid-call. */
-.wire::after {
-  content: ""; position: absolute; top: 50%; right: 0; width: 0; height: 0;
-  border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent;
-  border-left: 6px solid var(--line-strong); transform: translateY(-50%);
-  transition: border-left-color 220ms var(--ease-out);
-}
-
-/* The wire a call is crossing takes that call's colour for as long as it takes. The pulse
-   alone is 7px of movement on a 110px line; lighting the line is what makes the eye follow it
-   rather than notice it after the fact. */
-.wire.live::before { background: linear-gradient(to right,
-  color-mix(in srgb, var(--live) 25%, transparent), color-mix(in srgb, var(--live) 85%, transparent)); }
-.wire.live::after { border-left-color: color-mix(in srgb, var(--live) 85%, transparent); }
-.wire.live.ok { --live: var(--ok); }
-.wire.live.err { --live: var(--bad); }
-.wire.live.held { --live: var(--am); }
-
-.wire .pulse {
-  position: absolute; left: 0; width: 7px; height: 7px; border-radius: 50%;
-  background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 70%, transparent);
-  will-change: transform, opacity; animation: travel 700ms linear forwards;
-}
-/* A tail behind the dot, so a fast-moving 7px circle reads as one thing travelling rather than
-   as a dot that blinked in two places. Drawn behind, in the direction it came from. */
-.wire .pulse::before {
-  content: ""; position: absolute; top: 50%; right: 100%; width: 30px; height: 2px;
-  border-radius: 2px; transform: translateY(-50%);
-  background: linear-gradient(to left, color-mix(in srgb, var(--ok) 60%, transparent), transparent);
-}
-.wire .pulse.err { background: var(--bad); box-shadow: 0 0 8px color-mix(in srgb, var(--bad) 70%, transparent); }
-.wire .pulse.err::before { background: linear-gradient(to left, color-mix(in srgb, var(--bad) 60%, transparent), transparent); }
-.wire .pulse.held { background: var(--am); box-shadow: 0 0 8px color-mix(in srgb, var(--am) 70%, transparent); }
-.wire .pulse.held::before { background: linear-gradient(to left, color-mix(in srgb, var(--am) 60%, transparent), transparent); }
-/* `.back` marks the wires on the far side of the gate; it does not reverse them. Both legs of
-   a call travel the same way — caller to gate, gate to service — and the second used to run
-   right to left, against its own arrowhead, on a leg the code describes as "gateway to the
-   service it reached". Invisible while it was a 7px dot on a hairline; obvious the moment the
-   wire lit up behind it. */
-
-/* Constant motion, so linear — an eased pulse would read as accelerating traffic. */
-@keyframes travel {
-  from { transform: translateX(0); opacity: 0; }
-  10%  { opacity: 1; }
-  90%  { opacity: 1; }
-  to   { transform: translateX(calc(100cqw - 7px)); opacity: 0; }
-}
-/* The gate is the one accent on this screen. It was previously drawn exactly like the boxes on
-   either side of it, which left the thing the whole application is named for as the least
-   prominent element in its own diagram. */
-.hub {
+.board-card { padding: var(--s5) var(--s4) var(--s4); }
+.board {
   position: relative;
-  background: var(--panel-2);
-  border: 1px solid color-mix(in srgb, var(--am) 38%, var(--line-strong));
-  border-radius: var(--r-lg);
-  padding: var(--s4) var(--s5); text-align: center; min-width: 168px;
-  transition: border-color 200ms var(--ease-out);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  /* The traces need somewhere to run. Most of the width goes to the gaps rather than to the
+     rails, because the routing between the chip and a tile is the part that says what this is. */
+  column-gap: clamp(56px, 11vw, 168px);
+  row-gap: clamp(40px, 6vw, 72px);
 }
-.hub::before {
-  content: ""; position: absolute; inset: -20px; border-radius: calc(var(--r-lg) + 20px);
+
+.board-wires {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  overflow: visible; pointer-events: none;
+}
+
+.rail { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
+.rail.left { grid-column: 1; align-items: stretch; }
+.rail.right { grid-column: 3; align-items: stretch; }
+.rail.bottom {
+  grid-column: 1 / -1; grid-row: 2;
+  flex-direction: row; flex-wrap: wrap; justify-content: center; gap: var(--s3);
+}
+.rail-head {
+  color: var(--mut); font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em;
+  font-weight: 600; margin-bottom: calc(var(--s1) * -1);
+}
+.rail.right .rail-head { text-align: right; }
+
+/* ---- Tiles ---- */
+
+.tile {
+  position: relative; z-index: 1;
+  display: flex; align-items: center; gap: var(--s3); min-width: 0;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 10px var(--s3); font: inherit; color: var(--tx); text-align: left; cursor: pointer;
+  transition: border-color 180ms var(--ease-out), background 180ms var(--ease-out),
+              transform 180ms var(--ease-out);
+  animation: tile-in 320ms var(--ease-out) both; animation-delay: var(--d, 0ms);
+}
+.rail.left .tile { animation-name: tile-in-left; }
+.rail.right .tile { animation-name: tile-in-right; }
+.rail.bottom .tile { flex: 0 1 auto; }
+
+@media (hover: hover) and (pointer: fine) {
+  .tile:hover { border-color: var(--line-strong); background: var(--in); }
+}
+.tile:active { transform: scale(.985); }
+.tile:focus-visible { outline: 2px solid var(--am); outline-offset: 2px; }
+/* State indication when this tile is part of a call. */
+.tile.lit {
+  border-color: var(--am);
+  background: color-mix(in srgb, var(--am) 8%, var(--panel-2));
+}
+
+.tile-icon { flex: none; width: 20px; height: 20px; color: var(--mut); }
+.tile-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.4;
+                 stroke-linecap: round; stroke-linejoin: round; }
+.tile:hover .tile-icon, .tile.lit .tile-icon { color: var(--am); }
+.tile-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.tile-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tile-sub { color: var(--mut); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty-tile { border-style: dashed; }
+
+/* ---- The chip ---- */
+
+/* Three layers, like the thing it is drawn after: a package, the dark die inside it, and the
+   core carrying the marking. The package is a hairline of the accent rather than a slab of it —
+   at ten pixels it stopped reading as a chip and started reading as a picture frame. */
+.chip {
+  position: relative; z-index: 1; justify-self: center;
+  padding: 5px; border-radius: 16px;
+  background: linear-gradient(155deg,
+    color-mix(in srgb, var(--am) 42%, transparent),
+    color-mix(in srgb, var(--am) 12%, transparent));
+  animation: chip-in 340ms var(--ease-out) both; animation-delay: var(--d, 0ms);
+}
+/* The aura. Static: something you sit looking at should not breathe. */
+.chip::before {
+  content: ""; position: absolute; inset: -26px; border-radius: 46px; pointer-events: none;
   background: radial-gradient(ellipse at center,
-    color-mix(in srgb, var(--am) 13%, transparent), transparent 70%);
-  pointer-events: none; opacity: .8;
+    color-mix(in srgb, var(--am) 16%, transparent), transparent 70%);
+  opacity: .85;
   transition: opacity 220ms var(--ease-out), transform 220ms var(--ease-out);
 }
-/* The aura blooms while a call is passing through. Feedback, tied to something that actually
-   happened — which is the only reason the gate is allowed to move at all on a screen you sit
-   looking at. */
-.hub.lit::before { opacity: 1; transform: scale(1.07); }
-.hub > * { position: relative; }
-.hub .name { font-weight: 650; }
-.hub .dot { display: inline-block; margin-right: 6px; vertical-align: middle; }
-.hub .pill { display: inline-block; margin-top: var(--s2); }
-.hub.lit { border-color: var(--am); }
+.chip.lit::before { opacity: 1; transform: scale(1.07); }
+.chip-die {
+  position: relative;
+  background: var(--bg); border-radius: 12px; padding: 7px;
+  border: 1px solid color-mix(in srgb, var(--am) 28%, transparent);
+}
+.chip-core {
+  background: var(--panel-2);
+  border: 1px solid color-mix(in srgb, var(--am) 16%, var(--line));
+  border-radius: 7px; padding: var(--s5) var(--s5); text-align: center; min-width: 186px;
+}
+.chip-name { font-weight: 650; white-space: nowrap; }
+.chip-name .dot { display: inline-block; margin-right: 6px; vertical-align: middle; }
+.chip-meta {
+  color: var(--mut); font-size: 11px; margin-top: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.chip-core .pill { display: inline-block; margin-top: var(--s2); }
 
-/* A halo leaving the status dot, once every three seconds. The only ambient motion on the
-   screen, and it answers the only question a glance at this page is really asking: is it up.
-   Slow and faint by design — anything you can watch is too much for something permanent. */
-.hub .dot.green { position: relative; }
-.hub .dot.green::after {
+/* A halo leaving the status dot, once every three seconds. The only ambient motion besides the
+   drift, and it answers the only question a glance at this page is really asking: is it up. */
+.chip .dot.green { position: relative; }
+.chip .dot.green::after {
   content: ""; position: absolute; inset: 0; border-radius: 50%;
   background: var(--ok); animation: alive 3s var(--ease-out) infinite;
 }
 @keyframes alive {
   0%   { opacity: .45; transform: scale(1); }
-  70%  { opacity: 0; transform: scale(2.6); }
-  100% { opacity: 0; transform: scale(2.6); }
+  70%, 100% { opacity: 0; transform: scale(2.6); }
 }
-
-/* The one loop that is meant to be noticed: something is waiting on a person. */
-.hub .pill.hot { animation: waiting 2.2s ease-in-out infinite; }
+/* The one loop meant to be noticed: something is waiting on a person. */
+.chip .pill.hot { animation: waiting 2.2s ease-in-out infinite; }
 @keyframes waiting { 0%, 100% { opacity: 1; } 50% { opacity: .58; } }
 
-/* ---- The flow assembling ------------------------------------------------------
-   Left column, then the gate, then the right column — the order a call travels. Delays come
-   from the markup because the number of rows is data, not a constant; each is set on the
-   element it delays, never read from a parent to drive children. */
-.flow-side.left .flow-row  { animation: flow-in-left 320ms var(--ease-out) both; animation-delay: var(--d, 0ms); }
-.flow-side.right .flow-row { animation: flow-in-right 320ms var(--ease-out) both; animation-delay: var(--d, 0ms); }
-.flow-side .node:not(.flow-row .node) { animation: flow-in-left 320ms var(--ease-out) both; }
-.hub { animation: gate-in 340ms var(--ease-out) both; animation-delay: var(--d, 0ms); }
+/* ---- Traces ---- */
 
-/* The line draws from the box it leaves toward the gate, arriving just before its arrowhead
-   fades in — so a connection is made rather than declared. */
-.wire::before { transform-origin: left center; animation: wire-draw 300ms var(--ease-out) both; animation-delay: var(--d, 0ms); }
-.wire::after { animation: tip-in 200ms var(--ease-out) both; animation-delay: calc(var(--d, 0ms) + 230ms); }
+.trace {
+  fill: none; stroke: color-mix(in srgb, var(--am) 30%, var(--line-strong)); stroke-width: 1.5;
+  stroke-dasharray: var(--len) var(--len); stroke-dashoffset: var(--len);
+  animation: trace-draw 420ms var(--ease-out) both; animation-delay: var(--d, 0ms);
+}
+@keyframes trace-draw { to { stroke-dashoffset: 0; } }
 
-@keyframes flow-in-left  { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
-@keyframes flow-in-right { from { opacity: 0; transform: translateX(12px); }  to { opacity: 1; transform: none; } }
-@keyframes gate-in       { from { opacity: 0; transform: scale(.96); }        to { opacity: 1; transform: none; } }
-@keyframes wire-draw     { from { transform: scaleX(0); }                     to { transform: scaleX(1); } }
-@keyframes tip-in        { from { opacity: 0; }                               to { opacity: 1; } }
+/* A faint dash drifting outward while nothing is happening. Deliberately not a signal: no
+   colour, a third of the trace's weight, and gone while a call is on the wire. */
+.trace-drift {
+  fill: none; stroke: var(--am); stroke-width: 1.6; stroke-linecap: round;
+  stroke-dasharray: 22 calc(var(--len) - 22);
+  opacity: .5;
+  animation: drift 3.2s linear infinite;
+}
+@keyframes drift { from { stroke-dashoffset: var(--len); } to { stroke-dashoffset: 0; } }
 
-@media (max-width: 720px) {
-  /* Stacked, and the wires stop earning their space. */
-  .flow { grid-template-columns: 1fr; }
-  .flow-side.left, .flow-side.right { grid-template-columns: minmax(0, 1fr); }
-  .flow .wire { display: none; }
-  .hub { margin: var(--s3) 0; }
+/* A call. Brighter, faster, once — and it takes the colour of what happened. */
+.trace-spark {
+  fill: none; stroke: transparent; stroke-width: 2; stroke-linecap: round;
+  stroke-dasharray: 34 calc(var(--len) - 34);
+  stroke-dashoffset: var(--len);
+}
+.trace-spark.run { animation: drift 700ms linear; }
+.trace-spark.run.ok { stroke: var(--ok); }
+.trace-spark.run.err { stroke: var(--bad); }
+.trace-spark.run.held { stroke: var(--am); }
+.board:has(.trace-spark.run) .trace-drift { opacity: .08; }
+.board.paused .trace-drift { animation-play-state: paused; opacity: .1; }
+
+@keyframes tile-in-left  { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
+@keyframes tile-in-right { from { opacity: 0; transform: translateX(12px); }  to { opacity: 1; transform: none; } }
+@keyframes tile-in       { from { opacity: 0; transform: translateY(10px); }  to { opacity: 1; transform: none; } }
+@keyframes chip-in       { from { opacity: 0; transform: scale(.96); }        to { opacity: 1; transform: none; } }
+
+@media (max-width: 780px) {
+  /* Stacked, and the traces stop earning their space. */
+  .board { grid-template-columns: minmax(0, 1fr); row-gap: var(--s4); }
+  .rail.left, .rail.right, .chip { grid-column: 1; }
+  .rail.bottom { grid-row: auto; }
+  .board-wires { display: none; }
+  .rail.right .rail-head { text-align: left; }
 }
 
 /* ---- Reduced motion ----------------------------------------------------------
@@ -449,23 +458,19 @@ pre {
   *, *::before, *::after { transition-duration: 1ms !important; }
   button:active { transform: none; }
   .node.lit { transform: none; }
-  .wire .pulse {
-    animation: flash 400ms ease forwards;
-    left: 0; right: 0; width: auto; height: 1px; border-radius: 1px; box-shadow: none;
-  }
-  .wire .pulse::before { display: none; }
+  /* A dash travelling a wire is the wrong idea when motion is unwelcome; the trace still says
+     a call happened, by lighting along its whole length and fading. */
+  .trace-spark.run { animation: flash 400ms ease; stroke-dasharray: none; stroke-dashoffset: 0; }
   @keyframes flash { from { opacity: 0; } 40% { opacity: 1; } to { opacity: 0; } }
 
   /* Fewer and gentler, not none: the flow still assembles in order, because that ordering is
      what explains the picture — it just arrives by fading rather than by moving. The two
      ambient loops go entirely; neither carries information a still frame cannot. */
-  .flow-side.left .flow-row, .flow-side.right .flow-row, .hub {
-    animation-name: fade-in; animation-duration: 200ms;
-  }
-  .wire::before { animation: none; transform: none; }
-  .wire::after { animation-name: fade-in; }
-  .hub .dot.green::after { animation: none; opacity: 0; }
-  .hub .pill.hot { animation: none; }
+  .tile, .chip { animation-name: fade-in; animation-duration: 200ms; }
+  .trace { animation: none; stroke-dashoffset: 0; }
+  .trace-drift { animation: none; opacity: 0; }
+  .chip .dot.green::after { animation: none; opacity: 0; }
+  .chip .pill.hot { animation: none; }
   @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 }
 
@@ -593,27 +598,15 @@ pre {
    line's own opacity, and gone entirely for as long as a call is crossing. Transform only, so
    it costs a composite and nothing else however many wires there are. */
 
-.flux {
-  position: absolute; left: 0; top: 50%; width: 34px; height: 1px;
-  margin-top: -0.5px; pointer-events: none;
-  background: linear-gradient(to right, transparent,
-    color-mix(in srgb, var(--tx) 45%, transparent), transparent);
-  opacity: .32;
-  will-change: transform;
-  animation: drift 3.2s linear infinite;
-}
 @keyframes drift {
   from { transform: translateX(-34px); }
   to   { transform: translateX(100cqw); }
 }
 /* A call outranks it. Hidden rather than dimmed: two things moving along one line at different
    speeds is the one reading that would be worse than either alone. */
-.wire.live .flux { opacity: 0; }
 /* A paused gateway is not carrying anything, and should not look as though it is. */
-.flow.paused .flux { animation-play-state: paused; opacity: .12; }
 
 @media (prefers-reduced-motion: reduce) {
-  .flux { display: none; }
 }
 
 /* ---- Grant picker: the head row -----------------------------------------------------

@@ -280,7 +280,7 @@ async function renderHeader(): Promise<Snapshot> {
 /// Compared against the string we intended to write rather than `el.innerHTML`, which comes
 /// back re-serialised by the browser — attribute order and quoting differ, so that comparison
 /// would never match and every repaint would happen anyway.
-const painted = new WeakMap<HTMLElement, string>();
+const painted = new WeakMap<Element, string>();
 
 /// Write `html` into `el`, but only if it differs from what is already there.
 ///
@@ -289,7 +289,7 @@ const painted = new WeakMap<HTMLElement, string>();
 /// changed, which is almost all of them. Returning whether anything was written also keeps
 /// handlers correct: the caller re-attaches them only when the elements are new, instead of
 /// stacking a second listener on every surviving button.
-function paint(el: HTMLElement, html: string): boolean {
+function paint(el: Element, html: string): boolean {
   if (painted.get(el) === html) return false;
   painted.set(el, html);
   // A repaint that does happen still should not move the page under the reader. `main` is the
@@ -315,18 +315,6 @@ function paint(el: HTMLElement, html: string): boolean {
 /// or a service without re-querying the whole screen.
 let flowRows: { callers: string[]; services: string[] } = { callers: [], services: [] };
 
-function flowNode(title: string, sub: string): string {
-  return `<div class="node">
-    <code class="who">${esc(title)}</code>
-    <span class="meta who">${esc(sub)}</span>
-  </div>`;
-}
-
-/// The last handful of calls.
-///
-/// The flow only speaks while you are watching it; this says what happened before you opened
-/// the window, which is most of the time. Deliberately short — the Live log is the place to
-/// actually read, and a home page that reprints it has two of the same screen.
 function recentHtml(rows: RequestLog[]): string {
   if (rows.length === 0) {
     return `<div class="card">
@@ -352,26 +340,20 @@ function recentHtml(rows: RequestLog[]): string {
   </div>`;
 }
 
-/// The faint band that drifts along a wire while nothing is happening.
-///
-/// Motion on something permanently on screen has to be near-imperceptible or it becomes noise,
-/// so this is deliberately not a signal: no dot, no colour, a third of the opacity of the line
-/// it travels. It says the paths are live. A real call says everything else, and outranks it —
-/// the band hides for as long as one is crossing, so the two can never be confused.
-///
-/// Offset per row, because several wires pulsing in lockstep reads as one mechanism ticking
-/// rather than as separate paths.
-function flux(i: number): string {
-  return `<i class="flux" style="animation-delay:-${(i * 900) % 3200}ms"></i>`;
-}
-
-/// How far apart the flow's pieces arrive. Under the 30–80ms band that reads as a group
+/// How far apart the board's pieces arrive. Under the 30-80ms band that reads as a group
 /// assembling rather than a queue forming.
 const STAGGER_MS = 45;
 
+/// The board: one chip in the middle, everything that talks to it around the edge.
+///
+/// It is drawn as a real layout rather than a picture — every tile is a button that goes to the
+/// screen where you do something about it, so the diagram is the navigation rather than an
+/// illustration beside it. The traces are drawn afterwards, by measuring where the tiles
+/// actually landed: their widths depend on the text, and a hand-placed line would be wrong the
+/// moment an identity had a longer name than the one it was drawn for.
 function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
-  // Callers worth drawing: anything holding a live token, plus the owner. A client whose
-  // every token is revoked is not currently a caller, and drawing it would overstate.
+  // Callers worth drawing: anything holding a live token, plus the owner. A client whose every
+  // token is revoked is not currently a caller, and drawing it would overstate.
   const callers = clients.filter(
     (c) => c.identity === access.owner || c.tokens.some((t) => !t.revoked_at),
   );
@@ -380,8 +362,6 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
     services: snap.upstreams.map((u) => u.name),
   };
 
-  // Node and wire share a grid row, so the line always meets the box it belongs to —
-  // two independent columns would drift apart the moment one side had taller content.
   const left = callers.length
     ? callers
         .map((c, i) => {
@@ -389,91 +369,276 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
           const what = allowed.some((r) => r.tool === "*")
             ? "every tool"
             : `${allowed.length} tool${allowed.length === 1 ? "" : "s"}`;
-          const d = i * STAGGER_MS;
-          return `<div class="flow-row" data-caller="${esc(c.identity)}" style="--d:${d}ms">
-              ${flowNode(c.identity, c.identity === access.owner ? "super token" : what)}
-            </div>
-            <div class="wire" data-caller="${esc(c.identity)}" style="--d:${d + 90}ms"
-                 >${flux(i)}</div>`;
+          return tile({
+            icon: c.identity === access.owner ? "key" : "client",
+            label: c.identity,
+            sub: c.identity === access.owner ? "super token" : what,
+            goto: "upstream",
+            attr: `data-caller="${esc(c.identity)}"`,
+            delay: i * STAGGER_MS,
+          });
         })
         .join("")
-    : `<div class="node"><span class="meta">Nothing yet. Issue a token on the Upstream tab.</span></div>
-       <div class="wire"></div>`;
-
-  // The gate lands after the last caller's wire reaches it, and the services after the gate —
-  // the order a call actually travels, which is the only reason the entrance is worth having.
-  const gateAt = Math.max(0, callers.length - 1) * STAGGER_MS + 150;
+    : emptyTile("No clients yet", "Issue a token", "upstream");
 
   const right = snap.upstreams.length
     ? snap.upstreams
         .map((u, i) => {
           const n = snap.tools.filter((t) => t.upstream === u.name).length;
-          const d = gateAt + 130 + i * STAGGER_MS;
-          return `<div class="wire back" data-service="${esc(u.name)}" style="--d:${d}ms"
-                 >${flux(i + 1)}</div>
-            <div class="flow-row" data-service="${esc(u.name)}" style="--d:${d + 90}ms">
-              ${flowNode(u.target, `${u.kind} · ${n} tool${n === 1 ? "" : "s"}`)}
-            </div>`;
+          return tile({
+            icon: u.kind.toLowerCase().includes("mcp") ? "mcp" : "api",
+            label: u.target,
+            sub: `${u.kind} · ${n} tool${n === 1 ? "" : "s"}`,
+            goto: "actions",
+            attr: `data-service="${esc(u.name)}"`,
+            delay: i * STAGGER_MS,
+          });
         })
         .join("")
-    : `<div class="wire back"></div>
-       <div class="node"><span class="meta">Nothing yet. Add one on the Downstream tab.</span></div>`;
+    : emptyTile("No services yet", "Add a downstream", "actions");
 
   const local = snap.tools.filter((t) => !t.upstream).length;
+  const live = access.tokens.filter((t) => !t.revoked_at).length;
 
-  return `<div class="card">
-    <div class="flow${snap.running ? "" : " paused"}">
-      <div class="flow-side left">
-        <div class="flow-head">Upstream clients</div><div></div>
+  // Underneath: the parts of the gateway that are neither a caller nor a service. One tile per
+  // remaining screen, so between the three rails every tab is one click from the picture that
+  // explains what it is for.
+  const bottom = [
+    tile({ icon: "token", label: "Tokens", sub: `${live} live`, goto: "upstream", delay: 0 }),
+    tile({
+      icon: "script",
+      label: "Scripts & tools",
+      sub: `${snap.tools.length} exposed${local ? `, ${local} local` : ""}`,
+      goto: "actions",
+      delay: STAGGER_MS,
+    }),
+    tile({ icon: "globe", label: "Reach", sub: snap.auth, goto: "network", delay: STAGGER_MS * 2 }),
+    tile({ icon: "log", label: "Live log", sub: "every call, kept", goto: "log", delay: STAGGER_MS * 3 }),
+  ].join("");
+
+  const gateAt =
+    Math.max(0, Math.max(callers.length, snap.upstreams.length) - 1) * STAGGER_MS + 150;
+
+  return `<div class="card board-card">
+    <div class="board${snap.running ? "" : " paused"}">
+      <svg class="board-wires" aria-hidden="true"></svg>
+      <div class="rail left">
+        <div class="rail-head">Upstream clients</div>
         ${left}
       </div>
-      <div class="hub" id="flow-hub" style="--d:${gateAt}ms">
-        <div><span class="dot ${esc(snap.colour)}"></span><span class="name">MCP Gatehound</span></div>
-        <div class="meta">${esc(snap.listen_addr)}</div>
-        <div class="meta">${esc(snap.auth)}</div>
-        ${snap.pending ? `<div class="pill hot" style="margin-top:6px">${snap.pending} waiting</div>` : ""}
+      <div class="chip" id="flow-hub" style="--d:${gateAt}ms">
+        <div class="chip-die">
+          <div class="chip-core">
+            <div class="chip-name"><span class="dot ${esc(snap.colour)}"></span>MCP Gatehound</div>
+            <div class="chip-meta">${esc(snap.listen_addr)}</div>
+            ${snap.pending ? `<span class="pill hot">${snap.pending} waiting</span>` : ""}
+          </div>
+        </div>
       </div>
-      <div class="flow-side right">
-        <div></div><div class="flow-head">Downstream tools</div>
+      <div class="rail right">
+        <div class="rail-head">Downstream tools</div>
         ${right}
       </div>
-    </div>
-    <div class="meta" style="margin-top:12px">
-      ${snap.tools.length} tool${snap.tools.length === 1 ? "" : "s"} exposed${
-        local ? `, ${local} of them local commands` : ""
-      }. The wires drift while they are idle; a dot crosses one when a call actually does.
+      <div class="rail bottom">${bottom}</div>
     </div>
   </div>`;
 }
+
+/// One tile on the board. A button, not a box: every one of them goes somewhere.
+function tile(o: {
+  icon: string;
+  label: string;
+  sub: string;
+  goto: string;
+  attr?: string;
+  delay: number;
+}): string {
+  return `<button class="tile" data-goto="${esc(o.goto)}" ${o.attr ?? ""} style="--d:${o.delay}ms"
+    title="${esc(o.label)} — open ${esc(TAB_NAMES[o.goto] ?? o.goto)}">
+    <span class="tile-icon">${ICONS[o.icon] ?? ""}</span>
+    <span class="tile-text">
+      <span class="tile-label">${esc(o.label)}</span>
+      <span class="tile-sub">${esc(o.sub)}</span>
+    </span>
+  </button>`;
+}
+
+function emptyTile(label: string, sub: string, goto: string): string {
+  return `<button class="tile empty-tile" data-goto="${esc(goto)}" style="--d:0ms">
+    <span class="tile-icon">${ICONS.plus}</span>
+    <span class="tile-text">
+      <span class="tile-label">${esc(label)}</span>
+      <span class="tile-sub">${esc(sub)}</span>
+    </span>
+  </button>`;
+}
+
+const TAB_NAMES: Record<string, string> = {
+  home: "Home",
+  upstream: "Upstream",
+  actions: "Downstream",
+  network: "Network",
+  log: "Live log",
+};
+
+/// Line icons, one weight, drawn on a 20x20 box. Inline because half a dozen files of two
+/// hundred bytes each is half a dozen requests to save nothing.
+const ICONS: Record<string, string> = {
+  client: `<svg viewBox="0 0 20 20"><rect x="2.5" y="4" width="15" height="10" rx="1.6"/><path d="M7 17h6M10 14v3"/></svg>`,
+  key: `<svg viewBox="0 0 20 20"><circle cx="7" cy="10" r="3.2"/><path d="M10.2 10H17M14.4 10v2.6M17 10v2"/></svg>`,
+  mcp: `<svg viewBox="0 0 20 20"><rect x="2.5" y="3" width="15" height="14" rx="2"/><path d="M6 7.5h8M6 10.5h8M6 13.5h4"/></svg>`,
+  api: `<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.2"/><path d="M2.8 10h14.4"/><path d="M10 2.8c1.9 2 2.9 4.5 2.9 7.2s-1 5.2-2.9 7.2c-1.9-2-2.9-4.5-2.9-7.2s1-5.2 2.9-7.2z"/></svg>`,
+  token: `<svg viewBox="0 0 20 20"><path d="M10 2.6l6 2.6v4.4c0 3.6-2.5 6.4-6 7.8-3.5-1.4-6-4.2-6-7.8V5.2z"/><path d="M7.6 10l1.8 1.8 3.2-3.4"/></svg>`,
+  script: `<svg viewBox="0 0 20 20"><path d="M7.4 5.6L3.6 10l3.8 4.4M12.6 5.6L16.4 10l-3.8 4.4M11.2 4.4l-2.4 11.2"/></svg>`,
+  globe: `<svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.2"/><path d="M2.8 10h14.4"/><path d="M10 2.8c1.9 2 2.9 4.5 2.9 7.2s-1 5.2-2.9 7.2"/><path d="M10 2.8c-1.9 2-2.9 4.5-2.9 7.2s1 5.2 2.9 7.2"/></svg>`,
+  log: `<svg viewBox="0 0 20 20"><path d="M4 5.5h12M4 10h12M4 14.5h7"/></svg>`,
+  plus: `<svg viewBox="0 0 20 20"><path d="M10 4.5v11M4.5 10h11"/></svg>`,
+};
 
 /// Send one dot down a wire. Called from a real request, never from a timer.
 ///
 /// A fresh element per call rather than restarting one animation: two requests a moment
 /// apart are two dots, and retargeting a single keyframe animation would make the second
 /// one snap back to the start.
+/// Send a spark along one trace.
+///
+/// A dash swept along the measured path rather than a dot positioned by hand: the traces bend,
+/// and anything travelling them has to bend with them.
 function pulse(sel: string, kind: string, delayMs: number): void {
-  const wire = document.querySelector<HTMLElement>(sel);
-  if (!wire) return;
+  const path = document.querySelector<SVGPathElement>(`.trace-spark${sel}`);
+  if (!path) return;
   window.setTimeout(() => {
-    const dot = document.createElement("span");
-    dot.className = `pulse ${kind}`;
-    // The line takes the call's colour while the dot is on it. Seven pixels moving along a
-    // hundred is easy to miss; a line that lights up is not, and it says which of several
-    // callers this was without anything having to be read.
-    wire.classList.add("live", kind);
-    dot.addEventListener(
-      "animationend",
-      () => {
-        dot.remove();
-        wire.classList.remove("live", kind);
-      },
-      { once: true },
-    );
-    wire.appendChild(dot);
+    path.classList.remove("run", "ok", "err", "held");
+    // Reading a layout property between removing and adding restarts the animation; without it
+    // a second call while the first is still running would be ignored.
+    void path.getBoundingClientRect();
+    path.classList.add("run", kind);
+    const done = (): void => path.classList.remove("run", kind);
+    path.addEventListener("animationend", done, { once: true });
   }, delayMs);
 }
 
 /// Briefly mark a node as part of the call in flight.
+/// Every tile is a way in to the screen that owns it.
+function wireBoard(): void {
+  for (const b of Array.from(document.querySelectorAll<HTMLElement>(".board [data-goto]"))) {
+    b.addEventListener("click", () => void show(b.dataset.goto!));
+  }
+}
+
+/// Draw the traces once the tiles have landed.
+///
+/// Measured, not declared. Tile widths come from their text, the rails wrap differently at
+/// different window widths, and a line placed by hand would be wrong the first time somebody
+/// had a long hostname. Runs after every paint of the board and on resize.
+function drawBoard(): void {
+  const board = document.querySelector<HTMLElement>(".board");
+  const svg = board?.querySelector<SVGSVGElement>(".board-wires");
+  const chip = board?.querySelector<HTMLElement>(".chip");
+  if (!board || !svg || !chip) return;
+
+  const b = board.getBoundingClientRect();
+  const c = chip.getBoundingClientRect();
+  svg.setAttribute("viewBox", `0 0 ${b.width} ${b.height}`);
+  const rel = (r: DOMRect) => ({
+    l: r.left - b.left, r: r.right - b.left, t: r.top - b.top, bo: r.bottom - b.top,
+    cx: r.left + r.width / 2 - b.left, cy: r.top + r.height / 2 - b.top,
+  });
+  const chipBox = rel(c);
+
+  type Leg = { d: string; attr: string; delay: number };
+  const legs: Leg[] = [];
+
+  const sides: [string, "left" | "right"][] = [
+    [".rail.left .tile", "left"],
+    [".rail.right .tile", "right"],
+  ];
+  for (const [sel, side] of sides) {
+    const tiles = Array.from(board.querySelectorAll<HTMLElement>(sel));
+    tiles.forEach((el, i) => {
+      const t = rel(el.getBoundingClientRect());
+      // Fan the attachment points down the chip's edge rather than piling them on one spot —
+      // two traces meeting at the same pixel read as one line that forked.
+      const y = chipBox.t + ((i + 1) * (chipBox.bo - chipBox.t)) / (tiles.length + 1);
+      const from = side === "left" ? { x: t.r, y: t.cy } : { x: chipBox.r, y };
+      const to = side === "left" ? { x: chipBox.l, y } : { x: t.l, y: t.cy };
+      legs.push({
+        d: elbow(from, to),
+        attr: el.dataset.caller
+          ? `data-caller="${el.dataset.caller}"`
+          : el.dataset.service
+            ? `data-service="${el.dataset.service}"`
+            : "",
+        delay: i * STAGGER_MS,
+      });
+    });
+  }
+
+  const bottom = Array.from(board.querySelectorAll<HTMLElement>(".rail.bottom .tile"));
+  bottom.forEach((el, i) => {
+    const t = rel(el.getBoundingClientRect());
+    const x = chipBox.l + ((i + 1) * (chipBox.r - chipBox.l)) / (bottom.length + 1);
+    legs.push({ d: vElbow({ x, y: chipBox.bo }, { x: t.cx, y: t.t }), attr: "", delay: i * STAGGER_MS });
+  });
+
+  // Two paths per leg: the trace itself, and a faint dash drifting along it. A call adds a
+  // third, briefly.
+  // Through `paint`, so a redraw with the same geometry changes nothing. Resizing fires this
+  // repeatedly, and rewriting identical paths would restart every trace's draw-in animation.
+  const drawn = paint(
+    svg,
+    legs
+      .map(
+        (l) =>
+          `<path class="trace" d="${l.d}" style="--d:${l.delay}ms"/>` +
+          `<path class="trace-drift" d="${l.d}" style="animation-delay:-${(l.delay * 7) % 3200}ms"/>` +
+          `<path class="trace-spark" ${l.attr} d="${l.d}"/>`,
+      )
+      .join(""),
+  );
+  if (!drawn) return;
+
+  // Dash animations need the length in user units, and only the browser knows it.
+  for (const path of Array.from(svg.querySelectorAll<SVGPathElement>("path"))) {
+    path.style.setProperty("--len", String(Math.round(path.getTotalLength())));
+  }
+}
+
+/// A horizontal orthogonal run: out, across, in — with quarter-arc corners rather than
+/// mitres, because a right angle drawn sharp reads as a mistake at this weight.
+function elbow(a: { x: number; y: number }, z: { x: number; y: number }): string {
+  const midX = (a.x + z.x) / 2;
+  if (Math.abs(a.y - z.y) < 1) return `M${a.x},${a.y} L${z.x},${z.y}`;
+  // Clamped by both runs. Taking `|| 10` when one of them was zero let the radius exceed the
+  // segment it had to fit inside, and the arc overshot into a stub that connected nothing.
+  const r = Math.max(0, Math.min(10, Math.abs(z.y - a.y) / 2, Math.abs(z.x - a.x) / 2));
+  const dy = Math.sign(z.y - a.y);
+  const dx = Math.sign(z.x - a.x);
+  return (
+    `M${a.x},${a.y} L${midX - r * dx},${a.y}` +
+    ` Q${midX},${a.y} ${midX},${a.y + r * dy}` +
+    ` L${midX},${z.y - r * dy}` +
+    ` Q${midX},${z.y} ${midX + r * dx},${z.y}` +
+    ` L${z.x},${z.y}`
+  );
+}
+
+/// The same run turned through ninety degrees, for the rail underneath.
+function vElbow(a: { x: number; y: number }, z: { x: number; y: number }): string {
+  const midY = (a.y + z.y) / 2;
+  if (Math.abs(a.x - z.x) < 1) return `M${a.x},${a.y} L${z.x},${z.y}`;
+  const r = Math.max(0, Math.min(10, Math.abs(z.x - a.x) / 2, Math.abs(z.y - a.y) / 2));
+  const dx = Math.sign(z.x - a.x);
+  const dy = Math.sign(z.y - a.y);
+  return (
+    `M${a.x},${a.y} L${a.x},${midY - r * dy}` +
+    ` Q${a.x},${midY} ${a.x + r * dx},${midY}` +
+    ` L${z.x - r * dx},${midY}` +
+    ` Q${z.x},${midY} ${z.x},${midY + r * dy}` +
+    ` L${z.x},${z.y}`
+  );
+}
+
 function light(sel: string, delayMs: number): void {
   const el = document.querySelector<HTMLElement>(sel);
   if (!el) return;
@@ -495,16 +660,16 @@ function traceRequest(row: RequestLog): void {
 
   const caller = row.identity ?? "";
   if (caller && flowRows.callers.includes(caller)) {
-    pulse(`.wire[data-caller="${CSS.escape(caller)}"]`, kind, 0);
-    light(`.flow-row[data-caller="${CSS.escape(caller)}"] .node`, 0);
+    pulse(`[data-caller="${CSS.escape(caller)}"]`, kind, 0);
+    light(`.tile[data-caller="${CSS.escape(caller)}"]`, 0);
   }
   light("#flow-hub", 250);
 
   // Denied and held calls never reach a service, so nothing should suggest they did.
   const service = row.upstream ?? "";
   if (kind === "ok" && service && flowRows.services.includes(service)) {
-    pulse(`.wire.back[data-service="${CSS.escape(service)}"]`, kind, 700);
-    light(`.flow-row[data-service="${CSS.escape(service)}"] .node`, 1200);
+    pulse(`[data-service="${CSS.escape(service)}"]`, kind, 700);
+    light(`.tile[data-service="${CSS.escape(service)}"]`, 1200);
   }
 }
 
@@ -523,7 +688,11 @@ async function renderHome(snap: Snapshot): Promise<void> {
     $("#home"),
     `<div id="home-flow"></div><div id="approvals"></div><div id="home-recent"></div>`,
   );
-  paint($("#home-flow"), flowHtml(snap, clientsOf(rules, access), access));
+  if (paint($("#home-flow"), flowHtml(snap, clientsOf(rules, access), access))) {
+    wireBoard();
+    // After layout, not during it: the traces are measured off where the tiles ended up.
+    requestAnimationFrame(drawBoard);
+  }
   // Under the flow: the diagram is what the screen is, and an approval is something that
   // happened within it. It lived on Upstream, one tab away from the page people actually leave
   // open, which is the wrong place for the one thing with a clock running on it — but the
@@ -3273,6 +3442,9 @@ void listen<string>("navigate", (e) => void show(e.payload));
 
 void show("home");
 syncTabBar("jump");
-window.addEventListener("resize", () => syncTabBar("jump"));
+window.addEventListener("resize", () => {
+  syncTabBar("jump");
+  drawBoard();
+});
 // A slow safety net for anything an event did not cover (a timed-out hold, say).
 setInterval(() => void refresh(), 5000);
