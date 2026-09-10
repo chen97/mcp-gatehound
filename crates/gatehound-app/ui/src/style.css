@@ -535,3 +535,35 @@ pre {
 
 .pill.good { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent);
              background: color-mix(in srgb, var(--ok) 10%, transparent); }
+
+/* ---- Two-level grant picker ---------------------------------------------------------
+   The service is the unit of the decision; its tools stay individually revocable underneath.
+   The nesting is drawn with one rule and one indent — a box inside a box would make a simple
+   list look like a form. */
+
+.grant-group { margin-top: var(--s3); }
+.grant-group .check.group { margin-top: 0; background: var(--panel-2); }
+.grant-group .check.group:has(input:checked),
+.grant-group .check.group:has(input:indeterminate) {
+  border-color: color-mix(in srgb, var(--am) 45%, transparent);
+}
+/* Partly granted is its own answer and has to look like one: the same amber as a full grant,
+   but hollow, so "some of these" never reads as "all of these" at a glance. */
+.grant-group .check.group input:indeterminate { accent-color: var(--am); opacity: .75; }
+
+.grant-tools {
+  margin-left: var(--s4);
+  padding-left: var(--s4);
+  border-left: 1px solid var(--line);
+}
+.grant-tools .check.sub {
+  margin-top: var(--s1);
+  padding: var(--s2) var(--s3);
+  border-color: transparent;
+  background: none;
+}
+.grant-tools .check.sub:hover { border-color: var(--line); }
+.grant-tools .check.sub:has(input:checked) { border-color: color-mix(in srgb, var(--am) 30%, transparent); }
+
+.check .grow { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.check .grow code { word-break: break-all; }

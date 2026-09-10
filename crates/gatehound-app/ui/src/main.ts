@@ -405,7 +405,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
   return `<div class="card">
     <div class="flow">
       <div class="flow-side left">
-        <div class="flow-head">Upstream</div><div></div>
+        <div class="flow-head">Upstream clients</div><div></div>
         ${left}
       </div>
       <div class="hub" id="flow-hub" style="--d:${gateAt}ms">
@@ -415,7 +415,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
         ${snap.pending ? `<div class="pill hot" style="margin-top:6px">${snap.pending} waiting</div>` : ""}
       </div>
       <div class="flow-side right">
-        <div></div><div class="flow-head">Downstream</div>
+        <div></div><div class="flow-head">Downstream tools</div>
         ${right}
       </div>
     </div>
@@ -491,16 +491,24 @@ function traceRequest(row: RequestLog): void {
 }
 
 async function renderHome(snap: Snapshot): Promise<void> {
-  const [rules, access, recent] = await Promise.all([
+  const [rules, access, recent, pending] = await Promise.all([
     invoke<IdentityRule[]>("identities"),
     invoke<Access>("access"),
     invoke<RequestLog[]>("requests", { limit: 6 }),
+    invoke<Pending[]>("pending"),
   ]);
   // Two containers, painted separately. The flow animates itself into place on the way in, and
   // a shared paint would replay that entrance every time a call landed in the list underneath —
   // the topology jumping about because something unrelated scrolled. Split, the list repaints
   // on its own and the diagram stays where it is.
-  paint($("#home"), `<div id="home-flow"></div><div id="home-recent"></div>`);
+  paint(
+    $("#home"),
+    `<div id="approvals"></div><div id="home-flow"></div><div id="home-recent"></div>`,
+  );
+  // Above the flow, because a call held for a decision is the only thing on this screen that
+  // is waiting on you. It lived on Upstream, one tab away from the page you actually leave
+  // open — which is the wrong place for the one thing with a clock running on it.
+  if (paint($("#approvals"), approvalsHtml(pending))) wireApprovals();
   paint($("#home-flow"), flowHtml(snap, clientsOf(rules, access), access));
   paint($("#home-recent"), recentHtml(recent));
 }
@@ -772,7 +780,8 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
          </div>`) +
     (draft || scriptDraft ? "" : renderPackPlanIfAny()) +
     (draft || scriptDraft ? "" : scriptsHtml(scriptList)) +
-    servicesHtml(snap, configFile);
+    servicesHtml(snap, configFile) +
+    (draft || scriptDraft ? "" : toolFaceCard(snap));
   if (!paint($("#actions"), html)) return;
 
   $("#c-open")?.addEventListener("click", () => {
@@ -790,6 +799,7 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
   if (draft) wireConnectForm();
   if (scriptDraft) wireScriptEditor();
   else wireScripts(scriptList);
+  wireToolFace();
   wirePackPanel();
 }
 
@@ -808,6 +818,7 @@ function isTyping(el: Element): boolean {
 
 function actionsAreBeingEdited(): boolean {
   if (!$("#actions").innerHTML) return false;
+  if (editingTool) return false;
   if (connDirty || scriptDirty) return true;
   const el = document.activeElement;
   return (
@@ -2165,6 +2176,101 @@ function gatewayCard(a: Access): string {
   </div>`;
 }
 
+/// The tools a token may call, grouped by where they come from.
+///
+/// A flat list of every tool is the wrong shape for the decision being made. What an operator
+/// actually thinks is "this client gets my notes server", and a downstream with a dozen tools
+/// turns that into a dozen ticks — every one an opportunity to miss one. So the service is the
+/// unit, and the tools under it stay individually revocable, because "everything except
+/// `delete_note`" is just as real a decision and there is no other way to express it.
+function grantPickerHtml(snap: Snapshot): string {
+  const groups = toolGroups(snap);
+  if (groups.length === 0) {
+    return `<div class="meta">No tools yet. Add a downstream first, then issue tokens for it.</div>`;
+  }
+  return groups
+    .map(
+      (g) => `<div class="grant-group">
+        <label class="check group">
+          <input type="checkbox" class="grant-all" data-group="${esc(g.key)}" />
+          <span class="grow">
+            <code>${esc(g.label)}</code>
+            <span class="meta">${esc(g.sub)} · ${g.tools.length} tool${g.tools.length === 1 ? "" : "s"}</span>
+          </span>
+        </label>
+        <div class="grant-tools">${g.tools
+          .map(
+            (t) => `<label class="check sub">
+              <input type="checkbox" class="grant" data-group="${esc(g.key)}" value="${esc(t.name)}" />
+              <span class="grow">
+                <code>${esc(t.name)}</code>
+                <span class="meta">${esc(t.description)}</span>
+              </span>
+            </label>`,
+          )
+          .join("")}</div>
+      </div>`,
+    )
+    .join("");
+}
+
+/// Tools by the downstream they come from, labelled the way that downstream is labelled
+/// everywhere else — by its target, not by the name the config files it under.
+function toolGroups(snap: Snapshot): { key: string; label: string; sub: string; tools: ToolInfo[] }[] {
+  const byUpstream = new Map<string, ToolInfo[]>();
+  const local: ToolInfo[] = [];
+  for (const t of snap.tools) {
+    if (t.upstream === null) local.push(t);
+    else (byUpstream.get(t.upstream) ?? byUpstream.set(t.upstream, []).get(t.upstream)!).push(t);
+  }
+  // Keys become DOM attributes and are read back out to pair a group with its tools, so they
+  // are prefixed rather than sentinelled. An upstream called `local` is a name somebody could
+  // plausibly choose; a NUL byte is not something an attribute round-trips intact.
+  const out = snap.upstreams
+    .filter((u) => byUpstream.has(u.name))
+    .map((u) => ({
+      key: `up:${u.name}`,
+      label: u.target,
+      sub: u.kind,
+      tools: byUpstream.get(u.name)!,
+    }));
+  if (local.length) {
+    out.push({ key: "local", label: "Local commands", sub: "run on this machine", tools: local });
+  }
+  return out;
+}
+
+/// Keep a group's own box in step with the tools under it.
+///
+/// Three states, not two: all, none, and the partly-ticked one in between. Without the
+/// indeterminate state, unticking a single tool would leave the group reading as "none of
+/// this", which is a lie about what the token can do.
+function syncGrantGroup(key: string): void {
+  const all = Array.from(document.querySelectorAll<HTMLInputElement>(`.grant[data-group="${CSS.escape(key)}"]`));
+  const box = document.querySelector<HTMLInputElement>(`.grant-all[data-group="${CSS.escape(key)}"]`);
+  if (!box) return;
+  const on = all.filter((c) => c.checked).length;
+  box.checked = on === all.length && all.length > 0;
+  box.indeterminate = on > 0 && on < all.length;
+}
+
+function wireGrantPicker(): void {
+  for (const box of Array.from(document.querySelectorAll<HTMLInputElement>(".grant-all"))) {
+    box.addEventListener("change", () => {
+      const key = box.dataset.group!;
+      for (const c of Array.from(
+        document.querySelectorAll<HTMLInputElement>(`.grant[data-group="${CSS.escape(key)}"]`),
+      )) {
+        c.checked = box.checked;
+      }
+      box.indeterminate = false;
+    });
+  }
+  for (const c of Array.from(document.querySelectorAll<HTMLInputElement>(".grant"))) {
+    c.addEventListener("change", () => syncGrantGroup(c.dataset.group!));
+  }
+}
+
 function clientsHtml(snap: Snapshot, rules: IdentityRule[], access: Access): string {
   const clients = clientsOf(rules, access);
   const issued = justIssued ? issuedPanelHtml() : "";
@@ -2181,19 +2287,7 @@ function clientsHtml(snap: Snapshot, rules: IdentityRule[], access: Access): str
            <button id="issue" class="primary">Issue</button>
            <button id="issue-cancel" class="ghost">Cancel</button>
          </div>
-         <div class="checks">${
-           snap.tools.length
-             ? snap.tools
-                 .map(
-                   (t) => `<label class="check">
-                     <input type="checkbox" class="grant" value="${esc(t.name)}" />
-                     <code>${esc(t.name)}</code>
-                     <span class="meta">${esc(t.description)}</span>
-                   </label>`,
-                 )
-                 .join("")
-             : `<div class="meta">No tools yet. Add a downstream first, then issue tokens for it.</div>`
-         }</div>
+         ${grantPickerHtml(snap)}
        </div>`
     : "";
 
@@ -2271,7 +2365,6 @@ let lastSnapshot: Snapshot | null = null;
 
 function upstreamIsBeingEdited(): boolean {
   if (!$("#upstream").innerHTML) return false;
-  if (editingTool) return true;
   const el = document.activeElement;
   return (
     el instanceof HTMLElement &&
@@ -2314,11 +2407,12 @@ function toolFaceCard(snap: Snapshot): string {
     : `<tr><td class="meta">No tools yet. Add a downstream, or import a pack.</td></tr>`;
 
   return `<div class="card">
-    <h3>Tools callers see</h3>
+    <h3>What upstream clients see</h3>
     <div class="meta">
       The name and description a client reads in <code>tools/list</code>. Both are yours to
       choose — a caller names a tool and never an action, so re-labelling one changes nothing
-      about what it does or where it goes.
+      about what it does or where it goes. It sits here because this is where the tool comes
+      from: the face is downstream's, the audience is upstream's.
     </div>
     <table>
       <thead><tr><th>Tool</th><th>Description</th><th>Goes to</th><th></th></tr></thead>
@@ -2328,25 +2422,18 @@ function toolFaceCard(snap: Snapshot): string {
 }
 
 async function renderUpstream(snap: Snapshot): Promise<void> {
-  if (upstreamIsBeingEdited() && !editingTool) return;
-  const [pending, rules, access] = await Promise.all([
-    invoke<Pending[]>("pending"),
+  if (upstreamIsBeingEdited()) return;
+  const [rules, access] = await Promise.all([
     invoke<IdentityRule[]>("identities"),
     invoke<Access>("access"),
   ]);
 
-  // Composed and written as one string. Painting the three parts separately would mean the
-  // wrapper's own HTML never matching what is in the DOM, so the screen would rebuild every
-  // five seconds however little had changed — which is the thing this is here to stop.
-  const html =
-    `<div id="approvals">${approvalsHtml(pending)}</div>` +
-    toolFaceCard(snap) +
-    gatewayCard(access) +
-    `<div id="identities">${clientsHtml(snap, rules, access)}</div>`;
+  // Composed and written as one string. Painting the parts separately would mean the wrapper's
+  // own HTML never matching what is in the DOM, so the screen would rebuild every five seconds
+  // however little had changed — which is the thing this is here to stop.
+  const html = gatewayCard(access) + `<div id="identities">${clientsHtml(snap, rules, access)}</div>`;
   if (!paint($("#upstream"), html)) return;
 
-  wireApprovals();
-  wireToolFace();
   wireClients();
 }
 
@@ -2356,12 +2443,12 @@ function wireToolFace(): void {
       const t = lastSnapshot?.tools.find((x) => x.name === b.dataset.name);
       if (!t) return;
       editingTool = { name: t.name, new_name: t.name, description: t.description };
-      void refresh();
+      redrawActions();
     });
   }
   $("#tf-cancel")?.addEventListener("click", () => {
     editingTool = null;
-    void refresh();
+    redrawActions();
   });
   $("#tf-save")?.addEventListener("click", async () => {
     const e = editingTool;
@@ -2399,6 +2486,7 @@ function wireToolFace(): void {
 }
 
 function wireClients(): void {
+  wireGrantPicker();
   for (const h of Array.from(document.querySelectorAll<HTMLElement>(".svc-head[data-client]"))) {
     h.addEventListener("click", () => {
       const key = h.dataset.client!;
