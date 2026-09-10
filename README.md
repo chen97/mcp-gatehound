@@ -26,7 +26,8 @@ phone / browser / agent
   → MCP Gatehound                       [MCP gateway + GUI + SQLite]
       ├─ action: proxy → an upstream REST API declared in config
       ├─ action: proxy → another MCP server, kept on loopback behind this gateway
-      └─ action: exec  → a local command, argv-only, never a shell
+      ├─ action: exec  → a local command, argv-only, never a shell
+      └─ action: script → your own code, run by an allowlisted interpreter
 ```
 
 ## What is in here
@@ -330,7 +331,21 @@ command".
   long or untrusted content on stdin, never argv; timeout, output cap and a concurrency
   semaphore all mandatory; a value that renders over 4 KB or contains a NUL is refused. A
   placeholder with no value is a hard error rather than an empty string, and a literal brace
-  is written `{{`.
+  is written `{{`. An `exec` command that is not on this machine fails at `check`, beside a
+  missing upstream, rather than on the first call that needed it.
+- `script` — run a program you wrote, registered under a name and stored in `scripts/` beside
+  `gatehound.toml`. This exists because the honest alternative was worse: told to expose forty
+  lines of their own logic as a tool, people reach for `exec` with a shell one-liner, which
+  puts a shell back on the path this gateway exists to keep off it. A script action is
+  **lowered to an exec** before it runs, so it inherits every guard above unchanged rather
+  than growing a second, parallel set that drifts.
+
+  The interpreter comes from a compiled-in allowlist — `python3`, `node`, `deno` — and `sh`,
+  `bash`, `zsh`, `pwsh` and `cmd` are refused *by name*, with a message saying why. `deno` runs
+  with no filesystem, network or environment access unless a flag grants it, so it is the one
+  option that is sandboxed rather than merely trusted. Caller input reaches a script through
+  argv and stdin and nowhere else: nothing templates the program text, so an f-string or a
+  template literal is ordinary code.
 
 Template substitution is deliberately narrow. A path placeholder is percent-encoded, so an
 argument carrying `../../admin` reaches the upstream as one mangled path segment rather than
@@ -403,6 +418,38 @@ accept from someone else:
 
 An import runs the same validation as startup, so a pack that references a missing upstream or
 an undeclared operation is rejected before it reaches your config.
+
+#### A pack that carries scripts
+
+A pack without scripts is pure data: importing a stranger's cannot execute their code, which is
+what the rug-pull argument rests on. A pack carrying scripts breaks that property, so it is a
+different object with a different gate — seven things have to go right before somebody else's
+code runs here:
+
+1. **The interpreter is allowlisted**, and never a shell.
+2. **Nothing templates the body**, so caller input can never become code.
+3. **The file is contained** — it resolves under `scripts/` after canonicalisation, so neither
+   `../` nor a symlink reaches the rest of the disk.
+4. **The digest is pinned.** A pack records a sha256 per script; loading verifies it, and so
+   does every startup after import. A body swapped under a name an identity is already allowed
+   to call stops the gateway rather than running.
+5. **Importing scripts is opt-in.** Without consent the pack is refused outright and the review
+   — name, interpreter, size, digest, findings — is printed instead.
+6. **The source is scanned.** Shapes that reopen the shell or turn data into code at runtime
+   are rated `danger` and need a second, separate consent; network egress and credential reads
+   are `warn` and are shown before you commit. The scan is a reading aid, not a verdict: it
+   decides how loudly to interrupt you, and you still read the code.
+7. **It is never marked executable.** A script is data that a named interpreter reads, so
+   nothing that merely finds the file can run it.
+
+The two consents are two questions, deliberately: *will you accept code from this author* and
+*will you accept code that spawns processes*. A pack you trust can still contain a script you
+should not run without looking. On the command line they are `--allow-scripts` and
+`--allow-dangerous-scripts`; `gatehound-headless review <pack.toml>` prints the same review
+without importing anything, and `gatehound-headless scripts` lists what is registered here.
+
+A script you write in the app is your own, so the same scan advises rather than blocks — the
+gate exists for code that arrived from somewhere else.
 
 A pack travels but absolute paths do not: whoever wrote it had their own binaries and their own
 files, and an `exec` tool's command is pinned in config precisely so a caller cannot choose it.

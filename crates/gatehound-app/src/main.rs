@@ -248,7 +248,8 @@ fn add_connection(
 ) -> Result<Connected, String> {
     let pack = connection.to_pack().map_err(|e| format!("{e:#}"))?;
     let mut cfg = (*state.gateway.cfg).clone();
-    let applied = pack::merge(&mut cfg, &pack, replace).map_err(|e| format!("{e:#}"))?;
+    let applied = pack::merge(&mut cfg, &pack, &pack::ImportOptions::replacing(replace))
+        .map_err(|e| format!("{e:#}"))?;
     if let Some(token) = connection.inline_token() {
         gatehound_core::connect::apply_inline_token(&mut cfg, &connection.name, token);
     }
@@ -755,11 +756,18 @@ struct PackPlan {
     missing_files: Vec<MissingFile>,
     /// Human-readable prompt per missing file, parallel to `missing_files`.
     purposes: Vec<String>,
+    /// One entry per script this pack carries: digest, size, and everything the scan flagged.
+    /// Empty for the ordinary case, where a pack is pure data and importing it cannot run
+    /// anybody's code.
+    scripts: Vec<gatehound_core::scripts::Review>,
+    /// Scripts rated `danger`, which need the second confirmation before they will import.
+    dangerous: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct Applied {
     upstreams: Vec<String>,
+    scripts: Vec<String>,
     tools: Vec<String>,
     identities: Vec<String>,
     replaced: Vec<String>,
@@ -769,6 +777,7 @@ impl From<pack::Applied> for Applied {
     fn from(a: pack::Applied) -> Self {
         Self {
             upstreams: a.upstreams,
+            scripts: a.scripts,
             tools: a.tools,
             identities: a.identities,
             replaced: a.replaced,
@@ -811,6 +820,276 @@ async fn choose_file(app: AppHandle, purpose: String) -> Option<String> {
         .map(|p| p.display().to_string())
 }
 
+// ---- scripts ------------------------------------------------------------------------
+
+/// One registered script, as the app shows it.
+#[derive(Serialize)]
+struct ScriptView {
+    name: String,
+    interpreter: String,
+    description: String,
+    /// "written here" or "from pack 'x'" — the whole basis of how much the scan should
+    /// interrupt you.
+    origin: String,
+    local: bool,
+    sha256: String,
+    body: String,
+    /// True when the interpreter confines the script by default, so the list can say which of
+    /// these are sandboxed and which are merely trusted.
+    sandboxed: bool,
+    findings: Vec<gatehound_core::scripts::Finding>,
+    /// Tools that run it. A script nothing runs is dead weight, and worth seeing as such.
+    used_by: Vec<String>,
+    /// Set when the body could not be read or does not match its digest. Shown in place of the
+    /// script rather than swallowed, because this is the case that matters most.
+    problem: Option<String>,
+}
+
+fn script_views(cfg: &Config) -> Vec<ScriptView> {
+    let base = cfg.script_dir();
+    cfg.scripts
+        .iter()
+        .map(|def| {
+            let used_by: Vec<String> = cfg
+                .tools
+                .iter()
+                .filter(|t| t.action.script() == Some(def.name.as_str()))
+                .map(|t| t.name.clone())
+                .collect();
+            let (body, problem) = match gatehound_core::scripts::read_body(&base, def) {
+                Ok(b) => {
+                    let actual = gatehound_core::scripts::digest(b.as_bytes());
+                    let mismatch =
+                        !def.sha256.is_empty() && !actual.eq_ignore_ascii_case(def.sha256.trim());
+                    let problem = mismatch.then(|| {
+                        format!(
+                            "the file changed since it was registered (recorded {}…, on disk {}…)",
+                            &def.sha256[..8.min(def.sha256.len())],
+                            &actual[..8]
+                        )
+                    });
+                    (b, problem)
+                }
+                Err(e) => (String::new(), Some(format!("{e:#}"))),
+            };
+            ScriptView {
+                name: def.name.clone(),
+                interpreter: def.interpreter.as_str().to_string(),
+                description: def.description.clone(),
+                origin: def.origin.label(),
+                local: def.origin.is_local(),
+                sha256: def.sha256.clone(),
+                sandboxed: def.interpreter.sandboxed_by_default(),
+                findings: gatehound_core::scripts::scan(&body),
+                body,
+                used_by,
+                problem,
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn scripts(state: tauri::State<'_, AppState>) -> Vec<ScriptView> {
+    script_views(&state.gateway.cfg)
+}
+
+/// The interpreters a script may name, for the picker.
+#[derive(Serialize)]
+struct InterpreterView {
+    id: String,
+    sandboxed: bool,
+    extension: String,
+}
+
+#[tauri::command]
+fn interpreters() -> Vec<InterpreterView> {
+    gatehound_core::scripts::Interpreter::ALL
+        .iter()
+        .map(|i| InterpreterView {
+            id: i.as_str().to_string(),
+            sandboxed: i.sandboxed_by_default(),
+            extension: i.extension().to_string(),
+        })
+        .collect()
+}
+
+/// Read a body without saving it, so the editor can show what the scan makes of it as it is
+/// typed. Nothing is written and nothing is registered.
+#[tauri::command]
+fn review_script(
+    name: String,
+    interpreter: String,
+    body: String,
+) -> Result<gatehound_core::scripts::Review, String> {
+    let interp = gatehound_core::scripts::Interpreter::parse(&interpreter).map_err(err)?;
+    Ok(gatehound_core::scripts::Review::of(&name, interp, &body))
+}
+
+/// Write a script and register it.
+///
+/// A script written here is the operator's own, so the scan advises rather than blocks — the
+/// gate exists for code that arrived from somewhere else. What is *not* negotiable is the
+/// structural check: a name that could escape `scripts/`, a body over the size limit, or a
+/// `{placeholder}` that would make caller input into code are all refused, whoever typed them.
+#[tauri::command]
+fn save_script(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    interpreter: String,
+    description: String,
+    body: String,
+) -> Result<ScriptView, String> {
+    let interp = gatehound_core::scripts::Interpreter::parse(&interpreter).map_err(err)?;
+    let base = state
+        .config_path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut cfg = (*state.gateway.cfg).clone();
+    // Changing a script's interpreter changes its filename, so the old body would be left
+    // behind as an orphan. Remove it first.
+    if let Some(existing) = cfg.script(&name) {
+        if existing.interpreter != interp {
+            gatehound_core::scripts::delete(&base, existing).map_err(err)?;
+        }
+    }
+
+    let def = gatehound_core::scripts::save(
+        &base,
+        &name,
+        interp,
+        &body,
+        &description,
+        gatehound_core::scripts::Origin::Local,
+    )
+    .map_err(err)?;
+
+    match cfg.scripts.iter().position(|s| s.name == name) {
+        Some(i) => cfg.scripts[i] = def,
+        None => cfg.scripts.push(def),
+    }
+    write_config(&state, &cfg)?;
+
+    script_views(&cfg)
+        .into_iter()
+        .find(|v| v.name == name)
+        .ok_or_else(|| "the script was written but not registered".to_string())
+}
+
+/// Unregister a script and delete its body.
+///
+/// Refuses while a tool still runs it: removing the body would leave a tool that fails on its
+/// next call, and the config would no longer load at all. Say which tools, so the operator can
+/// deal with them first.
+#[tauri::command]
+fn delete_script(state: tauri::State<'_, AppState>, name: String) -> Result<(), String> {
+    let mut cfg = (*state.gateway.cfg).clone();
+    let users: Vec<String> = cfg
+        .tools
+        .iter()
+        .filter(|t| t.action.script() == Some(name.as_str()))
+        .map(|t| t.name.clone())
+        .collect();
+    if !users.is_empty() {
+        return Err(format!(
+            "{name} is still run by {}. Remove or repoint those tools first.",
+            users.join(", ")
+        ));
+    }
+    let Some(i) = cfg.scripts.iter().position(|s| s.name == name) else {
+        return Err(format!("no script named '{name}'"));
+    };
+    let def = cfg.scripts.remove(i);
+    let base = state
+        .config_path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    gatehound_core::scripts::delete(&base, &def).map_err(err)?;
+    write_config(&state, &cfg)
+}
+
+/// Expose a script as a tool an upstream client can call.
+///
+/// The tool is what a caller names; the script is what runs. Keeping them separate is what
+/// lets one script back several tools with different arguments, and what keeps policy attached
+/// to the thing a caller actually asks for.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri commands take the IPC payload as named parameters.
+fn add_script_tool(
+    state: tauri::State<'_, AppState>,
+    tool: String,
+    script: String,
+    description: String,
+    args: Vec<String>,
+    stdin: Option<String>,
+    input_schema: Option<serde_json::Value>,
+    on_first_call: Decision,
+) -> Result<ApplyResult, String> {
+    let mut cfg = (*state.gateway.cfg).clone();
+    if cfg.script(&script).is_none() {
+        return Err(format!("no script named '{script}'"));
+    }
+    if cfg.tools.iter().any(|t| t.name == tool) {
+        return Err(format!("a tool named '{tool}' already exists"));
+    }
+    cfg.tools.push(gatehound_core::config::ToolConfig {
+        name: tool.clone(),
+        description,
+        input_schema,
+        action: gatehound_core::config::Action::Script(gatehound_core::scripts::ScriptSpec {
+            script: script.clone(),
+            args,
+            stdin: stdin.filter(|s| !s.trim().is_empty()),
+            ..Default::default()
+        }),
+        rate_limit: None,
+        idempotent: false,
+    });
+    if on_first_call == Decision::Deny {
+        cfg.identities.push(gatehound_core::config::IdentitySeed {
+            identity: "*".into(),
+            tool: tool.clone(),
+            decision: Decision::Deny,
+        });
+    }
+    write_config(&state, &cfg)?;
+    Ok(ApplyResult {
+        applied: Applied {
+            upstreams: Vec::new(),
+            scripts: Vec::new(),
+            tools: vec![tool],
+            identities: Vec::new(),
+            replaced: Vec::new(),
+        },
+        config_path: state.config_path.display().to_string(),
+        missing_env: Vec::new(),
+    })
+}
+
+/// Validate and write the configuration file the app reads.
+///
+/// Validation first, always: a config written and then found invalid is a gateway that will
+/// not start next time, and the operator finds out at the worst moment.
+fn write_config(state: &tauri::State<'_, AppState>, cfg: &Config) -> Result<(), String> {
+    cfg.validate().map_err(|e| format!("{e:#}"))?;
+    let body = toml::to_string_pretty(cfg)
+        .context("serializing the configuration")
+        .map_err(err)?;
+    if let Some(dir) = state.config_path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating {}", dir.display()))
+            .map_err(err)?;
+    }
+    std::fs::write(&state.config_path, body)
+        .with_context(|| format!("writing {}", state.config_path.display()))
+        .map_err(err)
+}
+
 #[tauri::command]
 fn inspect_pack(state: tauri::State<'_, AppState>, path: String) -> Result<PackPlan, String> {
     let loaded = Pack::load(Path::new(&path)).map_err(err)?;
@@ -827,6 +1106,8 @@ fn inspect_pack(state: tauri::State<'_, AppState>, path: String) -> Result<PackP
     let purposes = missing_files.iter().map(|m| m.purpose()).collect();
 
     Ok(PackPlan {
+        scripts: loaded.reviews(),
+        dangerous: loaded.dangerous(),
         name: loaded.pack.name.clone(),
         description: loaded.pack.description.clone(),
         version: loaded.pack.version.clone(),
@@ -852,6 +1133,8 @@ fn apply_pack(
     path: String,
     replace: bool,
     resolutions: Vec<String>,
+    allow_scripts: bool,
+    allow_dangerous_scripts: bool,
 ) -> Result<ApplyResult, String> {
     let mut loaded = Pack::load(Path::new(&path)).map_err(err)?;
 
@@ -872,7 +1155,25 @@ fn apply_pack(
     // Merge into a copy of the running configuration and write that. The gateway keeps serving
     // the configuration it started with until the app restarts, which is what the UI says.
     let mut cfg = (*state.gateway.cfg).clone();
-    let applied = pack::merge(&mut cfg, &loaded, replace).map_err(err)?;
+    // Scripts land beside the config, not beside the pack: the pack may be anywhere the file
+    // picker reached, and a script has to live where the running gateway will look for it.
+    let base_dir = state
+        .config_path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let applied = pack::merge(
+        &mut cfg,
+        &loaded,
+        &pack::ImportOptions {
+            replace,
+            base_dir: Some(base_dir),
+            allow_scripts,
+            allow_dangerous_scripts,
+        },
+    )
+    .map_err(err)?;
 
     let body = toml::to_string_pretty(&cfg)
         .context("serializing the merged configuration")
@@ -1077,6 +1378,12 @@ fn main() {
             set_publish,
             issue_token,
             revoke_token,
+            scripts,
+            interpreters,
+            review_script,
+            save_script,
+            delete_script,
+            add_script_tool,
         ])
         .setup(|app| {
             // An accessory app that dies in setup leaves no Dock icon, no window and no

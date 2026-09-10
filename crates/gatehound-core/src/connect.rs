@@ -264,6 +264,8 @@ impl NewConnection {
             upstreams,
             tools,
             identities: Vec::new(),
+            // A connection added in the app names a service, never carries code.
+            scripts: Vec::new(),
         })
     }
 
@@ -439,7 +441,8 @@ mod tests {
 
         // And it applies through the same path an imported pack takes.
         let mut cfg = base_cfg();
-        let applied = crate::pack::merge(&mut cfg, &pack, false).unwrap();
+        let applied =
+            crate::pack::merge(&mut cfg, &pack, &crate::pack::ImportOptions::default()).unwrap();
         assert_eq!(applied.upstreams, vec!["beeper"]);
         assert_eq!(applied.tools, vec!["search_messages", "send_message"]);
         assert_eq!(cfg.upstreams.len(), 1);
@@ -473,7 +476,7 @@ mod tests {
         assert_eq!(c.inline_token(), Some("sk-secret"));
 
         let mut cfg = base_cfg();
-        crate::pack::merge(&mut cfg, &pack, false).unwrap();
+        crate::pack::merge(&mut cfg, &pack, &crate::pack::ImportOptions::default()).unwrap();
         apply_inline_token(&mut cfg, "beeper", c.inline_token().unwrap());
         match &cfg.upstreams[0].kind {
             UpstreamKind::Http {

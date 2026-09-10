@@ -11,11 +11,20 @@
 //! * **Nothing is silently replaced.** Importing refuses on a name collision unless the
 //!   operator says otherwise, so a pack cannot quietly redefine a tool that already exists —
 //!   which is the shape of the "rug pull" the MCP threat literature warns about.
+//!
+//! A pack that carries **scripts** breaks the first thing anybody assumed about packs: that a
+//! pack is pure data, so importing a stranger's cannot execute their code. That property is
+//! worth keeping for the packs that do not need scripts, and worth replacing with something
+//! explicit for the ones that do. So a script-bearing pack is a different object with a
+//! different gate: it is refused outright unless the operator opts in, the opt-in prints a
+//! review of every script first, and a script whose source contains a shape that reopens the
+//! shell needs a second, separate consent. See [`crate::scripts`].
 
 use crate::config::{Action, Config, IdentitySeed, ToolConfig, UpstreamConfig, UpstreamKind};
+use crate::scripts::{self, Interpreter, Origin, Review, ScriptDef};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PackMeta {
@@ -30,6 +39,31 @@ pub struct PackMeta {
     pub requires_env: Vec<String>,
 }
 
+/// A script travelling inside a pack.
+///
+/// The body is inline rather than a sibling file because a pack is one document that gets
+/// pasted into a chat, attached to an issue, or committed on its own — a pack whose scripts
+/// live beside it arrives with them missing, which is the failure this is meant to avoid. It
+/// becomes a real file under `scripts/` on import, so from then on it is a normal program that
+/// can be read in a diff and run in a terminal.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PackScript {
+    pub name: String,
+    pub interpreter: Interpreter,
+    /// The program text. Verified against `sha256` on load, so a body edited without updating
+    /// the digest is refused rather than quietly accepted.
+    pub source: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+impl PackScript {
+    pub fn review(&self) -> Review {
+        Review::of(&self.name, self.interpreter, &self.source)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Pack {
     pub pack: PackMeta,
@@ -39,6 +73,8 @@ pub struct Pack {
     pub tools: Vec<ToolConfig>,
     #[serde(default, rename = "identity")]
     pub identities: Vec<IdentitySeed>,
+    #[serde(default, rename = "script")]
+    pub scripts: Vec<PackScript>,
 }
 
 /// What an import would change, so it can be reported before or after the fact.
@@ -47,7 +83,37 @@ pub struct Applied {
     pub upstreams: Vec<String>,
     pub tools: Vec<String>,
     pub identities: Vec<String>,
+    pub scripts: Vec<String>,
     pub replaced: Vec<String>,
+}
+
+/// How an import is allowed to proceed.
+///
+/// Consent is two separate flags rather than one because they answer two different questions.
+/// "Will you accept code from this pack at all" is a decision about the author; "will you
+/// accept code that spawns processes or turns data into code" is a decision about the code.
+/// A pack you trust can still contain a script you should not run without looking.
+#[derive(Debug, Clone, Default)]
+pub struct ImportOptions {
+    /// Overwrite an upstream, tool or script that already exists.
+    pub replace: bool,
+    /// Where `scripts/` is. `None` means a dry run: nothing is written, and script
+    /// verification is skipped because there is nothing on disk to verify.
+    pub base_dir: Option<PathBuf>,
+    /// Accept this pack's scripts at all.
+    pub allow_scripts: bool,
+    /// Accept scripts the scan rated `Danger`. Meaningless without `allow_scripts`.
+    pub allow_dangerous_scripts: bool,
+}
+
+impl ImportOptions {
+    /// The plain case: no scripts involved.
+    pub fn replacing(replace: bool) -> Self {
+        Self {
+            replace,
+            ..Default::default()
+        }
+    }
 }
 
 impl Pack {
@@ -77,6 +143,32 @@ impl Pack {
                 }
             }
         }
+        let mut script_names = std::collections::HashSet::new();
+        for sc in &self.scripts {
+            scripts::valid_name(&sc.name)?;
+            if !script_names.insert(&sc.name) {
+                bail!("pack declares script '{}' twice", sc.name);
+            }
+            // The digest travels with the source so a body edited after the fact — in transit,
+            // in a fork, in a paste — does not pass as the reviewed one.
+            let actual = scripts::digest(sc.source.as_bytes());
+            if !actual.eq_ignore_ascii_case(sc.sha256.trim()) {
+                bail!(
+                    "script '{}' does not match the sha256 this pack records; it was edited \
+                     after it was packed.\n  recorded {}\n  actual   {actual}",
+                    sc.name,
+                    sc.sha256
+                );
+            }
+            if sc.source.len() > scripts::MAX_SCRIPT_BYTES {
+                bail!(
+                    "script '{}' is {} bytes, over the {}-byte limit",
+                    sc.name,
+                    sc.source.len(),
+                    scripts::MAX_SCRIPT_BYTES
+                );
+            }
+        }
         for t in &self.tools {
             if let Some(name) = t.action.upstream() {
                 if !self.upstreams.iter().any(|u| u.name == name) {
@@ -86,8 +178,36 @@ impl Pack {
                     );
                 }
             }
+            if let Some(name) = t.action.script() {
+                if !self.scripts.iter().any(|sc| sc.name == name) {
+                    bail!(
+                        "tool '{}' runs script '{name}', which this pack does not carry",
+                        t.name
+                    );
+                }
+            }
         }
         Ok(())
+    }
+
+    /// True when accepting this pack means accepting somebody else's code.
+    pub fn carries_scripts(&self) -> bool {
+        !self.scripts.is_empty()
+    }
+
+    /// What a reviewer should read before consenting: one entry per script, with its digest,
+    /// size, and every shape the scan thought worth a question.
+    pub fn reviews(&self) -> Vec<Review> {
+        self.scripts.iter().map(PackScript::review).collect()
+    }
+
+    /// The scripts the scan rated `Danger` — the ones needing a second consent.
+    pub fn dangerous(&self) -> Vec<String> {
+        self.scripts
+            .iter()
+            .filter(|sc| sc.review().has_danger())
+            .map(|sc| sc.name.clone())
+            .collect()
     }
 
     /// Environment variables named by this pack that are not set. Reported rather than
@@ -109,7 +229,20 @@ impl Pack {
 /// against a copy, so the answer — including a refusal — is the one the real import gives.
 pub fn plan(cfg: &Config, pack: &Pack, replace: bool) -> Result<Applied> {
     let mut copy = cfg.clone();
-    merge(&mut copy, pack, replace)
+    // A dry run writes nothing, so there is no script body on disk to verify. Clearing the
+    // base directory is what tells validation to skip that check — the same switch a config
+    // built in memory rather than read from a file uses.
+    copy.base_dir = None;
+    merge(
+        &mut copy,
+        pack,
+        &ImportOptions {
+            replace,
+            allow_scripts: true,
+            allow_dangerous_scripts: true,
+            base_dir: None,
+        },
+    )
 }
 
 /// A local file a pack's `exec` tool names that is not present on this machine.
@@ -164,6 +297,8 @@ impl MissingFile {
 pub fn missing_files(pack: &Pack) -> Vec<MissingFile> {
     let mut out = Vec::new();
     for tool in &pack.tools {
+        // A script action's path is derived, not declared: it is always `scripts/<name>` next
+        // to the config, and `merge` wrote it. There is nothing for an operator to locate.
         let Action::Exec(spec) = &tool.action else {
             continue;
         };
@@ -233,8 +368,81 @@ pub fn resolve_file(pack: &mut Pack, missing: &MissingFile, replacement: &str) -
 }
 
 /// Merge a pack into a config. Returns what changed, or refuses on the first collision.
-pub fn merge(cfg: &mut Config, pack: &Pack, replace: bool) -> Result<Applied> {
+///
+/// Scripts are written to disk *before* the tools that name them are added, so a config is
+/// never left naming a script whose body is not there.
+pub fn merge(cfg: &mut Config, pack: &Pack, opts: &ImportOptions) -> Result<Applied> {
     let mut applied = Applied::default();
+    let replace = opts.replace;
+
+    if pack.carries_scripts() {
+        if !opts.allow_scripts {
+            bail!(
+                "'{}' carries {} script(s), which is somebody else's code. Review them and \
+                 import again with scripts allowed.\n{}",
+                pack.pack.name,
+                pack.scripts.len(),
+                pack.reviews()
+                    .iter()
+                    .map(Review::render)
+                    .collect::<Vec<_>>()
+                    .join("")
+            );
+        }
+        let dangerous = pack.dangerous();
+        if !dangerous.is_empty() && !opts.allow_dangerous_scripts {
+            bail!(
+                "these scripts spawn processes or turn data into code at runtime: {}.\n\
+                 That is the shape this gateway exists to keep out, so accepting it takes a \
+                 second, separate confirmation.\n{}",
+                dangerous.join(", "),
+                pack.reviews()
+                    .iter()
+                    .filter(|r| r.has_danger())
+                    .map(Review::render)
+                    .collect::<Vec<_>>()
+                    .join("")
+            );
+        }
+    }
+
+    for sc in &pack.scripts {
+        let existing = cfg.scripts.iter().position(|x| x.name == sc.name);
+        if existing.is_some() && !replace {
+            bail!(
+                "script '{}' already exists; re-run with --replace to overwrite it",
+                sc.name
+            );
+        }
+        let def = match &opts.base_dir {
+            Some(dir) => scripts::save(
+                dir,
+                &sc.name,
+                sc.interpreter,
+                &sc.source,
+                &sc.description,
+                Origin::Pack(pack.pack.name.clone()),
+            )?,
+            // Dry run: record what the entry would be without writing the body.
+            None => ScriptDef {
+                name: sc.name.clone(),
+                interpreter: sc.interpreter,
+                sha256: sc.sha256.clone(),
+                description: sc.description.clone(),
+                origin: Origin::Pack(pack.pack.name.clone()),
+            },
+        };
+        match existing {
+            Some(i) => {
+                cfg.scripts[i] = def;
+                applied.replaced.push(format!("script {}", sc.name));
+            }
+            None => {
+                cfg.scripts.push(def);
+                applied.scripts.push(sc.name.clone());
+            }
+        }
+    }
 
     for u in &pack.upstreams {
         match cfg.upstreams.iter().position(|x| x.name == u.name) {
@@ -290,7 +498,11 @@ pub fn merge(cfg: &mut Config, pack: &Pack, replace: bool) -> Result<Applied> {
 }
 
 /// Build a pack from a config, leaving every credential behind.
-pub fn export(cfg: &Config, name: &str, description: &str) -> Pack {
+///
+/// Script bodies are read from disk and embedded, with their digests, so the pack is one file
+/// that carries everything its tools need. Reading can fail — a script registered but deleted,
+/// say — and that is reported rather than silently exporting a pack whose tools cannot run.
+pub fn export(cfg: &Config, name: &str, description: &str) -> Result<Pack> {
     let mut requires_env = Vec::new();
     let upstreams = cfg
         .upstreams
@@ -333,7 +545,21 @@ pub fn export(cfg: &Config, name: &str, description: &str) -> Pack {
     requires_env.sort();
     requires_env.dedup();
 
-    Pack {
+    let base = cfg.script_dir();
+    let mut packed_scripts = Vec::with_capacity(cfg.scripts.len());
+    for def in &cfg.scripts {
+        let source = scripts::read_body(&base, def)
+            .with_context(|| format!("packing script '{}'", def.name))?;
+        packed_scripts.push(PackScript {
+            name: def.name.clone(),
+            interpreter: def.interpreter,
+            sha256: scripts::digest(source.as_bytes()),
+            description: def.description.clone(),
+            source,
+        });
+    }
+
+    Ok(Pack {
         pack: PackMeta {
             name: name.to_string(),
             description: description.to_string(),
@@ -343,7 +569,8 @@ pub fn export(cfg: &Config, name: &str, description: &str) -> Pack {
         upstreams,
         tools: cfg.tools.clone(),
         identities: cfg.identities.clone(),
-    }
+        scripts: packed_scripts,
+    })
 }
 
 /// The variable an exported upstream should read its credential from, when the config it came
@@ -420,7 +647,7 @@ decision = "allow"
     #[test]
     fn importing_adds_the_upstream_its_tools_and_its_seeds() {
         let mut cfg = base();
-        let applied = merge(&mut cfg, &pack(), false).unwrap();
+        let applied = merge(&mut cfg, &pack(), &ImportOptions::default()).unwrap();
         assert_eq!(applied.upstreams, vec!["notes"]);
         assert_eq!(applied.tools, vec!["read_note"]);
         assert_eq!(applied.identities.len(), 1);
@@ -431,13 +658,15 @@ decision = "allow"
     #[test]
     fn a_pack_never_silently_replaces_what_is_already_there() {
         let mut cfg = base();
-        merge(&mut cfg, &pack(), false).unwrap();
+        merge(&mut cfg, &pack(), &ImportOptions::default()).unwrap();
 
-        let err = merge(&mut cfg, &pack(), false).unwrap_err().to_string();
+        let err = merge(&mut cfg, &pack(), &ImportOptions::default())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("already exists"), "{err}");
 
         // Only an explicit --replace overwrites, and it says what it overwrote.
-        let applied = merge(&mut cfg, &pack(), true).unwrap();
+        let applied = merge(&mut cfg, &pack(), &ImportOptions::replacing(true)).unwrap();
         assert!(applied.replaced.iter().any(|r| r == "tool read_note"));
         assert_eq!(cfg.tools.len(), 1, "replaced, not duplicated");
     }
@@ -466,13 +695,13 @@ decision = "allow"
     #[test]
     fn export_strips_credentials_and_reports_what_to_set() {
         let mut cfg = base();
-        merge(&mut cfg, &pack(), false).unwrap();
+        merge(&mut cfg, &pack(), &ImportOptions::default()).unwrap();
         // Pretend the environment filled the token in, as it does at startup.
         if let UpstreamKind::Http { token, .. } = &mut cfg.upstreams[0].kind {
             *token = "a-real-secret".into();
         }
 
-        let out = export(&cfg, "notes", "A note service");
+        let out = export(&cfg, "notes", "A note service").unwrap();
         assert_eq!(out.pack.requires_env, vec!["NOTES_TOKEN"]);
         match &out.upstreams[0].kind {
             UpstreamKind::Http { token, .. } => {
@@ -499,7 +728,7 @@ decision = "allow"
             },
         });
 
-        let exported = export(&cfg, "demo", "");
+        let exported = export(&cfg, "demo", "").unwrap();
         let up = exported
             .upstreams
             .iter()
@@ -531,7 +760,7 @@ decision = "allow"
         let planned = plan(&cfg, &pack(), false).unwrap();
         assert_eq!(cfg.tools.len(), before, "a plan must not touch the config");
 
-        let applied = merge(&mut cfg, &pack(), false).unwrap();
+        let applied = merge(&mut cfg, &pack(), &ImportOptions::default()).unwrap();
         assert_eq!(
             planned, applied,
             "the preview must be what actually happens"
@@ -629,17 +858,300 @@ action = { type = "exec", cmd = "/nowhere/bin/claude", args = ["-p", "--system-p
     #[test]
     fn an_exported_pack_can_be_imported_again() {
         let mut cfg = base();
-        merge(&mut cfg, &pack(), false).unwrap();
+        merge(&mut cfg, &pack(), &ImportOptions::default()).unwrap();
         let round_tripped: Pack =
-            toml::from_str(&to_toml(&export(&cfg, "notes", "")).unwrap()).unwrap();
+            toml::from_str(&to_toml(&export(&cfg, "notes", "").unwrap()).unwrap()).unwrap();
         round_tripped.check().unwrap();
 
         let mut fresh = base();
-        merge(&mut fresh, &round_tripped, false).unwrap();
+        merge(&mut fresh, &round_tripped, &ImportOptions::default()).unwrap();
         assert_eq!(fresh.tools.len(), 1);
         assert_eq!(fresh.tools[0].name, "read_note");
         assert!(matches!(fresh.tools[0].action, Action::Proxy { .. }));
         assert_eq!(fresh.identities[0].decision, Decision::Allow);
+    }
+
+    fn tmpdir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("gh-pack-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A pack carrying one script, with the digest the loader will insist on.
+    fn script_pack(source: &str) -> Pack {
+        let sha = scripts::digest(source.as_bytes());
+        let body = format!(
+            r#"
+[pack]
+name = "brain"
+
+[[script]]
+name = "vault-write"
+interpreter = "python3"
+description = "writes a note"
+sha256 = "{sha}"
+source = """
+{source}"""
+
+[[tool]]
+name = "brain_append"
+description = "Append a block."
+action = {{ type = "script", script = "vault-write", args = ["append"] }}
+"#
+        );
+        let p: Pack = toml::from_str(&body).unwrap();
+        p.check().unwrap();
+        p
+    }
+
+    #[test]
+    fn a_script_bearing_pack_is_refused_until_the_operator_opts_in() {
+        let mut cfg = base();
+        let dir = tmpdir();
+        cfg.base_dir = Some(dir.clone());
+        let p = script_pack("import sys\nprint(sys.argv[1])\n");
+
+        let err = merge(&mut cfg, &p, &ImportOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("somebody else's code"), "{err}");
+        // The refusal has to carry the review, or the operator has nothing to decide on.
+        assert!(err.contains("vault-write"), "{err}");
+        assert!(err.contains("sha256"), "{err}");
+        assert!(cfg.scripts.is_empty(), "a refused import wrote a script");
+        assert!(
+            !dir.join("scripts").join("vault-write.py").exists(),
+            "a refused import touched the disk"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_script_that_spawns_processes_needs_a_second_separate_consent() {
+        let mut cfg = base();
+        let dir = tmpdir();
+        cfg.base_dir = Some(dir.clone());
+        let p = script_pack("import subprocess\nsubprocess.run(['git', 'commit'])\n");
+
+        // First consent alone is not enough for this shape.
+        let err = merge(
+            &mut cfg,
+            &p,
+            &ImportOptions {
+                allow_scripts: true,
+                base_dir: Some(dir.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("second, separate confirmation"), "{err}");
+        assert!(err.contains("vault-write"), "{err}");
+
+        // Both, and it lands.
+        merge(
+            &mut cfg,
+            &p,
+            &ImportOptions {
+                allow_scripts: true,
+                allow_dangerous_scripts: true,
+                base_dir: Some(dir.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.scripts.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_accepted_script_lands_on_disk_with_its_digest_recorded() {
+        let mut cfg = base();
+        let dir = tmpdir();
+        cfg.base_dir = Some(dir.clone());
+        let source = "import sys, json\nprint(json.dumps({'ok': True}))\n";
+        let p = script_pack(source);
+
+        let applied = merge(
+            &mut cfg,
+            &p,
+            &ImportOptions {
+                allow_scripts: true,
+                base_dir: Some(dir.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(applied.scripts, vec!["vault-write"]);
+        let on_disk = dir.join("scripts").join("vault-write.py");
+        assert!(on_disk.exists(), "the body was not written");
+        let def = cfg.script("vault-write").unwrap();
+        assert_eq!(def.sha256, scripts::digest(source.as_bytes()));
+        assert_eq!(def.origin, Origin::Pack("brain".into()));
+        // Provenance survives, so the app can say where this came from a month later.
+        assert!(def.origin.label().contains("brain"));
+        // And the whole config is sound: the tool, the script and the file all agree.
+        cfg.validate().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_pack_whose_script_was_edited_after_packing_does_not_load() {
+        let source = "print(1)\n";
+        let mut body = format!(
+            r#"
+[pack]
+name = "brain"
+
+[[script]]
+name = "s"
+interpreter = "node"
+sha256 = "{}"
+source = "console.log(1)"
+"#,
+            scripts::digest(source.as_bytes())
+        );
+        let p: Pack = toml::from_str(&body).unwrap();
+        let err = p.check().unwrap_err().to_string();
+        assert!(err.contains("edited after it was packed"), "{err}");
+
+        // Correcting the digest is the only way through, and that is a visible edit.
+        body = body.replace(
+            &scripts::digest(source.as_bytes()),
+            &scripts::digest(b"console.log(1)"),
+        );
+        toml::from_str::<Pack>(&body).unwrap().check().unwrap();
+    }
+
+    #[test]
+    fn a_packed_script_keeps_its_braces_through_a_toml_round_trip() {
+        // Nothing renders a script body, so `{name}` in one is ordinary text — a Python
+        // f-string, say. What could still break it is TOML: a basic string unescapes, and a
+        // body that came back different would fail its own digest. It has to survive intact.
+        let source = "print(f\"hello {name}\")\nd = {}\n";
+        let p = Pack {
+            pack: PackMeta {
+                name: "p".into(),
+                description: String::new(),
+                version: "1".into(),
+                requires_env: Vec::new(),
+            },
+            upstreams: Vec::new(),
+            tools: Vec::new(),
+            identities: Vec::new(),
+            scripts: vec![PackScript {
+                name: "greet".into(),
+                interpreter: Interpreter::Python3,
+                sha256: scripts::digest(source.as_bytes()),
+                description: String::new(),
+                source: source.to_string(),
+            }],
+        };
+        p.check().unwrap();
+
+        let back: Pack = toml::from_str(&to_toml(&p).unwrap()).unwrap();
+        back.check().expect("the body changed in transit");
+        assert_eq!(back.scripts[0].source, source);
+    }
+
+    #[test]
+    fn a_tool_naming_a_script_the_pack_omits_is_refused() {
+        let body = r#"
+[pack]
+name = "p"
+
+[[tool]]
+name = "t"
+description = ""
+action = { type = "script", script = "absent", args = [] }
+"#;
+        let err = toml::from_str::<Pack>(body)
+            .unwrap()
+            .check()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not carry"), "{err}");
+    }
+
+    #[test]
+    fn exporting_carries_the_script_source_so_the_pack_travels_intact() {
+        let dir = tmpdir();
+        let mut cfg = base();
+        cfg.base_dir = Some(dir.clone());
+        let source = "import sys\nprint(sys.stdin.read())\n";
+        let def = scripts::save(
+            &dir,
+            "vault-write",
+            Interpreter::Python3,
+            source,
+            "writes",
+            Origin::Local,
+        )
+        .unwrap();
+        cfg.scripts.push(def);
+
+        let exported = export(&cfg, "brain", "").unwrap();
+        assert_eq!(exported.scripts.len(), 1);
+        assert_eq!(exported.scripts[0].source, source);
+        // Round-trips through TOML with the digest intact, which is what `check` verifies.
+        let text = to_toml(&exported).unwrap();
+        let back: Pack = toml::from_str(&text).unwrap();
+        back.check().unwrap();
+
+        // And imports onto a different machine, body and all.
+        let elsewhere = tmpdir();
+        let mut fresh = base();
+        fresh.base_dir = Some(elsewhere.clone());
+        merge(
+            &mut fresh,
+            &back,
+            &ImportOptions {
+                allow_scripts: true,
+                base_dir: Some(elsewhere.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(elsewhere.join("scripts").join("vault-write.py")).unwrap(),
+            source
+        );
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(elsewhere).ok();
+    }
+
+    #[test]
+    fn exporting_a_script_that_is_no_longer_on_disk_fails_rather_than_shipping_a_hole() {
+        let dir = tmpdir();
+        let mut cfg = base();
+        cfg.base_dir = Some(dir.clone());
+        cfg.scripts.push(ScriptDef {
+            name: "gone".into(),
+            interpreter: Interpreter::Node,
+            sha256: String::new(),
+            description: String::new(),
+            origin: Origin::Local,
+        });
+        let err = export(&cfg, "p", "").unwrap_err().to_string();
+        assert!(err.contains("gone"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_plan_reports_scripts_without_writing_any() {
+        let dir = tmpdir();
+        let mut cfg = base();
+        cfg.base_dir = Some(dir.clone());
+        let p = script_pack("print(1)\n");
+        let planned = plan(&cfg, &p, false).unwrap();
+        assert_eq!(planned.scripts, vec!["vault-write"]);
+        assert!(
+            !dir.join("scripts").exists(),
+            "a preview created the script directory"
+        );
+        assert!(cfg.scripts.is_empty());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -31,7 +31,7 @@ use gatehound_core::pack::{self, Pack};
 use gatehound_core::publish;
 use gatehound_core::tokens;
 use gatehound_core::{default_db_path, Gateway};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -43,6 +43,8 @@ struct Args {
     db: Option<PathBuf>,
     auto_approve: bool,
     replace: bool,
+    allow_scripts: bool,
+    allow_dangerous_scripts: bool,
     out: Option<PathBuf>,
 }
 
@@ -53,6 +55,8 @@ fn parse_args() -> Result<Args> {
     let mut db = None;
     let mut auto_approve = false;
     let mut replace = false;
+    let mut allow_scripts = false;
+    let mut allow_dangerous_scripts = false;
     let mut out = None;
 
     let mut it = std::env::args().skip(1);
@@ -62,6 +66,13 @@ fn parse_args() -> Result<Args> {
             "--db" => db = Some(PathBuf::from(it.next().context("--db needs a path")?)),
             "--auto-approve" => auto_approve = true,
             "--replace" => replace = true,
+            "--allow-scripts" => allow_scripts = true,
+            // Implies --allow-scripts: a second confirmation is only meaningful on top of the
+            // first, and making somebody type both to say one thing is a trap, not a gate.
+            "--allow-dangerous-scripts" => {
+                allow_scripts = true;
+                allow_dangerous_scripts = true;
+            }
             "-o" | "--out" => out = Some(PathBuf::from(it.next().context("-o needs a path")?)),
             "-h" | "--help" | "help" => {
                 print_help();
@@ -82,6 +93,8 @@ fn parse_args() -> Result<Args> {
         db,
         auto_approve,
         replace,
+        allow_scripts,
+        allow_dangerous_scripts,
         out,
     })
 }
@@ -96,6 +109,8 @@ fn print_help() {
          allow <identity> [tool]   persist an allow rule (tool defaults to *)\n  \
          deny  <identity> [tool]   persist a deny rule\n  \
          import <pack.toml>        merge a pack of upstreams and tools into the config\n  \
+         scripts                   list registered scripts and what the scan found\n  \
+         review <pack.toml>        read a pack's scripts without importing anything\n  \
          export <name>             write the current setup out as a pack\n  \
          token issue <name> [tools]  mint a token; tools it may call, or none\n  \
          token list                list issued tokens\n  \
@@ -106,6 +121,8 @@ fn print_help() {
          --db <path>               database file\n  \
          --auto-approve            resolve every approval immediately (development only)\n  \
          --replace                 on import, overwrite anything that already exists\n  \
+         --allow-scripts           on import, accept the pack's scripts after reading them\n  \
+         --allow-dangerous-scripts also accept ones that spawn processes or eval\n  \
          -o <path>                 on export, write here instead of standard output"
     );
 }
@@ -158,6 +175,8 @@ async fn main() -> Result<()> {
         "token" => token(cfg, db_path, &args.rest),
         "publish" => publish_status(cfg).await,
         "import" => import_pack(cfg, &args),
+        "scripts" => list_scripts(&cfg),
+        "review" => review_pack(&args),
         "export" => export_pack(cfg, &args),
         other => {
             print_help();
@@ -541,7 +560,23 @@ fn import_pack(mut cfg: Config, args: &Args) -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("gatehound.toml"));
 
     let pack = Pack::load(&path)?;
-    let applied = pack::merge(&mut cfg, &pack, args.replace)?;
+    // Scripts land beside the config they are registered in, not beside the pack file — the
+    // pack is a courier, and may well be in ~/Downloads.
+    let base_dir = target
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let applied = pack::merge(
+        &mut cfg,
+        &pack,
+        &pack::ImportOptions {
+            replace: args.replace,
+            base_dir: Some(base_dir),
+            allow_scripts: args.allow_scripts,
+            allow_dangerous_scripts: args.allow_dangerous_scripts,
+        },
+    )?;
 
     // The importer holds the credentials, not the pack, so say what still needs setting.
     let missing = pack.missing_env();
@@ -554,6 +589,7 @@ fn import_pack(mut cfg: Config, args: &Args) -> Result<()> {
         ("upstreams", &applied.upstreams),
         ("tools", &applied.tools),
         ("identity seeds", &applied.identities),
+        ("scripts", &applied.scripts),
         ("replaced", &applied.replaced),
     ] {
         if !items.is_empty() {
@@ -586,6 +622,71 @@ fn import_pack(mut cfg: Config, args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// Print what a pack's scripts contain, and change nothing.
+///
+/// The import gate refuses and prints the same review, but only somebody who already decided
+/// to import gets to see it that way. This is the version for deciding.
+fn review_pack(args: &Args) -> Result<()> {
+    let Some(path) = args.rest.first().map(PathBuf::from) else {
+        bail!("usage: gatehound-headless review <pack.toml>");
+    };
+    let pack = Pack::load(&path)?;
+    println!("{} — {}", pack.pack.name, pack.pack.description);
+    if !pack.carries_scripts() {
+        println!("\nNo scripts. This pack is data: importing it cannot run anybody's code.");
+        return Ok(());
+    }
+    println!(
+        "\n{} script(s). Importing them runs this code on your machine.\n",
+        pack.scripts.len()
+    );
+    for review in pack.reviews() {
+        print!("{}", review.render());
+    }
+    let dangerous = pack.dangerous();
+    println!();
+    if dangerous.is_empty() {
+        println!("Nothing rated danger. Import with --allow-scripts once you have read them.");
+    } else {
+        println!(
+            "Rated danger: {}. Import with --allow-dangerous-scripts only if you have read \
+             those lines and want them to run.",
+            dangerous.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// List the scripts this config registers, with what the scan says about each.
+fn list_scripts(cfg: &Config) -> Result<()> {
+    if cfg.scripts.is_empty() {
+        println!("No scripts registered.");
+        return Ok(());
+    }
+    let base = cfg.script_dir();
+    for def in &cfg.scripts {
+        let body = gatehound_core::scripts::read_body(&base, def)?;
+        let review = gatehound_core::scripts::Review::of(&def.name, def.interpreter, &body);
+        let users: Vec<&str> = cfg
+            .tools
+            .iter()
+            .filter(|t| t.action.script() == Some(def.name.as_str()))
+            .map(|t| t.name.as_str())
+            .collect();
+        print!("{}", review.render());
+        println!("      {}", def.origin.label());
+        println!(
+            "      {}",
+            if users.is_empty() {
+                "no tool runs it".to_string()
+            } else {
+                format!("run by: {}", users.join(", "))
+            }
+        );
+    }
+    Ok(())
+}
+
 /// Write the current upstreams, tools and identity seeds out as a pack, with every credential
 /// left behind.
 fn export_pack(cfg: Config, args: &Args) -> Result<()> {
@@ -594,7 +695,7 @@ fn export_pack(cfg: Config, args: &Args) -> Result<()> {
         .first()
         .cloned()
         .unwrap_or_else(|| "gatehound".to_string());
-    let body = pack::to_toml(&pack::export(&cfg, &name, ""))?;
+    let body = pack::to_toml(&pack::export(&cfg, &name, "")?)?;
     match &args.out {
         Some(path) => {
             std::fs::write(path, &body).with_context(|| format!("writing {}", path.display()))?;

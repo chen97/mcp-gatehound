@@ -1,8 +1,9 @@
-//! Guards that sit in front of a `proxy` action: rate limiting and idempotent sends.
+//! Guards that sit in front of an action: rate limiting and idempotent calls.
 
 use crate::config::RateLimit;
-use crate::store::{SendRecord, Store};
+use crate::store::{CallRecord, Store};
 use anyhow::{bail, Result};
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -60,7 +61,7 @@ impl RateLimitGuard<'_> {
 }
 
 /// Cheap non-cryptographic digest, used only to notice that one idempotency key was reused
-/// for two different messages.
+/// for two different calls.
 pub fn text_hash(text: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.as_bytes() {
@@ -75,7 +76,7 @@ pub enum IdempotencyCheck {
     /// First time this key was seen; go ahead and perform the action.
     Proceed(IdempotencyClaim),
     /// The action already completed under this key; return this instead of acting again.
-    AlreadyDone(SendRecord),
+    AlreadyDone(CallRecord),
 }
 
 /// Holds a claimed key. Completing records the result; dropping without completing releases
@@ -89,7 +90,7 @@ pub struct IdempotencyClaim {
 impl IdempotencyClaim {
     pub fn complete(mut self, message_id: Option<&str>, response_json: &str) -> Result<()> {
         self.store
-            .complete_send(&self.key, message_id, response_json)?;
+            .complete_call(&self.key, message_id, response_json)?;
         self.done = true;
         Ok(())
     }
@@ -98,37 +99,76 @@ impl IdempotencyClaim {
 impl Drop for IdempotencyClaim {
     fn drop(&mut self) {
         if !self.done {
-            if let Err(e) = self.store.release_send(&self.key) {
+            if let Err(e) = self.store.release_call(&self.key) {
                 tracing::warn!(error = %e, key = %self.key, "could not release idempotency key");
             }
         }
     }
 }
 
-/// Without this, a network timeout after successful delivery sends a real person
-/// the same message twice.
+/// A stable digest of everything the caller asked for, minus the key itself.
+///
+/// The point of hashing the arguments at all is to catch a client that reuses one key for two
+/// different calls — a bug that would otherwise show up as the second call silently returning
+/// the first one's result. That check used to read `chat_id` and `text`, which meant it only
+/// worked for message-shaped tools: a note write supplied neither, so every call hashed the
+/// empty string and two genuinely different writes under one key compared equal.
+///
+/// Keys are sorted by `serde_json`'s map ordering, so the same arguments in a different order
+/// hash the same. `idempotency_key` is excluded because it is the identity, not the content.
+pub fn args_hash(args: &Value) -> String {
+    let canonical = match args {
+        Value::Object(map) => {
+            let filtered: serde_json::Map<String, Value> = map
+                .iter()
+                .filter(|(k, _)| k.as_str() != "idempotency_key")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            serde_json::to_string(&Value::Object(filtered)).unwrap_or_default()
+        }
+        other => serde_json::to_string(other).unwrap_or_default(),
+    };
+    text_hash(&canonical)
+}
+
+/// Claim a key for one call, or report that it has already been made.
+///
+/// Without this, a network timeout after a successful action runs it a second time — which for
+/// a message means somebody gets it twice, and for a note write means the same block is
+/// appended twice.
 pub fn begin_idempotent(
     store: &Arc<Store>,
     key: &str,
-    chat_id: &str,
-    text: &str,
+    tool: &str,
+    args: &Value,
 ) -> Result<IdempotencyCheck> {
-    let hash = text_hash(text);
-    if let Some(existing) = store.find_send(key)? {
-        if existing.text_hash != hash {
-            bail!("idempotency_key was already used for different text");
+    let hash = args_hash(args);
+    if let Some(existing) = store.find_call(key)? {
+        // A row written before this table carried the tool and a whole-argument hash covered
+        // only the message text. Comparing it against a hash of everything would invent a
+        // divergence, so an old completed row is returned on its own terms.
+        if !existing.is_legacy() {
+            if existing.tool != tool {
+                bail!(
+                    "idempotency_key was already used for '{}', not '{tool}'",
+                    existing.tool
+                );
+            }
+            if existing.args_hash != hash {
+                bail!("idempotency_key was already used with different arguments");
+            }
         }
         if existing.is_complete() {
             return Ok(IdempotencyCheck::AlreadyDone(existing));
         }
         // Claimed but never completed: an earlier attempt is still running, or died
-        // mid-flight. Refusing is the only safe answer — we cannot tell whether the
-        // message reached the other person.
-        bail!("a send with this idempotency_key is already in flight; retry shortly");
+        // mid-flight. Refusing is the only safe answer — we cannot tell whether the action
+        // took effect.
+        bail!("a call with this idempotency_key is already in flight; retry shortly");
     }
-    if !store.claim_send(key, chat_id, &hash)? {
+    if !store.claim_call(key, tool, &hash)? {
         // Lost the race against a concurrent identical request.
-        bail!("a send with this idempotency_key is already in flight; retry shortly");
+        bail!("a call with this idempotency_key is already in flight; retry shortly");
     }
     Ok(IdempotencyCheck::Proceed(IdempotencyClaim {
         store: store.clone(),
@@ -140,6 +180,7 @@ pub fn begin_idempotent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn spacing_is_enforced_between_calls() {
@@ -182,13 +223,27 @@ mod tests {
     #[test]
     fn a_repeated_key_returns_the_first_result_instead_of_sending_again() {
         let s = store();
-        let claim = match begin_idempotent(&s, "k1", "chat", "hello").unwrap() {
+        let claim = match begin_idempotent(
+            &s,
+            "k1",
+            "send",
+            &json!({ "chat_id": "chat", "text": "hello" }),
+        )
+        .unwrap()
+        {
             IdempotencyCheck::Proceed(c) => c,
             _ => panic!("first call must proceed"),
         };
         claim.complete(Some("m1"), "{\"ok\":true}").unwrap();
 
-        match begin_idempotent(&s, "k1", "chat", "hello").unwrap() {
+        match begin_idempotent(
+            &s,
+            "k1",
+            "send",
+            &json!({ "chat_id": "chat", "text": "hello" }),
+        )
+        .unwrap()
+        {
             IdempotencyCheck::AlreadyDone(rec) => {
                 assert_eq!(rec.message_id.as_deref(), Some("m1"));
                 assert_eq!(rec.response_json.as_deref(), Some("{\"ok\":true}"));
@@ -200,12 +255,25 @@ mod tests {
     #[test]
     fn a_dropped_claim_frees_the_key_for_a_retry() {
         let s = store();
-        match begin_idempotent(&s, "k2", "chat", "hello").unwrap() {
+        match begin_idempotent(
+            &s,
+            "k2",
+            "send",
+            &json!({ "chat_id": "chat", "text": "hello" }),
+        )
+        .unwrap()
+        {
             IdempotencyCheck::Proceed(c) => drop(c), // upstream error
             _ => panic!(),
         }
         assert!(matches!(
-            begin_idempotent(&s, "k2", "chat", "hello").unwrap(),
+            begin_idempotent(
+                &s,
+                "k2",
+                "send",
+                &json!({ "chat_id": "chat", "text": "hello" })
+            )
+            .unwrap(),
             IdempotencyCheck::Proceed(_)
         ));
     }
@@ -213,31 +281,69 @@ mod tests {
     #[test]
     fn an_in_flight_key_is_refused() {
         let s = store();
-        let _claim = begin_idempotent(&s, "k3", "chat", "hello").unwrap();
-        assert!(begin_idempotent(&s, "k3", "chat", "hello").is_err());
+        let _claim = begin_idempotent(
+            &s,
+            "k3",
+            "send",
+            &json!({ "chat_id": "chat", "text": "hello" }),
+        )
+        .unwrap();
+        assert!(begin_idempotent(
+            &s,
+            "k3",
+            "send",
+            &json!({ "chat_id": "chat", "text": "hello" })
+        )
+        .is_err());
     }
 
     #[test]
     fn reusing_a_key_for_different_text_is_refused() {
         let s = store();
-        match begin_idempotent(&s, "k4", "chat", "hello").unwrap() {
+        match begin_idempotent(
+            &s,
+            "k4",
+            "send",
+            &json!({ "chat_id": "chat", "text": "hello" }),
+        )
+        .unwrap()
+        {
             IdempotencyCheck::Proceed(c) => c.complete(Some("m1"), "{}").unwrap(),
             _ => panic!(),
         }
-        let err = begin_idempotent(&s, "k4", "chat", "different")
-            .err()
-            .expect("a reused key with different text must be refused");
-        assert!(err.to_string().contains("different text"));
+        let err = begin_idempotent(
+            &s,
+            "k4",
+            "send",
+            &json!({ "chat_id": "chat", "text": "different" }),
+        )
+        .err()
+        .expect("a reused key with different arguments must be refused");
+        assert!(err.to_string().contains("different arguments"), "{err}");
     }
 
     #[test]
     fn a_completed_action_with_no_message_id_is_still_a_duplicate() {
         let s = store();
-        match begin_idempotent(&s, "k5", "chat", "hello").unwrap() {
+        match begin_idempotent(
+            &s,
+            "k5",
+            "send",
+            &json!({ "chat_id": "chat", "text": "hello" }),
+        )
+        .unwrap()
+        {
             IdempotencyCheck::Proceed(c) => c.complete(None, "{\"ok\":true}").unwrap(),
             _ => panic!(),
         }
-        match begin_idempotent(&s, "k5", "chat", "hello").unwrap() {
+        match begin_idempotent(
+            &s,
+            "k5",
+            "send",
+            &json!({ "chat_id": "chat", "text": "hello" }),
+        )
+        .unwrap()
+        {
             IdempotencyCheck::AlreadyDone(rec) => {
                 assert_eq!(rec.response_json.as_deref(), Some("{\"ok\":true}"))
             }

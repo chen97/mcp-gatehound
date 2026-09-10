@@ -31,9 +31,28 @@ impl ActionEngine {
         let upstreams = Arc::new(Upstreams::from_config(&cfg.upstreams)?);
         let mut execs = HashMap::new();
         let mut limits = HashMap::new();
+        let base_dir = cfg.script_dir();
         for tool in &cfg.tools {
-            if let Action::Exec(spec) = &tool.action {
-                execs.insert(tool.name.clone(), ExecRunner::new(spec.clone()));
+            match &tool.action {
+                Action::Exec(spec) => {
+                    execs.insert(tool.name.clone(), ExecRunner::new(spec.clone()));
+                }
+                // A script action becomes an exec here, once, at build time — so it inherits
+                // every guard the runner already enforces instead of growing a parallel set,
+                // and so a script that cannot be located stops the gateway starting rather
+                // than failing on the call that needed it.
+                Action::Script(spec) => {
+                    let def = cfg.script(&spec.script).ok_or_else(|| {
+                        anyhow!(
+                            "tool '{}' runs script '{}', which is not registered",
+                            tool.name,
+                            spec.script
+                        )
+                    })?;
+                    let lowered = spec.lower(def, &base_dir)?;
+                    execs.insert(tool.name.clone(), ExecRunner::new(lowered));
+                }
+                Action::Proxy { .. } => {}
             }
             if let Some(rl) = tool.rate_limit {
                 limits.insert(tool.name.clone(), RateLimiter::new(rl));
@@ -78,10 +97,7 @@ impl ActionEngine {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow!("idempotency_key is required for {}", tool.name))?;
-        let chat_id = args.get("chat_id").and_then(Value::as_str).unwrap_or("");
-        let text = args.get("text").and_then(Value::as_str).unwrap_or("");
-
-        let claim = match begin_idempotent(&self.store, key, chat_id, text)? {
+        let claim = match begin_idempotent(&self.store, key, &tool.name, args)? {
             IdempotencyCheck::AlreadyDone(rec) => {
                 let stored: Value = rec
                     .response_json
@@ -122,7 +138,7 @@ impl ActionEngine {
                     .ok_or_else(|| anyhow!("upstream '{upstream}' is not configured"))?;
                 up.call(op, args).await
             }
-            Action::Exec(_) => {
+            Action::Exec(_) | Action::Script(_) => {
                 let runner = self
                     .execs
                     .get(&tool.name)
@@ -308,7 +324,7 @@ mod tests {
         let mut ok_tool = exec_tool("send", &["-c", "printf '{{}}'"]);
         ok_tool.idempotent = true;
         let (e2, store) = engine(vec![ok_tool.clone()]);
-        assert!(store.find_send("key-2").unwrap().is_none());
+        assert!(store.find_call("key-2").unwrap().is_none());
         assert!(e2.dispatch(&ok_tool, &args).await.is_ok());
     }
 
@@ -323,6 +339,180 @@ mod tests {
         e.dispatch(&tool, &json!({})).await.unwrap();
         let err = e.dispatch(&tool, &json!({})).await.unwrap_err();
         assert!(err.to_string().contains("rate limit reached"));
+    }
+
+    #[tokio::test]
+    async fn a_script_action_runs_the_registered_file_through_its_interpreter() {
+        use crate::scripts::{save, Interpreter, Origin, ScriptSpec};
+        let dir = std::env::temp_dir().join(format!("gh-eng-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let def = save(
+            &dir,
+            "echoer",
+            Interpreter::Python3,
+            "import sys\nsys.stdout.write(sys.argv[1] + ':' + sys.stdin.read())\n",
+            "",
+            Origin::Local,
+        )
+        .unwrap();
+
+        let tool = ToolConfig {
+            name: "echo_note".into(),
+            description: String::new(),
+            input_schema: None,
+            action: Action::Script(ScriptSpec {
+                script: "echoer".into(),
+                args: vec!["{heading}".into()],
+                stdin: Some("{text}".into()),
+                ..Default::default()
+            }),
+            rate_limit: None,
+            idempotent: false,
+        };
+
+        let cfg = Config {
+            auth: crate::config::AuthConfig {
+                bearer_token: Some("0123456789abcdef0123".into()),
+                ..Default::default()
+            },
+            tools: vec![tool.clone()],
+            scripts: vec![def],
+            base_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        cfg.validate().expect("a registered script must validate");
+
+        let store = Arc::new(Store::open_memory().unwrap());
+        let engine = ActionEngine::build(Arc::new(cfg), store).unwrap();
+        let out = engine
+            .dispatch(
+                &tool,
+                &json!({ "heading": "Nutrition", "text": "a new line" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["stdout"], "Nutrition:a new line");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_script_action_inherits_every_exec_guard() {
+        use crate::scripts::{save, Interpreter, Origin, ScriptSpec};
+        let dir = std::env::temp_dir().join(format!("gh-eng-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let def = save(
+            &dir,
+            "guarded",
+            Interpreter::Python3,
+            "import sys\nsys.stdout.write(sys.argv[1])\n",
+            "",
+            Origin::Local,
+        )
+        .unwrap();
+        let tool = ToolConfig {
+            name: "t".into(),
+            description: String::new(),
+            input_schema: None,
+            action: Action::Script(ScriptSpec {
+                script: "guarded".into(),
+                args: vec!["{payload}".into()],
+                ..Default::default()
+            }),
+            rate_limit: None,
+            idempotent: false,
+        };
+        let cfg = Config {
+            auth: crate::config::AuthConfig {
+                bearer_token: Some("0123456789abcdef0123".into()),
+                ..Default::default()
+            },
+            tools: vec![tool.clone()],
+            scripts: vec![def],
+            base_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        let store = Arc::new(Store::open_memory().unwrap());
+        let engine = ActionEngine::build(Arc::new(cfg), store).unwrap();
+
+        // Caller input stays exactly one argv element — shell metacharacters and all.
+        let out = engine
+            .dispatch(&tool, &json!({ "payload": "a; rm -rf /  $(id)" }))
+            .await
+            .unwrap();
+        assert_eq!(out["stdout"], "a; rm -rf /  $(id)");
+
+        // And the same limits apply: over the argv cap, refused.
+        let big = "x".repeat(crate::actions::exec::MAX_ARGV_VALUE_BYTES + 1);
+        assert!(engine
+            .dispatch(&tool, &json!({ "payload": big }))
+            .await
+            .is_err());
+
+        // A placeholder with no value is still a hard error, not an empty string.
+        assert!(engine.dispatch(&tool, &json!({})).await.is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn one_key_reused_for_different_arguments_is_refused_for_any_tool() {
+        // The check used to read `chat_id` and `text`, so a tool with neither hashed the empty
+        // string every time and two different calls under one key compared equal. A note write
+        // is exactly that tool.
+        let mut tool = exec_tool("brain_append", &["-c", "printf '{{}}'"]);
+        tool.idempotent = true;
+        let (e, _) = engine(vec![tool.clone()]);
+
+        let first = json!({ "uid": "k3f9a2b1", "heading": "## Nutrition",
+                            "text": "first", "idempotency_key": "key-9" });
+        e.dispatch(&tool, &first).await.unwrap();
+
+        let second = json!({ "uid": "k3f9a2b1", "heading": "## Nutrition",
+                             "text": "second", "idempotency_key": "key-9" });
+        let err = e.dispatch(&tool, &second).await.unwrap_err().to_string();
+        assert!(err.contains("different arguments"), "{err}");
+
+        // The same arguments in a different order are the same call, not a divergence.
+        let reordered = json!({ "text": "first", "heading": "## Nutrition",
+                                "uid": "k3f9a2b1", "idempotency_key": "key-9" });
+        let replay = e.dispatch(&tool, &reordered).await.unwrap();
+        assert_eq!(replay["duplicate"], true);
+    }
+
+    #[tokio::test]
+    async fn one_key_used_by_two_different_tools_is_refused() {
+        let mut a = exec_tool("brain_append", &["-c", "printf '{{}}'"]);
+        a.idempotent = true;
+        let mut b = exec_tool("brain_create", &["-c", "printf '{{}}'"]);
+        b.idempotent = true;
+        let (e, _) = engine(vec![a.clone(), b.clone()]);
+
+        let args = json!({ "idempotency_key": "key-shared" });
+        e.dispatch(&a, &args).await.unwrap();
+        let err = e.dispatch(&b, &args).await.unwrap_err().to_string();
+        assert!(err.contains("brain_append"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_replay_returns_the_recorded_body_not_a_message_shaped_stub() {
+        let mut tool = exec_tool(
+            "brain_append",
+            &[
+                "-c",
+                "printf '{{\"path\":\"Planning/Note.md\",\"commit\":\"a1b2c3d\"}}'",
+            ],
+        );
+        tool.idempotent = true;
+        let (e, _) = engine(vec![tool.clone()]);
+        let args = json!({ "uid": "k3f9a2b1", "idempotency_key": "key-10" });
+
+        let first = e.dispatch(&tool, &args).await.unwrap();
+        let replay = e.dispatch(&tool, &args).await.unwrap();
+        assert_eq!(replay["duplicate"], true);
+        assert_eq!(replay["stdout"], first["stdout"]);
+        assert!(
+            replay["stdout"].as_str().unwrap().contains("a1b2c3d"),
+            "the replay lost the recorded body: {replay}"
+        );
     }
 
     #[tokio::test]

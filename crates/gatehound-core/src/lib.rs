@@ -18,6 +18,7 @@ pub mod policy;
 pub mod protocol;
 pub mod publish;
 pub mod redact;
+pub mod scripts;
 pub mod store;
 pub mod tokens;
 pub mod upstreams;

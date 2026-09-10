@@ -1,4 +1,4 @@
-//! SQLite: request log, identity policy, pending approvals, idempotent sends.
+//! SQLite: request log, identity policy, pending approvals, idempotent calls.
 //!
 //! Bundled SQLite (no system dependency). WAL so the GUI can read while the listener writes.
 
@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS pending (
   args_preview TEXT
 );
 
+-- Idempotent calls. Named `sends` because it was built for message sending, and renamed in
+-- the Rust API rather than here so an existing database keeps its rows. `tool` and `args_hash`
+-- are what make it general: the divergence check compares the whole argument set, so a tool
+-- with no `chat_id` and no `text` — a note write, say — gets a real one instead of comparing
+-- the hash of "" against the hash of "".
 CREATE TABLE IF NOT EXISTS sends (
   idempotency_key TEXT PRIMARY KEY,
   chat_id TEXT NOT NULL,
@@ -138,20 +143,31 @@ pub struct PendingRow {
     pub args_preview: Option<String>,
 }
 
+/// One idempotency key and what it produced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SendRecord {
+pub struct CallRecord {
     pub idempotency_key: String,
-    pub chat_id: String,
-    pub text_hash: String,
+    /// The tool the key was claimed for. Empty on a row written before the table was
+    /// generalised.
+    pub tool: String,
+    /// Hash over the caller's arguments, minus the key itself.
+    pub args_hash: String,
     pub message_id: Option<String>,
     pub ts: String,
     pub completed_at: Option<String>,
     pub response_json: Option<String>,
 }
 
-impl SendRecord {
+impl CallRecord {
     pub fn is_complete(&self) -> bool {
         self.completed_at.is_some()
+    }
+
+    /// True for a row written before `tool` and a whole-argument hash existed. Such a row's
+    /// hash covered only the message text, so comparing it against a hash of everything would
+    /// report a divergence that never happened.
+    pub fn is_legacy(&self) -> bool {
+        self.tool.is_empty()
     }
 }
 
@@ -161,6 +177,26 @@ pub struct Store {
 
 fn now() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Bring an older database up to the current schema.
+///
+/// `ADD COLUMN` on a table that already has the column is an error rather than a no-op, so the
+/// columns are read first. Kept deliberately small: the alternative — dropping and recreating —
+/// would throw away the audit log, which is the one thing here that cannot be regenerated.
+fn migrate(conn: &Connection) -> Result<()> {
+    let mut have = std::collections::HashSet::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(sends)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for r in rows {
+            have.insert(r?);
+        }
+    }
+    if !have.contains("tool") {
+        conn.execute_batch("ALTER TABLE sends ADD COLUMN tool TEXT NOT NULL DEFAULT ''")?;
+    }
+    Ok(())
 }
 
 const REQ_COLS: &str = "id, ts, identity, client_name, method, tool, args_json, decision, action_type, upstream, status, error, duration_ms, response_json";
@@ -191,6 +227,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;",
         )?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -551,41 +588,41 @@ impl Store {
         Ok(conn.execute("DELETE FROM pending", [])?)
     }
 
-    // ---- idempotent sends ------------------------------------------------
+    // ---- idempotent calls ------------------------------------------------
 
-    pub fn find_send(&self, key: &str) -> Result<Option<SendRecord>> {
+    pub fn find_call(&self, key: &str) -> Result<Option<CallRecord>> {
         let conn = self.lock();
-        Ok(conn
-            .query_row(
-                "SELECT idempotency_key, chat_id, text_hash, message_id, ts, completed_at, response_json FROM sends WHERE idempotency_key = ?1",
-                params![key],
-                |r| {
-                    Ok(SendRecord {
-                        idempotency_key: r.get(0)?,
-                        chat_id: r.get(1)?,
-                        text_hash: r.get(2)?,
-                        message_id: r.get(3)?,
-                        ts: r.get(4)?,
-                        completed_at: r.get(5)?,
-                        response_json: r.get(6)?,
-                    })
-                },
-            )
-            .optional()?)
+        let mut stmt = conn.prepare(
+            "SELECT idempotency_key, tool, text_hash, message_id, ts, completed_at, response_json
+             FROM sends WHERE idempotency_key = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![key], |r| {
+            Ok(CallRecord {
+                idempotency_key: r.get(0)?,
+                tool: r.get(1)?,
+                args_hash: r.get(2)?,
+                message_id: r.get(3)?,
+                ts: r.get(4)?,
+                completed_at: r.get(5)?,
+                response_json: r.get(6)?,
+            })
+        })?;
+        rows.next().transpose().map_err(Into::into)
     }
 
-    /// Claim an idempotency key before performing the send. `Ok(None)` means the key was
-    /// already claimed and the caller should return the stored record instead.
-    pub fn claim_send(&self, key: &str, chat_id: &str, text_hash: &str) -> Result<bool> {
+    /// Claim a key. Returns false when it was already taken, meaning the call is a replay or
+    /// already in flight and the caller should return the stored record instead.
+    pub fn claim_call(&self, key: &str, tool: &str, args_hash: &str) -> Result<bool> {
         let conn = self.lock();
         let n = conn.execute(
-            "INSERT OR IGNORE INTO sends(idempotency_key, chat_id, text_hash, ts) VALUES (?1,?2,?3,?4)",
-            params![key, chat_id, text_hash, now()],
+            "INSERT OR IGNORE INTO sends(idempotency_key, chat_id, tool, text_hash, ts)
+             VALUES (?1, '', ?2, ?3, ?4)",
+            params![key, tool, args_hash, now()],
         )?;
         Ok(n == 1)
     }
 
-    pub fn complete_send(&self, key: &str, message_id: Option<&str>, response: &str) -> Result<()> {
+    pub fn complete_call(&self, key: &str, message_id: Option<&str>, response: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
             "UPDATE sends SET message_id = ?2, response_json = ?3, ts = ?4, completed_at = ?4 WHERE idempotency_key = ?1",
@@ -594,8 +631,8 @@ impl Store {
         Ok(())
     }
 
-    /// Release a claimed key so a failed send can be retried with the same key.
-    pub fn release_send(&self, key: &str) -> Result<()> {
+    /// Release a claimed key so a failed call can be retried with the same key.
+    pub fn release_call(&self, key: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
             "DELETE FROM sends WHERE idempotency_key = ?1 AND completed_at IS NULL",
@@ -604,8 +641,7 @@ impl Store {
         Ok(())
     }
 
-    /// Sends in the trailing hour, for the per-hour rate limit.
-    pub fn sends_since(&self, minutes: i64) -> Result<i64> {
+    pub fn calls_since(&self, minutes: i64) -> Result<i64> {
         let conn = self.lock();
         let since = (Utc::now() - chrono::Duration::minutes(minutes))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -679,36 +715,36 @@ mod tests {
     #[test]
     fn idempotency_key_is_claimed_once() {
         let s = Store::open_memory().unwrap();
-        assert!(s.claim_send("k1", "chat", "hash").unwrap());
-        assert!(!s.claim_send("k1", "chat", "hash").unwrap());
-        s.complete_send("k1", Some("m9"), "{}").unwrap();
-        let rec = s.find_send("k1").unwrap().unwrap();
+        assert!(s.claim_call("k1", "chat", "hash").unwrap());
+        assert!(!s.claim_call("k1", "chat", "hash").unwrap());
+        s.complete_call("k1", Some("m9"), "{}").unwrap();
+        let rec = s.find_call("k1").unwrap().unwrap();
         assert_eq!(rec.message_id.as_deref(), Some("m9"));
         assert!(rec.is_complete());
-        assert_eq!(s.sends_since(60).unwrap(), 1);
+        assert_eq!(s.calls_since(60).unwrap(), 1);
     }
 
     #[test]
     fn a_failed_send_releases_its_key_for_retry() {
         let s = Store::open_memory().unwrap();
-        assert!(s.claim_send("k2", "chat", "hash").unwrap());
-        s.release_send("k2").unwrap();
-        assert!(s.find_send("k2").unwrap().is_none());
-        assert!(s.claim_send("k2", "chat", "hash").unwrap());
+        assert!(s.claim_call("k2", "chat", "hash").unwrap());
+        s.release_call("k2").unwrap();
+        assert!(s.find_call("k2").unwrap().is_none());
+        assert!(s.claim_call("k2", "chat", "hash").unwrap());
 
         // A completed send is never released.
-        s.complete_send("k2", Some("m1"), "{}").unwrap();
-        s.release_send("k2").unwrap();
-        assert!(s.find_send("k2").unwrap().is_some());
+        s.complete_call("k2", Some("m1"), "{}").unwrap();
+        s.release_call("k2").unwrap();
+        assert!(s.find_call("k2").unwrap().is_some());
     }
 
     #[test]
     fn an_action_that_returns_no_message_id_still_counts_as_complete() {
         let s = Store::open_memory().unwrap();
-        assert!(s.claim_send("k5", "chat", "hash").unwrap());
-        s.complete_send("k5", None, "{\"ok\":true}").unwrap();
+        assert!(s.claim_call("k5", "chat", "hash").unwrap());
+        s.complete_call("k5", None, "{\"ok\":true}").unwrap();
 
-        let rec = s.find_send("k5").unwrap().unwrap();
+        let rec = s.find_call("k5").unwrap().unwrap();
         assert!(rec.message_id.is_none());
         assert!(
             rec.is_complete(),
@@ -716,8 +752,8 @@ mod tests {
         );
 
         // ...and it is not releasable as though it had failed.
-        s.release_send("k5").unwrap();
-        assert!(s.find_send("k5").unwrap().is_some());
+        s.release_call("k5").unwrap();
+        assert!(s.find_call("k5").unwrap().is_some());
     }
 
     #[test]

@@ -376,7 +376,12 @@ async fn a_server_can_be_discovered_and_connected_without_typing_its_tools() {
         },
         ..Default::default()
     };
-    let applied = gatehound_core::pack::merge(&mut cfg, &pack, false).unwrap();
+    let applied = gatehound_core::pack::merge(
+        &mut cfg,
+        &pack,
+        &gatehound_core::pack::ImportOptions::default(),
+    )
+    .unwrap();
     assert_eq!(applied.tools, vec!["echo"]);
     gatehound_core::connect::apply_inline_token(&mut cfg, "inner", TOKEN);
 

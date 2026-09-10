@@ -39,9 +39,51 @@ interface ToolInfo {
 
 interface Applied {
   upstreams: string[];
+  scripts: string[];
   tools: string[];
   identities: string[];
   replaced: string[];
+}
+
+type Severity = "note" | "warn" | "danger";
+
+interface Finding {
+  severity: Severity;
+  rule: string;
+  line: number;
+  excerpt: string;
+  why: string;
+}
+
+/// What the static read of a script found, before it is trusted.
+interface ScriptReview {
+  name: string;
+  interpreter: string;
+  sha256: string;
+  bytes: number;
+  lines: number;
+  sandboxed: boolean;
+  findings: Finding[];
+}
+
+interface ScriptView {
+  name: string;
+  interpreter: string;
+  description: string;
+  origin: string;
+  local: boolean;
+  sha256: string;
+  body: string;
+  sandboxed: boolean;
+  findings: Finding[];
+  used_by: string[];
+  problem: string | null;
+}
+
+interface InterpreterView {
+  id: string;
+  sandboxed: boolean;
+  extension: string;
 }
 
 interface MissingFile {
@@ -60,6 +102,8 @@ interface PackPlan {
   missing_env: string[];
   missing_files: MissingFile[];
   purposes: string[];
+  scripts: ScriptReview[];
+  dangerous: string[];
 }
 
 interface ApplyResult {
@@ -649,22 +693,28 @@ function servicesHtml(snap: Snapshot, configFile: string): string {
 
 async function renderActions(snap: Snapshot): Promise<void> {
   if (actionsAreBeingEdited()) return;
-  const configFile = await invoke<string>("config_path");
+  const [configFile, scriptList] = await Promise.all([
+    invoke<string>("config_path"),
+    invoke<ScriptView[]>("scripts"),
+  ]);
   const html =
     (draft
       ? connectForm(draft)
-      : `<div class="card">
+      : scriptDraft
+        ? scriptEditor()
+        : `<div class="card">
            <h3>Add a downstream</h3>
            <div class="meta">
-             One service and the tools bound to it. Build it here, or import a pack someone
-             else wrote — both end up as the same thing.
+             One service and the tools bound to it. Build it here, write a script of your own,
+             or import a pack someone else wrote — all three end up as the same thing.
            </div>
            <div class="row">
              <button id="c-open" class="primary">Add a downstream…</button>
              <button id="pack-pick" class="ghost">Import a pack…</button>
            </div>
          </div>`) +
-    (draft ? "" : renderPackPlanIfAny()) +
+    (draft || scriptDraft ? "" : renderPackPlanIfAny()) +
+    (draft || scriptDraft ? "" : scriptsHtml(scriptList)) +
     servicesHtml(snap, configFile);
   if (!paint($("#actions"), html)) return;
 
@@ -681,21 +731,32 @@ async function renderActions(snap: Snapshot): Promise<void> {
     });
   }
   if (draft) wireConnectForm();
+  if (scriptDraft) wireScriptEditor();
+  else wireScripts(scriptList);
   wirePackPanel();
 }
 
 /// Whether rebuilding this screen would throw away something half-typed. Same rule as the
 /// Network screen: a URL or a token being entered outranks a five-second refresh.
+/// Whether this element holds something half-entered that a repaint would discard.
+///
+/// A text field does; a checkbox does not. A tick is a finished decision, and the screen has to
+/// redraw to act on it — treating the box as "still being edited" left the pack consent boxes
+/// tickable but inert, which is the worst possible shape for a security gate.
+function isTyping(el: Element): boolean {
+  if (el instanceof HTMLTextAreaElement) return true;
+  if (!(el instanceof HTMLInputElement)) return false;
+  return el.type !== "checkbox" && el.type !== "radio";
+}
+
 function actionsAreBeingEdited(): boolean {
   if (!$("#actions").innerHTML) return false;
-  if (connDirty) return true;
+  if (connDirty || scriptDirty) return true;
   const el = document.activeElement;
   return (
     el instanceof HTMLElement &&
     $("#actions").contains(el) &&
-    (el instanceof HTMLInputElement ||
-      el instanceof HTMLSelectElement ||
-      el instanceof HTMLTextAreaElement)
+    (isTyping(el) || el instanceof HTMLSelectElement)
   );
 }
 
@@ -1220,10 +1281,16 @@ function wireConnectForm(): void {
 let packPath: string | null = null;
 let packPlan: PackPlan | null = null;
 let packChoices: string[] = [];
+/// Consent to run this pack's scripts, and — separately — to run the ones the read rated
+/// danger. Two questions, because they are two decisions: one about the author, one about the
+/// code. Reset with every pack, so a consent never carries over to the next file.
+let allowScripts = false;
+let allowDangerousScripts = false;
 
 function appliedList(a: Applied): string {
   const rows: [string, string[]][] = [
     ["Downstream services", a.upstreams],
+    ["Scripts", a.scripts],
     ["Tools", a.tools],
     ["Identity seeds", a.identities],
     ["Replaced", a.replaced],
@@ -1242,6 +1309,421 @@ function appliedList(a: Applied): string {
 
 /// The pack panel only once a file has been chosen — the button that chooses one now lives
 /// alongside "Add a connection", so the two ways in sit together instead of one owning a card.
+// ---- scripts ------------------------------------------------------------------------
+//
+// A script is the operator's own code, run by an allowlisted interpreter and never a shell.
+// The screen has one job beyond editing: make provenance and the static read impossible to
+// miss, because a script you wrote and a script that arrived in a stranger's pack deserve
+// very different amounts of attention and look otherwise identical in a list.
+
+let scriptDraft: {
+  name: string;
+  original: string | null;
+  interpreter: string;
+  description: string;
+  body: string;
+} | null = null;
+let scriptReview: ScriptReview | null = null;
+let scriptDirty = false;
+let interpreterList: InterpreterView[] = [];
+const expandedScripts = new Set<string>();
+
+const SEVERITY_LABEL: Record<Severity, string> = {
+  danger: "danger",
+  warn: "warn",
+  note: "note",
+};
+
+/// The starter each interpreter gets, so a new script is a working program rather than a blank
+/// page. Each reads argv and stdin and prints JSON, which is the contract a tool expects.
+const SCRIPT_STARTER: Record<string, string> = {
+  python3: `import sys, json
+
+# Arguments arrive in argv, long content on stdin. Never build a command line from either.
+args = sys.argv[1:]
+body = sys.stdin.read()
+
+print(json.dumps({"ok": True, "got": args, "bytes": len(body)}))
+`,
+  node: `const args = process.argv.slice(2);
+let body = "";
+process.stdin.on("data", (c) => (body += c));
+process.stdin.on("end", () => {
+  console.log(JSON.stringify({ ok: true, got: args, bytes: body.length }));
+});
+`,
+  deno: `// Deno runs with no filesystem, network or environment access unless granted.
+const args = Deno.args;
+const body = new TextDecoder().decode(await new Response(Deno.stdin.readable).arrayBuffer());
+
+console.log(JSON.stringify({ ok: true, got: args, bytes: body.length }));
+`,
+};
+
+function findingsHtml(findings: Finding[]): string {
+  if (findings.length === 0) {
+    return `<div class="meta">Nothing flagged. Still worth reading — a scan is a reading aid, not a verdict.</div>`;
+  }
+  return `<table class="findings"><tbody>${findings
+    .map(
+      (f) => `<tr>
+        <td><span class="sev sev-${f.severity}">${SEVERITY_LABEL[f.severity]}</span></td>
+        <td class="meta">line ${f.line}</td>
+        <td><code>${esc(f.excerpt)}</code><div class="meta">${esc(f.why)}</div></td>
+      </tr>`,
+    )
+    .join("")}</tbody></table>`;
+}
+
+function worstOf(findings: Finding[]): Severity | null {
+  if (findings.some((f) => f.severity === "danger")) return "danger";
+  if (findings.some((f) => f.severity === "warn")) return "warn";
+  return findings.length ? "note" : null;
+}
+
+function scriptsHtml(list: ScriptView[]): string {
+  const body =
+    list.length === 0
+      ? `<div class="meta">
+           No scripts yet. A script is your own code — forty lines of Python, JavaScript or
+           TypeScript — exposed as a tool. It runs through an allowlisted interpreter with the
+           same limits as any other action: one argument array, long content on stdin, a
+           timeout, an output cap. Never a shell.
+         </div>`
+      : list
+          .map((sc) => {
+            const open = expandedScripts.has(sc.name);
+            const worst = worstOf(sc.findings);
+            return `<div class="card">
+              <div class="row svc-head script-head" data-name="${esc(sc.name)}" style="margin-top:0;cursor:pointer">
+                <span class="twist">${open ? "\u25be" : "\u25b8"}</span>
+                <code>${esc(sc.name)}</code>
+                <span class="pill">${esc(sc.interpreter)}</span>
+                ${sc.sandboxed ? `<span class="pill good">sandboxed</span>` : ""}
+                ${sc.local ? "" : `<span class="pill">${esc(sc.origin)}</span>`}
+                ${worst ? `<span class="sev sev-${worst}">${SEVERITY_LABEL[worst]}</span>` : ""}
+                ${sc.problem ? `<span class="sev sev-danger">changed on disk</span>` : ""}
+                <span class="meta" style="margin-left:auto">${
+                  sc.used_by.length
+                    ? `run by ${sc.used_by.map((t) => esc(t)).join(", ")}`
+                    : "no tool runs it"
+                }</span>
+              </div>
+              ${
+                open
+                  ? `<div>
+                       ${
+                         sc.problem
+                           ? `<div class="notice warn">
+                                <strong>This file no longer matches what was registered.</strong>
+                                <div class="meta">${esc(sc.problem)}</div>
+                                <div class="meta">
+                                  The gateway will not start until it agrees again. If you
+                                  edited it outside the app, open it here and save; if you did
+                                  not, do not run it.
+                                </div>
+                              </div>`
+                           : ""
+                       }
+                       <table class="kv"><tbody>
+                         ${sc.description ? `<tr><td class="meta">What it does</td><td>${esc(sc.description)}</td></tr>` : ""}
+                         <tr><td class="meta">Where it came from</td><td>${esc(sc.origin)}</td></tr>
+                         <tr><td class="meta">Digest</td><td><code>${esc(sc.sha256.slice(0, 16))}\u2026</code></td></tr>
+                       </tbody></table>
+                       <h4>What the read found</h4>
+                       ${findingsHtml(sc.findings)}
+                       <pre class="script-body">${esc(sc.body)}</pre>
+                       <div class="row">
+                         <button class="ghost script-edit" data-name="${esc(sc.name)}">Edit\u2026</button>
+                         <button class="ghost script-expose" data-name="${esc(sc.name)}">Expose as a tool\u2026</button>
+                         <button class="danger script-delete" data-name="${esc(sc.name)}">Delete</button>
+                       </div>
+                     </div>`
+                  : ""
+              }
+            </div>`;
+          })
+          .join("");
+
+  return `<div class="card">
+    <h3>Scripts</h3>
+    <div class="meta">
+      Your own code, callable as a tool. Written here or carried in a pack \u2014 a pack's is
+      somebody else's code, so it is read and consented to before it lands.
+    </div>
+    ${body}
+    <div class="row"><button id="script-new" class="ghost">Write a script\u2026</button></div>
+  </div>`;
+}
+
+function scriptEditor(): string {
+  const d = scriptDraft!;
+  const options = interpreterList
+    .map(
+      (i) =>
+        `<option value="${esc(i.id)}"${i.id === d.interpreter ? " selected" : ""}>${esc(i.id)}${
+          i.sandboxed ? " \u2014 sandboxed by default" : ""
+        }</option>`,
+    )
+    .join("");
+
+  return `<div class="card">
+    <h3>${d.original ? `Edit <code>${esc(d.original)}</code>` : "Write a script"}</h3>
+    <div class="meta">
+      Caller input reaches this script through its arguments and standard input, and nowhere
+      else \u2014 nothing here templates the program text, so an f-string or a template literal
+      is just code. Read the argument; don't build a command line from it.
+    </div>
+
+    <table class="kv"><tbody>
+      <tr>
+        <td class="meta">Name</td>
+        <td><input id="sd-name" value="${esc(d.name)}" placeholder="vault-write"${
+          d.original ? " disabled" : ""
+        } />
+        <div class="meta">a\u2013z, digits, <code>-</code> and <code>_</code>. Becomes the filename under <code>scripts/</code>.</div></td>
+      </tr>
+      <tr>
+        <td class="meta">Interpreter</td>
+        <td><select id="sd-interp">${options}</select></td>
+      </tr>
+      <tr>
+        <td class="meta">What it does</td>
+        <td><input id="sd-desc" value="${esc(d.description)}" placeholder="Append a block under a heading" /></td>
+      </tr>
+    </tbody></table>
+
+    <h4>Program</h4>
+    <textarea id="sd-body" class="script-edit-area" spellcheck="false">${esc(d.body)}</textarea>
+
+    <h4>What the read finds</h4>
+    <div id="sd-review">${
+      scriptReview
+        ? findingsHtml(scriptReview.findings)
+        : `<div class="meta">Stop typing for a moment and this fills in.</div>`
+    }</div>
+    <div class="meta">
+      This is advice, not a gate: you wrote it. The same read is a gate for a script arriving in
+      somebody else's pack.
+    </div>
+
+    <div class="row">
+      <button id="sd-save" class="primary">Save</button>
+      <button id="sd-cancel" class="ghost">Cancel</button>
+    </div>
+  </div>`;
+}
+
+function wireScripts(list: ScriptView[]): void {
+  for (const h of Array.from(document.querySelectorAll<HTMLElement>(".script-head"))) {
+    h.addEventListener("click", () => {
+      const name = h.dataset.name!;
+      if (!expandedScripts.delete(name)) expandedScripts.add(name);
+      void refresh();
+    });
+  }
+
+  $("#script-new")?.addEventListener("click", async () => {
+    if (interpreterList.length === 0) {
+      interpreterList = await invoke<InterpreterView[]>("interpreters");
+    }
+    const interp = interpreterList[0]?.id ?? "python3";
+    scriptDraft = {
+      name: "",
+      original: null,
+      interpreter: interp,
+      description: "",
+      body: SCRIPT_STARTER[interp] ?? "",
+    };
+    scriptReview = null;
+    scriptDirty = false;
+    void refresh();
+  });
+
+  for (const b of Array.from(document.querySelectorAll<HTMLElement>(".script-edit"))) {
+    b.addEventListener("click", async () => {
+      const sc = list.find((x) => x.name === b.dataset.name);
+      if (!sc) return;
+      if (interpreterList.length === 0) {
+        interpreterList = await invoke<InterpreterView[]>("interpreters");
+      }
+      scriptDraft = {
+        name: sc.name,
+        original: sc.name,
+        interpreter: sc.interpreter,
+        description: sc.description,
+        body: sc.body,
+      };
+      scriptReview = null;
+      scriptDirty = false;
+      void refresh();
+    });
+  }
+
+  for (const b of Array.from(document.querySelectorAll<HTMLElement>(".script-delete"))) {
+    b.addEventListener("click", async () => {
+      const name = b.dataset.name!;
+      if (!confirm(`Delete ${name}? Its file is removed from disk.`)) return;
+      try {
+        await invoke("delete_script", { name });
+      } catch (e) {
+        alert(String(e));
+        return;
+      }
+      expandedScripts.delete(name);
+      void refresh();
+    });
+  }
+
+  for (const b of Array.from(document.querySelectorAll<HTMLElement>(".script-expose"))) {
+    b.addEventListener("click", () => exposeScript(b.dataset.name!));
+  }
+}
+
+/// Turn a script into a tool an upstream client can call.
+///
+/// Deliberately separate from writing the script: one script can back several tools with
+/// different arguments, and policy attaches to the tool a caller names, not to the file.
+async function exposeScript(script: string): Promise<void> {
+  const tool = prompt(
+    `Tool name for ${script} — this is what a client calls.\n\n` +
+      `Arguments are declared next, as a comma-separated argv template.`,
+    `${script.replace(/-/g, "_")}`,
+  );
+  if (!tool) return;
+  const argLine = prompt(
+    `Arguments for ${tool}, comma-separated.\n\n` +
+      `A {name} is filled from the caller's argument of that name. Long content belongs on ` +
+      `standard input, not here.\n\nExample:  append,--uid,{uid},--heading,{heading}`,
+    "",
+  );
+  if (argLine === null) return;
+  const stdin = prompt(
+    `What goes on standard input? A template like {text}, or blank for nothing.`,
+    "{text}",
+  );
+  if (stdin === null) return;
+
+  try {
+    const result = await invoke<ApplyResult>("add_script_tool", {
+      tool,
+      script,
+      description: prompt(`One line describing ${tool}, for the client's tool list.`, "") ?? "",
+      args: argLine
+        .split(",")
+        .map((a) => a.trim())
+        .filter((a) => a.length > 0),
+      stdin: stdin.trim() === "" ? null : stdin,
+      inputSchema: null,
+      onFirstCall: "ask" as Decision,
+    });
+    if (
+      confirm(
+        `Added ${tool} to ${result.config_path}.\n\n` +
+          `The gateway is still serving the configuration it started with. Restart now to apply?\n\n${RESTART_WARNS}`,
+      )
+    ) {
+      await invoke("restart_app");
+    }
+  } catch (e) {
+    alert(String(e));
+    return;
+  }
+  void refresh();
+}
+
+let reviewTimer: number | undefined;
+
+function wireScriptEditor(): void {
+  const d = scriptDraft!;
+  const name = $("#sd-name") as HTMLInputElement | null;
+  const interp = $("#sd-interp") as HTMLSelectElement | null;
+  const desc = $("#sd-desc") as HTMLInputElement | null;
+  const body = $("#sd-body") as HTMLTextAreaElement | null;
+
+  name?.addEventListener("input", () => {
+    d.name = name.value;
+    scriptDirty = true;
+  });
+  desc?.addEventListener("input", () => {
+    d.description = desc.value;
+    scriptDirty = true;
+  });
+  interp?.addEventListener("change", () => {
+    const was = d.interpreter;
+    d.interpreter = interp.value;
+    scriptDirty = true;
+    // Only swap the starter if the body is still the previous starter untouched — otherwise
+    // changing the dropdown would throw away what somebody wrote.
+    if (d.body.trim() === (SCRIPT_STARTER[was] ?? "").trim()) {
+      d.body = SCRIPT_STARTER[d.interpreter] ?? "";
+      if (body) body.value = d.body;
+    }
+    void refresh();
+  });
+
+  body?.addEventListener("input", () => {
+    d.body = body.value;
+    scriptDirty = true;
+    // Re-read on a pause rather than a keystroke: the scan is cheap, but repainting the
+    // findings under a moving cursor is not something anybody can read.
+    window.clearTimeout(reviewTimer);
+    reviewTimer = window.setTimeout(async () => {
+      try {
+        scriptReview = await invoke<ScriptReview>("review_script", {
+          name: d.name || "draft",
+          interpreter: d.interpreter,
+          body: d.body,
+        });
+      } catch {
+        scriptReview = null;
+        return;
+      }
+      const target = $("#sd-review");
+      if (target) paint(target, findingsHtml(scriptReview.findings));
+    }, 400);
+  });
+
+  $("#sd-cancel")?.addEventListener("click", () => {
+    scriptDraft = null;
+    scriptReview = null;
+    scriptDirty = false;
+    void refresh();
+  });
+
+  $("#sd-save")?.addEventListener("click", async () => {
+    try {
+      await invoke<ScriptView>("save_script", {
+        name: d.name.trim(),
+        interpreter: d.interpreter,
+        description: d.description,
+        body: d.body,
+      });
+    } catch (e) {
+      alert(String(e));
+      return;
+    }
+    const wasNew = d.original === null;
+    const saved = d.name.trim();
+    scriptDraft = null;
+    scriptReview = null;
+    scriptDirty = false;
+    expandedScripts.add(saved);
+    void refresh();
+    if (
+      confirm(
+        `Saved ${saved}.\n\n` +
+          (wasNew
+            ? `Nothing calls it yet — expose it as a tool from the list.\n\n`
+            : ``) +
+          `The gateway is still serving the configuration it started with. Restart now to apply?\n\n${RESTART_WARNS}`,
+      )
+    ) {
+      await invoke("restart_app");
+    }
+  });
+}
+
 function renderPackPlanIfAny(): string {
   return packPath && packPlan ? renderPackPanel() : "";
 }
@@ -1290,6 +1772,8 @@ function renderPackPanel(): string {
              ${p.replaces ? `<h3 style="margin-top:12px">Replacing would change</h3>${appliedList(p.replaces)}` : ""}`
       }
 
+      ${p.scripts.length > 0 ? packScriptsHtml(p) : ""}
+
       ${
         p.missing_files.length > 0
           ? `<h3 style="margin-top:12px">Files this pack expects</h3>
@@ -1330,11 +1814,13 @@ function renderPackPanel(): string {
 
       <div class="row">
         ${
-          p.adds
-            ? `<button id="pack-import" class="primary">Import</button>`
-            : p.replaces
-              ? `<button id="pack-replace" class="danger">Import, replacing what collides</button>`
-              : ""
+          consentWithheld(p)
+            ? `<span class="meta">Read the scripts and tick the boxes above to enable Import.</span>`
+            : p.adds
+              ? `<button id="pack-import" class="primary">Import</button>`
+              : p.replaces
+                ? `<button id="pack-replace" class="danger">Import, replacing what collides</button>`
+                : ""
         }
         <button id="pack-cancel" class="ghost">Cancel</button>
         ${blocked ? `<span class="meta">This pack cannot be imported as it stands.</span>` : ""}
@@ -1342,11 +1828,70 @@ function renderPackPanel(): string {
     </div>`;
 }
 
+/// True while this pack carries code the operator has not agreed to run.
+///
+/// The button is withheld rather than shown-and-refused: the Rust refuses either way, but a
+/// disabled Import beside an unticked box says what to do, and a refusal after the click only
+/// says you were wrong.
+function consentWithheld(p: PackPlan): boolean {
+  if (p.scripts.length === 0) return false;
+  if (!allowScripts) return true;
+  return p.dangerous.length > 0 && !allowDangerousScripts;
+}
+
+/// The review an operator reads before agreeing to run somebody else's code.
+function packScriptsHtml(p: PackPlan): string {
+  const dangerous = new Set(p.dangerous);
+  return `
+    <h3 style="margin-top:12px">Scripts this pack carries</h3>
+    <div class="notice warn">
+      <strong>This is somebody else's code, and importing it puts it on your machine.</strong>
+      <div class="meta">
+        A pack without scripts is pure data — importing it cannot run anything. This one is
+        different, so it takes an explicit yes. Read each program below; the flags are a
+        reading aid, not a verdict.
+      </div>
+    </div>
+    ${p.scripts
+      .map(
+        (sc) => `<div class="card">
+          <div class="row" style="margin-top:0">
+            <code>${esc(sc.name)}</code>
+            <span class="pill">${esc(sc.interpreter)}</span>
+            ${sc.sandboxed ? `<span class="pill good">sandboxed</span>` : ""}
+            ${dangerous.has(sc.name) ? `<span class="sev sev-danger">danger</span>` : ""}
+            <span class="meta">${sc.lines} lines · ${sc.bytes} bytes</span>
+            <span class="meta" style="margin-left:auto"><code>${esc(sc.sha256.slice(0, 16))}\u2026</code></span>
+          </div>
+          ${findingsHtml(sc.findings)}
+        </div>`,
+      )
+      .join("")}
+    <label class="check">
+      <input type="checkbox" id="pack-allow-scripts"${allowScripts ? " checked" : ""} />
+      I have read ${p.scripts.length === 1 ? "this script" : "these scripts"} and want ${
+        p.scripts.length === 1 ? "it" : "them"
+      } on this machine
+    </label>
+    ${
+      p.dangerous.length > 0
+        ? `<label class="check">
+             <input type="checkbox" id="pack-allow-danger"${allowDangerousScripts ? " checked" : ""} />
+             I accept that ${p.dangerous.map((d) => `<code>${esc(d)}</code>`).join(", ")}
+             ${p.dangerous.length === 1 ? "starts other processes or turns data into code" : "start other processes or turn data into code"} at runtime
+           </label>`
+        : ""
+    }`;
+}
+
 function wirePackPanel(): void {
   $("#pack-pick")?.addEventListener("click", async () => {
     const chosen = await invoke<string | null>("choose_pack");
     if (!chosen) return;
     try {
+      // A fresh pack is a fresh decision: consent never carries over from the last file.
+      allowScripts = false;
+      allowDangerousScripts = false;
       packPlan = await invoke<PackPlan>("inspect_pack", { path: chosen });
       packPath = chosen;
       packChoices = packPlan.missing_files.map(() => "");
@@ -1372,8 +1917,20 @@ function wirePackPanel(): void {
     packPath = null;
     packPlan = null;
     packChoices = [];
+    allowScripts = false;
+    allowDangerousScripts = false;
     void refresh();
   });
+
+  for (const [id, set] of [
+    ["#pack-allow-scripts", (v: boolean) => (allowScripts = v)],
+    ["#pack-allow-danger", (v: boolean) => (allowDangerousScripts = v)],
+  ] as const) {
+    $(id)?.addEventListener("change", (e) => {
+      set((e.target as HTMLInputElement).checked);
+      void refresh();
+    });
+  }
 
   for (const [id, replace] of [
     ["#pack-import", false],
@@ -1387,6 +1944,8 @@ function wirePackPanel(): void {
           path: packPath,
           replace,
           resolutions: packChoices,
+          allowScripts,
+          allowDangerousScripts,
         });
       } catch (e) {
         alert(String(e));
@@ -1395,6 +1954,8 @@ function wirePackPanel(): void {
       packPath = null;
       packPlan = null;
       packChoices = [];
+      allowScripts = false;
+      allowDangerousScripts = false;
 
       const env = result.missing_env.length
         ? `\n\nStill to set: ${result.missing_env.join(", ")}`
@@ -1658,9 +2219,7 @@ function upstreamIsBeingEdited(): boolean {
   return (
     el instanceof HTMLElement &&
     $("#upstream").contains(el) &&
-    (el instanceof HTMLInputElement ||
-      el instanceof HTMLSelectElement ||
-      el instanceof HTMLTextAreaElement)
+    (isTyping(el) || el instanceof HTMLSelectElement)
   );
 }
 
@@ -2154,9 +2713,7 @@ function networkIsBeingEdited(): boolean {
   return (
     el instanceof HTMLElement &&
     $("#network").contains(el) &&
-    (el instanceof HTMLInputElement ||
-      el instanceof HTMLSelectElement ||
-      el instanceof HTMLTextAreaElement)
+    (isTyping(el) || el instanceof HTMLSelectElement)
   );
 }
 

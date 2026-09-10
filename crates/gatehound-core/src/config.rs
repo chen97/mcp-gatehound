@@ -97,6 +97,8 @@ pub enum Action {
     Proxy { upstream: String, op: String },
     /// Spawn a local process.
     Exec(ExecSpec),
+    /// Run a registered script through an allowlisted interpreter.
+    Script(crate::scripts::ScriptSpec),
 }
 
 impl Action {
@@ -104,13 +106,22 @@ impl Action {
         match self {
             Action::Proxy { .. } => "proxy",
             Action::Exec(_) => "exec",
+            Action::Script(_) => "script",
         }
     }
 
     pub fn upstream(&self) -> Option<&str> {
         match self {
             Action::Proxy { upstream, .. } => Some(upstream),
-            Action::Exec(_) => None,
+            Action::Exec(_) | Action::Script(_) => None,
+        }
+    }
+
+    /// The registered script this action runs, if any.
+    pub fn script(&self) -> Option<&str> {
+        match self {
+            Action::Script(spec) => Some(spec.script.as_str()),
+            _ => None,
         }
     }
 }
@@ -274,9 +285,20 @@ pub struct Config {
     pub tools: Vec<ToolConfig>,
     #[serde(default, rename = "identity")]
     pub identities: Vec<IdentitySeed>,
+    /// Scripts this gateway may run, by name. The bodies live in `scripts/` beside this file.
+    #[serde(default, rename = "script")]
+    pub scripts: Vec<crate::scripts::ScriptDef>,
     /// How, if at all, the loopback listener is reachable from off this machine.
     #[serde(default)]
     pub publish: crate::publish::PublishConfig,
+    /// The directory this config was loaded from. Not serialized: it is a property of where
+    /// the file is, not of what it says, and writing it out would make a config that stops
+    /// working the moment it is copied somewhere else.
+    ///
+    /// Script paths resolve against it, which is what lets a script travel beside `pack.toml`
+    /// instead of being pinned to one machine's absolute path.
+    #[serde(skip)]
+    pub base_dir: Option<std::path::PathBuf>,
 }
 
 fn default_listen() -> String {
@@ -304,9 +326,44 @@ impl Default for Config {
             upstreams: Vec::new(),
             tools: Vec::new(),
             identities: Vec::new(),
+            scripts: Vec::new(),
             publish: crate::publish::PublishConfig::default(),
+            base_dir: None,
         }
     }
+}
+
+/// Prove an exec command names something that can actually run here.
+///
+/// An absolute or relative path must exist and be a file; a bare name is looked up the way the
+/// spawn will look it up, on PATH. Reported as an error rather than a warning because the
+/// alternative — a tool that imports cleanly and fails on first call — is the failure this is
+/// here to move earlier.
+pub fn resolve_command(cmd: &str) -> Result<std::path::PathBuf> {
+    let cmd = cmd.trim();
+    if cmd.contains('/') || cmd.contains('\\') {
+        let p = std::path::PathBuf::from(cmd);
+        let meta =
+            std::fs::metadata(&p).with_context(|| format!("'{cmd}' is not on this machine"))?;
+        if !meta.is_file() {
+            bail!("'{cmd}' is not a file");
+        }
+        return Ok(p);
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(cmd);
+        if std::fs::metadata(&candidate)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
+            return Ok(candidate);
+        }
+    }
+    bail!(
+        "'{cmd}' was not found on PATH. Gatehound's PATH is not your shell's — give an absolute \
+         path to the binary."
+    )
 }
 
 fn env(key: &str) -> Option<String> {
@@ -328,7 +385,7 @@ fn env_list(key: &str) -> Option<Vec<String>> {
 impl Config {
     /// Load `gatehound.toml` (if present) and apply environment overrides.
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let mut cfg = match path {
+        let mut cfg: Config = match path {
             Some(p) => {
                 let raw = std::fs::read_to_string(p)
                     .with_context(|| format!("reading config {}", p.display()))?;
@@ -336,6 +393,13 @@ impl Config {
             }
             None => Config::default(),
         };
+        // Scripts resolve against the directory holding this file, so a config plus its
+        // `scripts/` moves as one unit. An empty parent means the file was named bare, in
+        // which case the working directory is the right answer.
+        cfg.base_dir = path.map(|p| match p.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+            _ => std::path::PathBuf::from("."),
+        });
         cfg.apply_env();
         // A file written by an older build carries `bearer_identity = ""`, and serde's default
         // only fires for an absent key, not an empty one. Left alone, every call the super
@@ -460,6 +524,15 @@ impl Config {
                 );
             }
         }
+        let mut script_names = std::collections::HashSet::new();
+        for sc in &self.scripts {
+            crate::scripts::valid_name(&sc.name)
+                .with_context(|| "a script name becomes a filename under scripts/")?;
+            if !script_names.insert(&sc.name) {
+                bail!("duplicate script name: {}", sc.name);
+            }
+        }
+
         let mut seen = std::collections::HashSet::new();
         for t in &self.tools {
             if !seen.insert(&t.name) {
@@ -490,6 +563,32 @@ impl Config {
                 if spec.max_concurrency == 0 {
                     bail!("tool '{}' has max_concurrency = 0", t.name);
                 }
+                // A tool naming an upstream op that does not exist already fails here. An exec
+                // tool naming a binary that is not on this machine used to fail at the first
+                // call instead, which is the wrong time to find out: a pack imports cleanly and
+                // breaks later. Resolve it now, so `check` answers for both.
+                if let Err(e) = resolve_command(&spec.cmd) {
+                    bail!("tool '{}': {e}", t.name);
+                }
+            }
+            if let Action::Script(spec) = &t.action {
+                if spec.max_concurrency == 0 {
+                    bail!("tool '{}' has max_concurrency = 0", t.name);
+                }
+                let Some(def) = self.script(&spec.script) else {
+                    bail!(
+                        "tool '{}' runs script '{}', which is not registered in this config",
+                        t.name,
+                        spec.script
+                    );
+                };
+                if let Some(dir) = &self.base_dir {
+                    // Flattened rather than wrapped: `with_context` puts the useful half in
+                    // the source chain, so a caller that prints `{e}` — and several do — would
+                    // show only "tool 'brain_append'" and nothing about what is wrong with it.
+                    crate::scripts::verify(dir, def)
+                        .map_err(|e| anyhow::anyhow!("tool '{}': {e:#}", t.name))?;
+                }
             }
         }
         // Refuses a gateway that would be on the public internet with one factor. Warnings
@@ -517,6 +616,18 @@ impl Config {
         self.upstreams.iter().find(|u| u.name == name)
     }
 
+    pub fn script(&self, name: &str) -> Option<&crate::scripts::ScriptDef> {
+        self.scripts.iter().find(|s| s.name == name)
+    }
+
+    /// Where `scripts/` lives. Falls back to the working directory for a config that was built
+    /// in memory rather than read from a file.
+    pub fn script_dir(&self) -> std::path::PathBuf {
+        self.base_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
     /// True when a caller must also present a valid Cloudflare Access JWT.
     pub fn access_required(&self) -> bool {
         self.auth.access.is_some()
@@ -526,6 +637,106 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exec_tool_naming_a_binary_that_is_not_here_fails_at_check() {
+        // Previously this only checked the string was non-empty, so a pack imported cleanly
+        // and the tool failed on the first call that needed it — the worst possible moment to
+        // find out. A tool naming an unknown upstream op has always failed here; now both do.
+        let mut cfg = Config {
+            auth: AuthConfig {
+                bearer_token: Some("0123456789abcdef0123".into()),
+                ..Default::default()
+            },
+            tools: vec![ToolConfig {
+                name: "brain_append".into(),
+                description: String::new(),
+                input_schema: None,
+                action: Action::Exec(ExecSpec {
+                    cmd: "/nowhere/bin/vault-write".into(),
+                    ..Default::default()
+                }),
+                rate_limit: None,
+                idempotent: false,
+            }],
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("brain_append"), "{err}");
+        assert!(err.contains("not on this machine"), "{err}");
+
+        // A bare name is looked up the way the spawn will look it up.
+        if let Action::Exec(spec) = &mut cfg.tools[0].action {
+            spec.cmd = "definitely-not-a-real-binary-xyz".into();
+        }
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("PATH"), "{err}");
+
+        // And something that is here passes.
+        if let Action::Exec(spec) = &mut cfg.tools[0].action {
+            spec.cmd = "/bin/sh".into();
+        }
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn a_tool_naming_an_unregistered_script_fails_at_check() {
+        let cfg = Config {
+            auth: AuthConfig {
+                bearer_token: Some("0123456789abcdef0123".into()),
+                ..Default::default()
+            },
+            tools: vec![ToolConfig {
+                name: "brain_append".into(),
+                description: String::new(),
+                input_schema: None,
+                action: Action::Script(crate::scripts::ScriptSpec {
+                    script: "vault-write".into(),
+                    ..Default::default()
+                }),
+                rate_limit: None,
+                idempotent: false,
+            }],
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("not registered"), "{err}");
+    }
+
+    #[test]
+    fn a_registered_script_whose_body_is_gone_stops_the_gateway_starting() {
+        let dir = std::env::temp_dir().join(format!("gh-cfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(crate::scripts::SCRIPT_DIR)).unwrap();
+        let cfg = Config {
+            auth: AuthConfig {
+                bearer_token: Some("0123456789abcdef0123".into()),
+                ..Default::default()
+            },
+            scripts: vec![crate::scripts::ScriptDef {
+                name: "vault-write".into(),
+                interpreter: crate::scripts::Interpreter::Python3,
+                sha256: String::new(),
+                description: String::new(),
+                origin: crate::scripts::Origin::Local,
+            }],
+            base_dir: Some(dir.clone()),
+            tools: vec![ToolConfig {
+                name: "brain_append".into(),
+                description: String::new(),
+                input_schema: None,
+                action: Action::Script(crate::scripts::ScriptSpec {
+                    script: "vault-write".into(),
+                    ..Default::default()
+                }),
+                rate_limit: None,
+                idempotent: false,
+            }],
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("not here"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn a_freshly_generated_configuration_writes_and_reads_back() {
