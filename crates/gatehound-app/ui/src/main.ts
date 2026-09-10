@@ -503,13 +503,15 @@ async function renderHome(snap: Snapshot): Promise<void> {
   // on its own and the diagram stays where it is.
   paint(
     $("#home"),
-    `<div id="approvals"></div><div id="home-flow"></div><div id="home-recent"></div>`,
+    `<div id="home-flow"></div><div id="approvals"></div><div id="home-recent"></div>`,
   );
-  // Above the flow, because a call held for a decision is the only thing on this screen that
-  // is waiting on you. It lived on Upstream, one tab away from the page you actually leave
-  // open — which is the wrong place for the one thing with a clock running on it.
-  if (paint($("#approvals"), approvalsHtml(pending))) wireApprovals();
   paint($("#home-flow"), flowHtml(snap, clientsOf(rules, access), access));
+  // Under the flow: the diagram is what the screen is, and an approval is something that
+  // happened within it. It lived on Upstream, one tab away from the page people actually leave
+  // open, which is the wrong place for the one thing with a clock running on it — but the
+  // waiting badge on the gate is what draws the eye down here, so it belongs after the picture
+  // that points at it, not in front of it.
+  if (paint($("#approvals"), approvalsHtml(pending))) wireApprovals();
   paint($("#home-recent"), recentHtml(recent));
 }
 
