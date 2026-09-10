@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -1090,6 +1090,35 @@ fn write_config(state: &tauri::State<'_, AppState>, cfg: &Config) -> Result<(), 
         .map_err(err)
 }
 
+// ---- dialogs -------------------------------------------------------------------------
+//
+// The window's own `confirm()` and `alert()` are not dependable here. Whether the webview
+// draws them is the platform's business, not ours, and a confirmation that silently does not
+// appear is worse than none: the caller reads a return value that nobody was asked for, and a
+// destructive action proceeds as though it had been approved. The file picker and the startup
+// error already go through the dialog plugin; so should every question that gates something
+// irreversible.
+
+/// Ask a yes/no question. Returns what the operator chose.
+#[tauri::command]
+async fn ask(app: AppHandle, message: String, title: Option<String>) -> bool {
+    app.dialog()
+        .message(message)
+        .title(title.unwrap_or_else(|| "MCP Gatehound".into()))
+        .buttons(MessageDialogButtons::OkCancel)
+        .blocking_show()
+}
+
+/// Tell the operator something. Returns once it has been dismissed, so a caller can rely on it
+/// having been read before it carries on.
+#[tauri::command]
+async fn say(app: AppHandle, message: String, title: Option<String>) {
+    app.dialog()
+        .message(message)
+        .title(title.unwrap_or_else(|| "MCP Gatehound".into()))
+        .blocking_show();
+}
+
 #[tauri::command]
 fn inspect_pack(state: tauri::State<'_, AppState>, path: String) -> Result<PackPlan, String> {
     let loaded = Pack::load(Path::new(&path)).map_err(err)?;
@@ -1384,6 +1413,8 @@ fn main() {
             save_script,
             delete_script,
             add_script_tool,
+            ask,
+            say,
         ])
         .setup(|app| {
             // An accessory app that dies in setup leaves no Dock icon, no window and no

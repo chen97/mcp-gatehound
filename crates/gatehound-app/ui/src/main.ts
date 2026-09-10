@@ -565,7 +565,7 @@ function wireApprovals(): void {
       try {
         await invoke("resolve", { id, resolution });
       } catch (e) {
-        alert(String(e));
+        void say(String(e));
       }
       await refresh();
     });
@@ -821,6 +821,38 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
 
 /// Whether rebuilding this screen would throw away something half-typed. Same rule as the
 /// Network screen: a URL or a token being entered outranks a five-second refresh.
+/// Ask a yes/no question, natively.
+///
+/// The window's own `confirm()` is not dependable in a webview: whether it draws anything is
+/// the platform's business, and a confirmation that silently does not appear is worse than
+/// none — the caller reads a return value nobody was asked for, and something irreversible
+/// goes ahead as though it had been approved. The file picker already goes through the native
+/// dialog; so should every question that gates a destructive action.
+///
+/// Falls back to the built-in when the bridge is absent, so the UI still runs in a plain
+/// browser for development.
+async function ask(message: string, title?: string): Promise<boolean> {
+  try {
+    const answer = await invoke<unknown>("ask", { message, title: title ?? null });
+    // Only a real yes or no counts. A bridge that resolves with something else has not asked
+    // anybody anything, and reading that as "no" would be the same silent failure in a new
+    // costume — an operator clicking Revoke and watching nothing happen.
+    if (typeof answer === "boolean") return answer;
+  } catch {
+    // Falls through to the built-in.
+  }
+  return window.confirm(message);
+}
+
+/// Say something and wait until it has been dismissed.
+async function say(message: string, title?: string): Promise<void> {
+  try {
+    await invoke("say", { message, title: title ?? null });
+  } catch {
+    window.alert(message);
+  }
+}
+
 /// Whether this element holds something half-entered that a repaint would discard.
 ///
 /// A text field does; a checkbox does not. A tick is a finished decision, and the screen has to
@@ -849,7 +881,12 @@ function actionsAreBeingEdited(): boolean {
 // MCP server the tool list is discovered rather than typed, because a name typed from memory
 // is a name you find out was wrong on the first call.
 
+/// `script` is a kind you choose but never a kind a draft holds: picking it hands straight
+/// over to the script editor, which has its own save path. It is in this list because a script
+/// *is* a downstream — a local program the gateway calls — and having it be the one you reach
+/// by a different button than the other three said otherwise.
 type ConnKind = "mcp" | "http" | "exec";
+type KindChoice = ConnKind | "script";
 
 interface DraftTool {
   chosen: boolean;
@@ -929,7 +966,7 @@ function newDraft(kind: ConnKind): Draft {
   };
 }
 
-const KINDS: { value: ConnKind; label: string; hint: string }[] = [
+const KINDS: { value: KindChoice; label: string; hint: string }[] = [
   {
     value: "mcp",
     label: "Another MCP server",
@@ -941,9 +978,14 @@ const KINDS: { value: ConnKind; label: string; hint: string }[] = [
     hint: "Each tool is one request: a method and a path, with {placeholders} filled from the caller's arguments and never able to escape their part of the URL.",
   },
   {
+    value: "script",
+    label: "A script you write",
+    hint: "Your own code — Python, JavaScript or TypeScript — run by an allowlisted interpreter and never a shell. Written here, and exposed as a tool once it is saved.",
+  },
+  {
     value: "exec",
     label: "Local commands",
-    hint: "Nothing to connect to — each tool runs a program on this machine. Arguments are passed as a list, never through a shell.",
+    hint: "Nothing to connect to — each tool runs a program already on this machine. Arguments are passed as a list, never through a shell.",
   },
 ];
 
@@ -1257,7 +1299,13 @@ function wireConnectForm(): void {
   $("#c-kind")?.addEventListener("change", (e) => {
     // Changing kind changes which fields exist, so the draft restarts rather than carrying
     // over half-filled values that no longer mean anything.
-    const kind = (e.currentTarget as HTMLSelectElement).value as ConnKind;
+    const kind = (e.currentTarget as HTMLSelectElement).value as KindChoice;
+    if (kind === "script") {
+      draft = null;
+      connDirty = false;
+      void openScriptEditor();
+      return;
+    }
     draft = newDraft(kind);
     connDirty = false;
     redrawActions();
@@ -1343,7 +1391,7 @@ function wireConnectForm(): void {
     const asked = result.asked_for.length
       ? `\n\nThese clients will ask you before their first call: ${result.asked_for.join(", ")}`
       : "";
-    const restart = confirm(
+    const restart = await ask(
       `Added to ${result.config_path}.\n\n` +
         `The gateway is still serving what it started with. Restart now to apply?\n\n` +
         `${RESTART_WARNS}${env}${asked}`,
@@ -1598,6 +1646,25 @@ function scriptEditor(): string {
   </div>`;
 }
 
+/// Start a new script. Reached from the Kind dropdown and from the list's own button, so it
+/// lives in one place rather than being written twice and drifting.
+async function openScriptEditor(): Promise<void> {
+  if (interpreterList.length === 0) {
+    interpreterList = await invoke<InterpreterView[]>("interpreters");
+  }
+  const interp = interpreterList[0]?.id ?? "python3";
+  scriptDraft = {
+    name: "",
+    original: null,
+    interpreter: interp,
+    description: "",
+    body: SCRIPT_STARTER[interp] ?? "",
+  };
+  scriptReview = null;
+  scriptDirty = false;
+  redrawActions();
+}
+
 function wireScripts(list: ScriptView[]): void {
   for (const h of Array.from(document.querySelectorAll<HTMLElement>(".script-head"))) {
     h.addEventListener("click", () => {
@@ -1607,22 +1674,7 @@ function wireScripts(list: ScriptView[]): void {
     });
   }
 
-  $("#script-new")?.addEventListener("click", async () => {
-    if (interpreterList.length === 0) {
-      interpreterList = await invoke<InterpreterView[]>("interpreters");
-    }
-    const interp = interpreterList[0]?.id ?? "python3";
-    scriptDraft = {
-      name: "",
-      original: null,
-      interpreter: interp,
-      description: "",
-      body: SCRIPT_STARTER[interp] ?? "",
-    };
-    scriptReview = null;
-    scriptDirty = false;
-    redrawActions();
-  });
+  $("#script-new")?.addEventListener("click", () => void openScriptEditor());
 
   for (const b of Array.from(document.querySelectorAll<HTMLElement>(".script-edit"))) {
     b.addEventListener("click", async () => {
@@ -1647,11 +1699,11 @@ function wireScripts(list: ScriptView[]): void {
   for (const b of Array.from(document.querySelectorAll<HTMLElement>(".script-delete"))) {
     b.addEventListener("click", async () => {
       const name = b.dataset.name!;
-      if (!confirm(`Delete ${name}? Its file is removed from disk.`)) return;
+      if (!(await ask(`Delete ${name}? Its file is removed from disk.`))) return;
       try {
         await invoke("delete_script", { name });
       } catch (e) {
-        alert(String(e));
+        void say(String(e));
         return;
       }
       expandedScripts.delete(name);
@@ -1702,7 +1754,7 @@ async function exposeScript(script: string): Promise<void> {
       onFirstCall: "ask" as Decision,
     });
     if (
-      confirm(
+      await ask(
         `Added ${tool} to ${result.config_path}.\n\n` +
           `The gateway is still serving the configuration it started with. Restart now to apply?\n\n${RESTART_WARNS}`,
       )
@@ -1710,7 +1762,7 @@ async function exposeScript(script: string): Promise<void> {
       await invoke("restart_app");
     }
   } catch (e) {
-    alert(String(e));
+    void say(String(e));
     return;
   }
   void refresh();
@@ -1784,7 +1836,7 @@ function wireScriptEditor(): void {
         body: d.body,
       });
     } catch (e) {
-      alert(String(e));
+      void say(String(e));
       return;
     }
     const wasNew = d.original === null;
@@ -1795,7 +1847,7 @@ function wireScriptEditor(): void {
     expandedScripts.add(saved);
     void refresh();
     if (
-      confirm(
+      await ask(
         `Saved ${saved}.\n\n` +
           (wasNew
             ? `Nothing calls it yet — expose it as a tool from the list.\n\n`
@@ -1980,7 +2032,7 @@ function wirePackPanel(): void {
       packPath = chosen;
       packChoices = packPlan.missing_files.map(() => "");
     } catch (e) {
-      alert(String(e));
+      void say(String(e));
       return;
     }
     await refresh();
@@ -2032,7 +2084,7 @@ function wirePackPanel(): void {
           allowDangerousScripts,
         });
       } catch (e) {
-        alert(String(e));
+        void say(String(e));
         return;
       }
       packPath = null;
@@ -2044,7 +2096,7 @@ function wirePackPanel(): void {
       const env = result.missing_env.length
         ? `\n\nStill to set: ${result.missing_env.join(", ")}`
         : "";
-      const restart = confirm(
+      const restart = await ask(
         `Imported into ${result.config_path}.\n\n` +
           `The gateway is still serving the configuration it started with. ` +
           `Restart now to apply?\n\n${RESTART_WARNS}${env}`,
@@ -2086,7 +2138,14 @@ function clientsOf(rules: IdentityRule[], access: Access): Client[] {
   // token issued before anything was granted to it.
   for (const r of rules) of(r.identity).rules.push(r);
   for (const t of access.tokens) of(t.identity).tokens.push(t);
-  return [...by.values()].sort((a, b) => a.identity.localeCompare(b.identity));
+  return [...by.values()]
+    // A client with nothing but revoked tokens is not a client. It cannot authenticate and it
+    // holds no permissions, so the row says only that something used to exist — which the
+    // request log already says, with the detail this list does not have. Rules are the reason
+    // to keep one: those still apply to anything that later authenticates as that name, so an
+    // identity that kept its rules stays visible, revoked tokens and all.
+    .filter((c) => c.rules.length > 0 || c.tokens.some((t) => !t.revoked_at))
+    .sort((a, b) => a.identity.localeCompare(b.identity));
 }
 
 /// One line saying what this client can do and what it holds, so the row is worth reading
@@ -2206,16 +2265,23 @@ function grantPickerHtml(snap: Snapshot): string {
     return `<div class="meta">No tools yet. Add a downstream first, then issue tokens for it.</div>`;
   }
   return groups
-    .map(
-      (g) => `<div class="grant-group">
-        <label class="check group">
-          <input type="checkbox" class="grant-all" data-group="${esc(g.key)}" />
-          <span class="grow">
-            <code>${esc(g.label)}</code>
-            <span class="meta">${esc(g.sub)} · ${g.tools.length} tool${g.tools.length === 1 ? "" : "s"}</span>
-          </span>
-        </label>
-        <div class="grant-tools">${g.tools
+    .map((g) => {
+      const open = expandedGrants.has(g.key);
+      return `<div class="grant-group">
+        <div class="grant-head">
+          <label class="check group">
+            <input type="checkbox" class="grant-all" data-group="${esc(g.key)}" />
+            <span class="grow">
+              <code>${esc(g.label)}</code>
+              <span class="meta">${esc(g.sub)} · ${g.tools.length} tool${g.tools.length === 1 ? "" : "s"}</span>
+            </span>
+          </label>
+          <button type="button" class="ghost grant-twist" data-group="${esc(g.key)}"
+                  aria-expanded="${open}" title="${open ? "Hide" : "Show"} the tools under this">
+            <span class="twist">${open ? "\u25be" : "\u25b8"}</span>
+          </button>
+        </div>
+        <div class="grant-tools ${open ? "" : "hidden"}">${g.tools
           .map(
             (t) => `<label class="check sub">
               <input type="checkbox" class="grant" data-group="${esc(g.key)}" value="${esc(t.name)}" />
@@ -2226,10 +2292,14 @@ function grantPickerHtml(snap: Snapshot): string {
             </label>`,
           )
           .join("")}</div>
-      </div>`,
-    )
+      </div>`;
+    })
     .join("");
 }
+
+/// Services whose tools are showing. Starts empty: granting a whole downstream is the common
+/// answer, and a list that opens with every tool of every service unrolled buries it.
+const expandedGrants = new Set<string>();
 
 /// Tools by the downstream they come from, labelled the way that downstream is labelled
 /// everywhere else — by its target, not by the name the config files it under.
@@ -2272,6 +2342,21 @@ function syncGrantGroup(key: string): void {
 }
 
 function wireGrantPicker(): void {
+  // Toggled in the DOM rather than by redrawing. A repaint would rebuild the checkboxes from
+  // markup that does not know which are ticked — opening a service to remove one tool would
+  // silently undo every choice made so far.
+  for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>(".grant-twist"))) {
+    b.addEventListener("click", () => {
+      const key = b.dataset.group!;
+      const open = !expandedGrants.delete(key);
+      if (open) expandedGrants.add(key);
+      b.closest(".grant-group")?.querySelector(".grant-tools")?.classList.toggle("hidden", !open);
+      b.setAttribute("aria-expanded", String(open));
+      b.title = `${open ? "Hide" : "Show"} the tools under this`;
+      const tw = b.querySelector(".twist");
+      if (tw) tw.textContent = open ? "\u25be" : "\u25b8";
+    });
+  }
   for (const box of Array.from(document.querySelectorAll<HTMLInputElement>(".grant-all"))) {
     box.addEventListener("change", () => {
       const key = box.dataset.group!;
@@ -2476,7 +2561,7 @@ function wireToolFace(): void {
     try {
       out = await invoke("set_tool_face", { name: e.name, newName, description });
     } catch (err) {
-      alert(String(err));
+      void say(String(err));
       return;
     }
     editingTool = null;
@@ -2489,7 +2574,7 @@ function wireToolFace(): void {
     const kept = out.kept.length
       ? `\n\nThese clients already had a rule for that name, which was kept instead: ${out.kept.join(", ")}`
       : "";
-    const restart = confirm(
+    const restart = await ask(
       `Saved to ${out.config_path}.\n\n` +
         `Callers still see the old name until the gateway restarts. Restart now?\n\n` +
         `${RESTART_WARNS}${moved}${kept}`,
@@ -2526,7 +2611,7 @@ function wireClients(): void {
           decision: pick("cl-decision") as Decision,
         });
       } catch (e) {
-        alert(String(e));
+        void say(String(e));
       }
       await refresh();
     });
@@ -2537,7 +2622,7 @@ function wireClients(): void {
       try {
         await invoke("forget_identity", { identity: b.dataset.identity, tool: b.dataset.tool });
       } catch (e) {
-        alert(String(e));
+        void say(String(e));
       }
       await refresh();
     });
@@ -2599,7 +2684,7 @@ async function copy(text: string, button: HTMLElement): Promise<void> {
     button.textContent = "Copied";
     setTimeout(() => (button.textContent = was), 1200);
   } catch {
-    alert("Could not reach the clipboard. Select the text and copy it by hand.");
+    void say("Could not reach the clipboard. Select the text and copy it by hand.");
   }
 }
 
@@ -2976,14 +3061,14 @@ function wirePublishForm(): void {
         },
       });
     } catch (e) {
-      alert(String(e));
+      void say(String(e));
       return;
     }
 
     publishPending = saved;
     publishDirty = false;
     const warnings = saved.warnings.length ? `\n\n${saved.warnings.join("\n\n")}` : "";
-    const restart = confirm(
+    const restart = await ask(
       `Saved to ${saved.config_path}.\n\n` +
         `The gateway is still published the way it started. Restart now to apply?\n\n` +
         `${RESTART_WARNS}${warnings}`,
@@ -3019,7 +3104,7 @@ function wireIssue(): void {
       justIssued = await invoke<Issued>("issue_token", { name, tools });
       issuingToken = false;
     } catch (e) {
-      alert(String(e));
+      void say(String(e));
       return;
     }
     await refresh();
@@ -3041,7 +3126,7 @@ function wireRevoke(): void {
   document.querySelectorAll<HTMLButtonElement>(".revoke").forEach((b) => {
     b.addEventListener("click", async () => {
       const identity = b.dataset.identity ?? "";
-      if (!confirm(`Revoke "${b.dataset.name}"? Its next request is refused.`)) return;
+      if (!(await ask(`Revoke "${b.dataset.name}"? Its next request is refused.`))) return;
 
       // Revoking kills the credential, not the name it authenticated as — and the permissions
       // are keyed by the name. Leaving them is right when another token still uses it, and
@@ -3053,23 +3138,23 @@ function wireRevoke(): void {
       const forgetRules =
         lastOne &&
         identity !== "" &&
-        confirm(
+        await ask(
           `That was the last token for "${identity}".\n\n` +
             `Its permissions stay unless you remove them — nothing can use them while no ` +
             `credential resolves to that name, but they will apply again to anything that ` +
             `later does, and until then they read as live access.\n\n` +
-            `Remove them too?`,
+            `Remove them too, and drop the client from this list?`,
         );
 
       let out: { identity: string | null; forgot: string[] };
       try {
         out = await invoke("revoke_token", { id: b.dataset.id, forgetRules });
       } catch (e) {
-        alert(String(e));
+        void say(String(e));
         return;
       }
       if (out.forgot.length) {
-        alert(`Removed ${out.forgot.length} rule(s) for ${out.identity}:\n\n${out.forgot.join("\n")}`);
+        void say(`Removed ${out.forgot.length} rule(s) for ${out.identity}:\n\n${out.forgot.join("\n")}`);
       }
       await refresh();
     });
@@ -3078,11 +3163,13 @@ function wireRevoke(): void {
 
 // ---- wiring ----------------------------------------------------------------
 
-function show(next: string): void {
+async function show(next: string): Promise<void> {
   // Leaving the Network screen mid-edit would drop the change silently, and an AUD is a
-  // 64-character paste nobody wants to do twice.
+  // 64-character paste nobody wants to do twice. Asking natively means awaiting, so the switch
+  // is async now — nothing downstream of it cares, and everything upstream already fires and
+  // forgets.
   if (screen === "network" && next !== "network" && publishDirty) {
-    if (!confirm("You have unsaved changes to how the gateway is published. Discard them?")) {
+    if (!(await ask("You have unsaved changes to how the gateway is published. Discard them?"))) {
       return;
     }
     publishDirty = false;
@@ -3130,14 +3217,14 @@ async function refresh(): Promise<void> {
 
 document
   .querySelectorAll<HTMLButtonElement>("nav button")
-  .forEach((b) => b.addEventListener("click", () => show(b.dataset.screen!)));
+  .forEach((b) => b.addEventListener("click", () => void show(b.dataset.screen!)));
 
 $("#pause").addEventListener("click", async () => {
   const snap = await invoke<Snapshot>("snapshot");
   try {
     await invoke("set_paused", { paused: snap.running });
   } catch (e) {
-    alert(String(e));
+    void say(String(e));
   }
   await refresh();
 });
@@ -3153,8 +3240,8 @@ void listen<{ event: string } & Record<string, unknown>>("gateway", (e) => {
   void refresh();
 });
 void listen("tray", () => void renderHeader());
-void listen<string>("navigate", (e) => show(e.payload));
+void listen<string>("navigate", (e) => void show(e.payload));
 
-show("home");
+void show("home");
 // A slow safety net for anything an event did not cover (a timed-out hold, say).
 setInterval(() => void refresh(), 5000);

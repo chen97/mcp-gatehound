@@ -596,3 +596,22 @@ pre {
 @media (prefers-reduced-motion: reduce) {
   .flux { display: none; }
 }
+
+/* ---- Grant picker: the head row -----------------------------------------------------
+   Two targets that mean different things sit side by side here — granting the whole service,
+   and looking at what is in it — so they get the full width between them and a box big enough
+   to aim at. A tick landing on the wrong one is a permission you did not mean to give. */
+
+.grant-head { display: flex; align-items: stretch; gap: var(--s2); }
+.grant-head .check.group { flex: 1; margin-top: 0; }
+.grant-head .grant-twist {
+  flex: none; width: 44px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--r);
+}
+.grant-head .grant-twist .twist { width: auto; font-size: 11px; }
+
+/* Bigger than the default box, and with room around it: this one grants a dozen tools at
+   once. */
+.check.group input { width: 18px; height: 18px; margin-top: 1px; }
+.check.group { padding: var(--s3) var(--s4); gap: var(--s3); }
