@@ -348,7 +348,11 @@ function recentHtml(rows: RequestLog[]): string {
   </div>`;
 }
 
-function homeHtml(snap: Snapshot, clients: Client[], access: Access, recent: RequestLog[]): string {
+/// How far apart the flow's pieces arrive. Under the 30–80ms band that reads as a group
+/// assembling rather than a queue forming.
+const STAGGER_MS = 45;
+
+function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
   // Callers worth drawing: anything holding a live token, plus the owner. A client whose
   // every token is revoked is not currently a caller, and drawing it would overstate.
   const callers = clients.filter(
@@ -363,26 +367,32 @@ function homeHtml(snap: Snapshot, clients: Client[], access: Access, recent: Req
   // two independent columns would drift apart the moment one side had taller content.
   const left = callers.length
     ? callers
-        .map((c) => {
+        .map((c, i) => {
           const allowed = c.rules.filter((r) => r.decision === "allow");
           const what = allowed.some((r) => r.tool === "*")
             ? "every tool"
             : `${allowed.length} tool${allowed.length === 1 ? "" : "s"}`;
-          return `<div class="flow-row" data-caller="${esc(c.identity)}">
+          const d = i * STAGGER_MS;
+          return `<div class="flow-row" data-caller="${esc(c.identity)}" style="--d:${d}ms">
               ${flowNode(c.identity, c.identity === access.owner ? "super token" : what)}
             </div>
-            <div class="wire" data-caller="${esc(c.identity)}"></div>`;
+            <div class="wire" data-caller="${esc(c.identity)}" style="--d:${d + 90}ms"></div>`;
         })
         .join("")
     : `<div class="node"><span class="meta">Nobody yet. Issue a token on Upstream.</span></div>
        <div class="wire"></div>`;
 
+  // The gate lands after the last caller's wire reaches it, and the services after the gate —
+  // the order a call actually travels, which is the only reason the entrance is worth having.
+  const gateAt = Math.max(0, callers.length - 1) * STAGGER_MS + 150;
+
   const right = snap.upstreams.length
     ? snap.upstreams
-        .map((u) => {
+        .map((u, i) => {
           const n = snap.tools.filter((t) => t.upstream === u.name).length;
-          return `<div class="wire back" data-service="${esc(u.name)}"></div>
-            <div class="flow-row" data-service="${esc(u.name)}">
+          const d = gateAt + 130 + i * STAGGER_MS;
+          return `<div class="wire back" data-service="${esc(u.name)}" style="--d:${d}ms"></div>
+            <div class="flow-row" data-service="${esc(u.name)}" style="--d:${d + 90}ms">
               ${flowNode(u.target, `${u.kind} · ${n} tool${n === 1 ? "" : "s"}`)}
             </div>`;
         })
@@ -398,7 +408,7 @@ function homeHtml(snap: Snapshot, clients: Client[], access: Access, recent: Req
         <div class="flow-head">Callers</div><div></div>
         ${left}
       </div>
-      <div class="hub" id="flow-hub">
+      <div class="hub" id="flow-hub" style="--d:${gateAt}ms">
         <div><span class="dot ${esc(snap.colour)}"></span><span class="name">MCP Gatehound</span></div>
         <div class="meta">${esc(snap.listen_addr)}</div>
         <div class="meta">${esc(snap.auth)}</div>
@@ -415,7 +425,7 @@ function homeHtml(snap: Snapshot, clients: Client[], access: Access, recent: Req
       }. A dot crosses a wire when a call actually does — nothing moves while nothing is
       happening.
     </div>
-  </div>${recentHtml(recent)}`;
+  </div>`;
 }
 
 /// Send one dot down a wire. Called from a real request, never from a timer.
@@ -429,7 +439,18 @@ function pulse(sel: string, kind: string, delayMs: number): void {
   window.setTimeout(() => {
     const dot = document.createElement("span");
     dot.className = `pulse ${kind}`;
-    dot.addEventListener("animationend", () => dot.remove(), { once: true });
+    // The line takes the call's colour while the dot is on it. Seven pixels moving along a
+    // hundred is easy to miss; a line that lights up is not, and it says which of several
+    // callers this was without anything having to be read.
+    wire.classList.add("live", kind);
+    dot.addEventListener(
+      "animationend",
+      () => {
+        dot.remove();
+        wire.classList.remove("live", kind);
+      },
+      { once: true },
+    );
     wire.appendChild(dot);
   }, delayMs);
 }
@@ -449,8 +470,10 @@ function light(sel: string, delayMs: number): void {
 /// happened in and the whole point is to show the path.
 function traceRequest(row: RequestLog): void {
   if (screen !== "home") return;
+  // Named rather than left blank. The success case used to be the empty string, which read
+  // fine as a class suffix and threw the moment anything asked classList to add it.
   const kind =
-    row.status === "error" ? "err" : row.decision === "deny" || row.decision === "ask" ? "held" : "";
+    row.status === "error" ? "err" : row.decision === "deny" || row.decision === "ask" ? "held" : "ok";
 
   const caller = row.identity ?? "";
   if (caller && flowRows.callers.includes(caller)) {
@@ -461,7 +484,7 @@ function traceRequest(row: RequestLog): void {
 
   // Denied and held calls never reach a service, so nothing should suggest they did.
   const service = row.upstream ?? "";
-  if (kind === "" && service && flowRows.services.includes(service)) {
+  if (kind === "ok" && service && flowRows.services.includes(service)) {
     pulse(`.wire.back[data-service="${CSS.escape(service)}"]`, kind, 700);
     light(`.flow-row[data-service="${CSS.escape(service)}"] .node`, 1200);
   }
@@ -473,7 +496,13 @@ async function renderHome(snap: Snapshot): Promise<void> {
     invoke<Access>("access"),
     invoke<RequestLog[]>("requests", { limit: 6 }),
   ]);
-  paint($("#home"), homeHtml(snap, clientsOf(rules, access), access, recent));
+  // Two containers, painted separately. The flow animates itself into place on the way in, and
+  // a shared paint would replay that entrance every time a call landed in the list underneath —
+  // the topology jumping about because something unrelated scrolled. Split, the list repaints
+  // on its own and the diagram stays where it is.
+  paint($("#home"), `<div id="home-flow"></div><div id="home-recent"></div>`);
+  paint($("#home-flow"), flowHtml(snap, clientsOf(rules, access), access));
+  paint($("#home-recent"), recentHtml(recent));
 }
 
 // ---- Approvals -------------------------------------------------------------

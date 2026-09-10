@@ -254,9 +254,17 @@ pre {
 .twist { color: var(--mut); width: 12px; flex: none; font-size: 10px; }
 
 /* ---- The flow on Home --------------------------------------------------------
-   Callers on the left, the gateway in the middle, services on the right, with a line per row.
+   Callers on the left, the gate in the middle, services on the right, one line per row.
    Straight lines on purpose: a pulse travelling one is a plain translateX, which stays on the
-   GPU and needs no measuring of the DOM. */
+   GPU and needs no measuring of the DOM.
+
+   Motion here is rationed by how often it is seen. The entrance runs once per real change and
+   is allowed to be the thing that catches the eye — it assembles the picture in the direction
+   a call travels, so it explains the shape on the way in. Everything that sits on screen
+   permanently is near-imperceptible or still: an aura that breathed or a wire that shimmered
+   would be motion on something you are looking at the whole time you are on this tab, which is
+   the case the frequency rule exists to refuse. The one loop that earns its place is the
+   waiting badge, because it is the only thing here asking you to act. */
 
 .flow { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: var(--s2) 0 var(--s3); }
 /* Two columns per side — the box and the wire leaving it — so both sit on one grid row and the
@@ -284,22 +292,54 @@ pre {
 /* Overlapping the boxes by a hair on each side: a line that stops short of what it connects
    reads as two stubs rather than one connection. */
 .wire { position: relative; height: 38px; display: flex; align-items: center; margin: 0 -1px; container-type: inline-size; }
-.wire::before { content: ""; position: absolute; left: 0; right: 0; height: 1px; background: var(--line-strong); }
+/* A gradient rather than a flat hairline. At one weight the wires read as table rules between
+   two lists; brightening toward the arrowhead makes them read as a direction even at rest. */
+.wire::before {
+  content: ""; position: absolute; left: 0; right: 0; height: 1px;
+  background: linear-gradient(to right,
+    color-mix(in srgb, var(--line-strong) 35%, transparent),
+    var(--line-strong));
+  transition: background 220ms var(--ease-out);
+}
 /* Direction has to read when nothing is moving, or the picture only makes sense mid-call. */
 .wire::after {
   content: ""; position: absolute; top: 50%; right: 0; width: 0; height: 0;
   border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent;
   border-left: 6px solid var(--line-strong); transform: translateY(-50%);
+  transition: border-left-color 220ms var(--ease-out);
 }
+
+/* The wire a call is crossing takes that call's colour for as long as it takes. The pulse
+   alone is 7px of movement on a 110px line; lighting the line is what makes the eye follow it
+   rather than notice it after the fact. */
+.wire.live::before { background: linear-gradient(to right,
+  color-mix(in srgb, var(--live) 25%, transparent), color-mix(in srgb, var(--live) 85%, transparent)); }
+.wire.live::after { border-left-color: color-mix(in srgb, var(--live) 85%, transparent); }
+.wire.live.ok { --live: var(--ok); }
+.wire.live.err { --live: var(--bad); }
+.wire.live.held { --live: var(--am); }
 
 .wire .pulse {
   position: absolute; left: 0; width: 7px; height: 7px; border-radius: 50%;
   background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 70%, transparent);
   will-change: transform, opacity; animation: travel 700ms linear forwards;
 }
+/* A tail behind the dot, so a fast-moving 7px circle reads as one thing travelling rather than
+   as a dot that blinked in two places. Drawn behind, in the direction it came from. */
+.wire .pulse::before {
+  content: ""; position: absolute; top: 50%; right: 100%; width: 30px; height: 2px;
+  border-radius: 2px; transform: translateY(-50%);
+  background: linear-gradient(to left, color-mix(in srgb, var(--ok) 60%, transparent), transparent);
+}
 .wire .pulse.err { background: var(--bad); box-shadow: 0 0 8px color-mix(in srgb, var(--bad) 70%, transparent); }
+.wire .pulse.err::before { background: linear-gradient(to left, color-mix(in srgb, var(--bad) 60%, transparent), transparent); }
 .wire .pulse.held { background: var(--am); box-shadow: 0 0 8px color-mix(in srgb, var(--am) 70%, transparent); }
-.wire.back .pulse { animation-name: travel-back; }
+.wire .pulse.held::before { background: linear-gradient(to left, color-mix(in srgb, var(--am) 60%, transparent), transparent); }
+/* `.back` marks the wires on the far side of the gate; it does not reverse them. Both legs of
+   a call travel the same way — caller to gate, gate to service — and the second used to run
+   right to left, against its own arrowhead, on a leg the code describes as "gateway to the
+   service it reached". Invisible while it was a 7px dot on a hairline; obvious the moment the
+   wire lit up behind it. */
 
 /* Constant motion, so linear — an eased pulse would read as accelerating traffic. */
 @keyframes travel {
@@ -308,22 +348,71 @@ pre {
   90%  { opacity: 1; }
   to   { transform: translateX(calc(100cqw - 7px)); opacity: 0; }
 }
-@keyframes travel-back {
-  from { transform: translateX(calc(100cqw - 7px)); opacity: 0; }
-  10%  { opacity: 1; }
-  90%  { opacity: 1; }
-  to   { transform: translateX(0); opacity: 0; }
-}
-
+/* The gate is the one accent on this screen. It was previously drawn exactly like the boxes on
+   either side of it, which left the thing the whole application is named for as the least
+   prominent element in its own diagram. */
 .hub {
-  background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  position: relative;
+  background: var(--panel-2);
+  border: 1px solid color-mix(in srgb, var(--am) 38%, var(--line-strong));
+  border-radius: var(--r-lg);
   padding: var(--s4) var(--s5); text-align: center; min-width: 168px;
   transition: border-color 200ms var(--ease-out);
 }
+.hub::before {
+  content: ""; position: absolute; inset: -20px; border-radius: calc(var(--r-lg) + 20px);
+  background: radial-gradient(ellipse at center,
+    color-mix(in srgb, var(--am) 13%, transparent), transparent 70%);
+  pointer-events: none; opacity: .8;
+  transition: opacity 220ms var(--ease-out), transform 220ms var(--ease-out);
+}
+/* The aura blooms while a call is passing through. Feedback, tied to something that actually
+   happened — which is the only reason the gate is allowed to move at all on a screen you sit
+   looking at. */
+.hub.lit::before { opacity: 1; transform: scale(1.07); }
+.hub > * { position: relative; }
 .hub .name { font-weight: 650; }
 .hub .dot { display: inline-block; margin-right: 6px; vertical-align: middle; }
 .hub .pill { display: inline-block; margin-top: var(--s2); }
 .hub.lit { border-color: var(--am); }
+
+/* A halo leaving the status dot, once every three seconds. The only ambient motion on the
+   screen, and it answers the only question a glance at this page is really asking: is it up.
+   Slow and faint by design — anything you can watch is too much for something permanent. */
+.hub .dot.green { position: relative; }
+.hub .dot.green::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  background: var(--ok); animation: alive 3s var(--ease-out) infinite;
+}
+@keyframes alive {
+  0%   { opacity: .45; transform: scale(1); }
+  70%  { opacity: 0; transform: scale(2.6); }
+  100% { opacity: 0; transform: scale(2.6); }
+}
+
+/* The one loop that is meant to be noticed: something is waiting on a person. */
+.hub .pill.hot { animation: waiting 2.2s ease-in-out infinite; }
+@keyframes waiting { 0%, 100% { opacity: 1; } 50% { opacity: .58; } }
+
+/* ---- The flow assembling ------------------------------------------------------
+   Left column, then the gate, then the right column — the order a call travels. Delays come
+   from the markup because the number of rows is data, not a constant; each is set on the
+   element it delays, never read from a parent to drive children. */
+.flow-side.left .flow-row  { animation: flow-in-left 320ms var(--ease-out) both; animation-delay: var(--d, 0ms); }
+.flow-side.right .flow-row { animation: flow-in-right 320ms var(--ease-out) both; animation-delay: var(--d, 0ms); }
+.flow-side .node:not(.flow-row .node) { animation: flow-in-left 320ms var(--ease-out) both; }
+.hub { animation: gate-in 340ms var(--ease-out) both; animation-delay: var(--d, 0ms); }
+
+/* The line draws from the box it leaves toward the gate, arriving just before its arrowhead
+   fades in — so a connection is made rather than declared. */
+.wire::before { transform-origin: left center; animation: wire-draw 300ms var(--ease-out) both; animation-delay: var(--d, 0ms); }
+.wire::after { animation: tip-in 200ms var(--ease-out) both; animation-delay: calc(var(--d, 0ms) + 230ms); }
+
+@keyframes flow-in-left  { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
+@keyframes flow-in-right { from { opacity: 0; transform: translateX(12px); }  to { opacity: 1; transform: none; } }
+@keyframes gate-in       { from { opacity: 0; transform: scale(.96); }        to { opacity: 1; transform: none; } }
+@keyframes wire-draw     { from { transform: scaleX(0); }                     to { transform: scaleX(1); } }
+@keyframes tip-in        { from { opacity: 0; }                               to { opacity: 1; } }
 
 @media (max-width: 720px) {
   /* Stacked, and the wires stop earning their space. */
@@ -345,8 +434,20 @@ pre {
     animation: flash 400ms ease forwards;
     left: 0; right: 0; width: auto; height: 1px; border-radius: 1px; box-shadow: none;
   }
-  .wire.back .pulse { animation-name: flash; }
+  .wire .pulse::before { display: none; }
   @keyframes flash { from { opacity: 0; } 40% { opacity: 1; } to { opacity: 0; } }
+
+  /* Fewer and gentler, not none: the flow still assembles in order, because that ordering is
+     what explains the picture — it just arrives by fading rather than by moving. The two
+     ambient loops go entirely; neither carries information a still frame cannot. */
+  .flow-side.left .flow-row, .flow-side.right .flow-row, .hub {
+    animation-name: fade-in; animation-duration: 200ms;
+  }
+  .wire::before { animation: none; transform: none; }
+  .wire::after { animation-name: fade-in; }
+  .hub .dot.green::after { animation: none; opacity: 0; }
+  .hub .pill.hot { animation: none; }
+  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 }
 
 /* ---- scripts ------------------------------------------------------------------------
