@@ -534,6 +534,38 @@ an awkward identifier surviving the round trip to the upstream intact, a replaye
 key reaching the upstream exactly once, and a pack surviving export and import without
 carrying a credential.
 
+### What the log records
+
+One table holds both halves of the story, because they only make sense together: a token issued
+at 14:02 is what explains a call at 14:03.
+
+Every call records who made it (`identity`), **which of that identity's tokens got in**
+(`token_id` — one identity can hold several, so after a revoke this is the only thing that says
+which of them was used), the method and tool, the policy decision, the action and the upstream
+it reached, the outcome, how long it took, and redacted, truncated copies of the arguments and
+response. For a tool marked idempotent it also records whether the call **acted or replayed**
+an earlier result (`replayed`), so the promise that repeating a key does not act twice is one
+you can check rather than take on trust.
+
+Every change an operator makes records itself the same way, under `admin/<action>`:
+
+| Action | Written when |
+| --- | --- |
+| `identity.rule`, `identity.forget` | A client's permission for a tool is set or dropped — from the Upstream tab, the CLI, or by answering a held call with "always" |
+| `token.issue`, `token.revoke` | A client credential is created or removed |
+| `tool.rename`, `tool.describe`, `tool.add` | The name callers see changes, the wording changes, or a new tool is exposed |
+| `downstream.add`, `pack.import` | A service or a whole pack is added |
+| `script.create`, `script.update`, `script.delete` | Code the gateway will run is written, rewritten or removed |
+| `publish.change` | How the gateway is reachable changes |
+| `gateway.pause`, `gateway.resume`, `app.restart` | The listener stops, starts, or the app restarts |
+
+Admin rows are exempt from retention. A call body ages out because it is somebody else's
+content; the record of a token you removed is the only thing left saying it ever existed.
+
+**Home** shows the clients' calls only — the same log, narrowed in SQL rather than in the
+window, so a burst of rule edits cannot crowd the six rows it has. **Live log** shows
+everything.
+
 ## Data on disk, and whose it is
 
 The audit log accumulates a plaintext copy of whatever passes through — which, depending on

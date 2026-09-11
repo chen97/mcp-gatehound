@@ -103,7 +103,33 @@ fn secret_tool() -> ToolConfig {
     }
 }
 
+/// A tool the gateway runs at most once per idempotency key.
+fn once_tool() -> ToolConfig {
+    ToolConfig {
+        name: "once".into(),
+        description: "Acts at most once per idempotency key".into(),
+        input_schema: None,
+        action: Action::Exec(ExecSpec {
+            cmd: "/bin/sh".into(),
+            // No braces: `{...}` in an exec argument is a template placeholder, not text.
+            args: vec!["-c".into(), "printf sent".into()],
+            stdin: None,
+            timeout_secs: 10,
+            max_output_bytes: 4096,
+            max_concurrency: 1,
+            env: BTreeMap::new(),
+            cwd: None,
+        }),
+        rate_limit: None,
+        idempotent: true,
+    }
+}
+
 async fn start(identities: Vec<IdentitySeed>) -> Harness {
+    start_with(vec![echo_tool(), secret_tool()], identities).await
+}
+
+async fn start_with(tools: Vec<ToolConfig>, identities: Vec<IdentitySeed>) -> Harness {
     let dir = tempdir::TempDir::new();
     let cfg = Config {
         listen_addr: "127.0.0.1:0".into(),
@@ -113,7 +139,7 @@ async fn start(identities: Vec<IdentitySeed>) -> Harness {
             bearer_identity: "bearer".into(),
             ..Default::default()
         },
-        tools: vec![echo_tool(), secret_tool()],
+        tools,
         identities,
         ..Default::default()
     };
@@ -753,6 +779,87 @@ async fn every_call_is_logged_with_secrets_redacted() {
         !args.contains("sk-ant-do-not-log"),
         "the log kept a secret: {args}"
     );
+}
+
+#[tokio::test]
+async fn the_log_names_which_token_got_in() {
+    // The identity is not enough. One identity can hold several tokens — that is the whole
+    // point of being able to issue a second one for the same client — so after one is revoked
+    // only the id says which of them made a given call.
+    let h = start(allow_all("claude")).await;
+    let minted = gatehound_core::tokens::mint();
+    h.gateway
+        .store
+        .issue_token(&minted.id, "Claude Desktop", "claude", &minted.digest)
+        .unwrap();
+
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "echo", "arguments": { "word": "hi" } }
+    });
+    h.post_raw(Some(&minted.secret), &body.to_string())
+        .await
+        .json::<Value>()
+        .await
+        .unwrap();
+
+    let row = h
+        .gateway
+        .recent_requests(20)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.tool.as_deref() == Some("echo"))
+        .expect("the call must be logged");
+    assert_eq!(row.identity.as_deref(), Some("claude"));
+    assert_eq!(row.token_id.as_deref(), Some(minted.id.as_str()));
+
+    // The configured bearer is not an issued token, so there is no id to claim.
+    h.call("echo", json!({ "word": "again" })).await;
+    let super_row = h
+        .gateway
+        .recent_requests(20)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.identity.as_deref() == Some("bearer"))
+        .expect("the super token's call must be logged too");
+    assert!(super_row.token_id.is_none());
+}
+
+#[tokio::test]
+async fn a_replay_is_logged_as_a_replay() {
+    // The gateway promises that repeating an idempotency key replays the first result instead
+    // of acting again. If the log cannot tell the two apart, nobody can check that it kept the
+    // promise — every attempt reads as another `ok` that did something.
+    let h = start_with(vec![once_tool()], allow_all("bearer")).await;
+
+    let first = h.call("once", json!({ "idempotency_key": "k1" })).await;
+    assert_eq!(first["result"]["isError"], false, "{first}");
+    let second = h.call("once", json!({ "idempotency_key": "k1" })).await;
+    assert_eq!(second["result"]["isError"], false);
+
+    let rows: Vec<_> = h
+        .gateway
+        .recent_requests(20)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.tool.as_deref() == Some("once"))
+        .collect();
+    assert_eq!(rows.len(), 2, "both attempts are logged");
+    // `recent_requests` is newest first.
+    assert_eq!(rows[0].replayed, Some(true), "the second one acted on nothing");
+    assert_eq!(rows[1].replayed, Some(false), "the first one acted");
+
+    // A tool that is not idempotent has no such question to answer.
+    let plain = start(allow_all("bearer")).await;
+    plain.call("echo", json!({ "word": "hi" })).await;
+    let row = plain
+        .gateway
+        .recent_requests(20)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.tool.as_deref() == Some("echo"))
+        .unwrap();
+    assert_eq!(row.replayed, None);
 }
 
 #[tokio::test]

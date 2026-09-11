@@ -423,6 +423,11 @@ fn set_rule(
         bail!("no tool named '{tool}' is configured");
     }
     gateway.set_identity(identity, tool, decision)?;
+    gateway.store.log_admin(
+        "identity.rule",
+        Some(identity),
+        &format!("{identity} may {} {tool}", decision.as_str()),
+    )?;
     println!("{identity} → {tool}: {}", decision.as_str());
     Ok(())
 }
@@ -459,6 +464,19 @@ fn token(cfg: Config, db_path: Option<PathBuf>, rest: &[String]) -> Result<()> {
                     .store
                     .set_decision(&identity, tool, Decision::Allow)?;
             }
+
+            gateway.store.log_admin(
+                "token.issue",
+                Some(&identity),
+                &format!(
+                    "issued '{name}' as {identity}, may call: {}",
+                    if tools.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        tools.join(", ")
+                    }
+                ),
+            )?;
 
             println!("issued '{name}' as identity '{identity}'\n");
             if !replaced.is_empty() {

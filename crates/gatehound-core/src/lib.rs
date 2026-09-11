@@ -284,6 +284,11 @@ impl Gateway {
         self.store.recent_requests(limit.clamp(1, 1000))
     }
 
+    /// The same log with the operator's own actions left out — what the clients did.
+    pub fn recent_calls(&self, limit: i64) -> Result<Vec<RequestLog>> {
+        self.store.recent_calls(limit.clamp(1, 1000))
+    }
+
     pub fn identities(&self) -> Result<Vec<IdentityRule>> {
         self.store.list_identities()
     }

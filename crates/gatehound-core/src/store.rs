@@ -25,7 +25,16 @@ CREATE TABLE IF NOT EXISTS requests (
   status TEXT,
   error TEXT,
   duration_ms INTEGER,
-  response_json TEXT
+  response_json TEXT,
+  -- Which issued token got in, when one did. The identity alone does not say: several tokens
+  -- can be issued for the same identity, and after one is revoked the log otherwise cannot
+  -- tell which of them made a given call.
+  token_id TEXT,
+  -- Whether an idempotent call acted or replayed an earlier result. NULL for tools that are
+  -- not idempotent, where the question does not arise. Without it a replay is indistinguishable
+  -- from a fresh call in the log — which defeats the point of promising that repeating a key
+  -- does not act twice, because nobody can check.
+  replayed INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS idx_requests_identity_ts ON requests(identity, ts);
@@ -97,6 +106,8 @@ pub struct RequestLog {
     pub error: Option<String>,
     pub duration_ms: Option<i64>,
     pub response_json: Option<String>,
+    pub token_id: Option<String>,
+    pub replayed: Option<bool>,
 }
 
 /// A row being written to the log. `id` is assigned by SQLite.
@@ -114,6 +125,8 @@ pub struct NewRequestLog {
     pub error: Option<String>,
     pub duration_ms: Option<i64>,
     pub response_json: Option<String>,
+    pub token_id: Option<String>,
+    pub replayed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,10 +209,25 @@ fn migrate(conn: &Connection) -> Result<()> {
     if !have.contains("tool") {
         conn.execute_batch("ALTER TABLE sends ADD COLUMN tool TEXT NOT NULL DEFAULT ''")?;
     }
+
+    let mut req = std::collections::HashSet::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(requests)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for r in rows {
+            req.insert(r?);
+        }
+    }
+    if !req.contains("token_id") {
+        conn.execute_batch("ALTER TABLE requests ADD COLUMN token_id TEXT")?;
+    }
+    if !req.contains("replayed") {
+        conn.execute_batch("ALTER TABLE requests ADD COLUMN replayed INTEGER")?;
+    }
     Ok(())
 }
 
-const REQ_COLS: &str = "id, ts, identity, client_name, method, tool, args_json, decision, action_type, upstream, status, error, duration_ms, response_json";
+const REQ_COLS: &str = "id, ts, identity, client_name, method, tool, args_json, decision, action_type, upstream, status, error, duration_ms, response_json, token_id, replayed";
 
 fn row_to_request(r: &Row<'_>) -> rusqlite::Result<RequestLog> {
     Ok(RequestLog {
@@ -217,6 +245,8 @@ fn row_to_request(r: &Row<'_>) -> rusqlite::Result<RequestLog> {
         error: r.get("error")?,
         duration_ms: r.get("duration_ms")?,
         response_json: r.get("response_json")?,
+        token_id: r.get("token_id")?,
+        replayed: r.get("replayed")?,
     })
 }
 
@@ -253,8 +283,8 @@ impl Store {
     pub fn log_request(&self, r: NewRequestLog) -> Result<i64> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO requests(ts, identity, client_name, method, tool, args_json, decision, action_type, upstream, status, error, duration_ms, response_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            "INSERT INTO requests(ts, identity, client_name, method, tool, args_json, decision, action_type, upstream, status, error, duration_ms, response_json, token_id, replayed)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 now(),
                 r.identity,
@@ -268,7 +298,9 @@ impl Store {
                 r.status,
                 r.error,
                 r.duration_ms,
-                r.response_json
+                r.response_json,
+                r.token_id,
+                r.replayed
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -277,6 +309,28 @@ impl Store {
     pub fn recent_requests(&self, limit: i64) -> Result<Vec<RequestLog>> {
         let conn = self.lock();
         let sql = format!("SELECT {REQ_COLS} FROM requests ORDER BY id DESC LIMIT ?1");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit], row_to_request)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// The same log, minus everything the operator did.
+    ///
+    /// The admin rows share the table on purpose — one timeline is the point, and a token
+    /// issued at 14:02 explains a call at 14:03. But the home screen is asking a narrower
+    /// question: what have the clients been doing? Filtered here rather than in the window,
+    /// because filtering a page of rows that was already cut to six leaves an empty list the
+    /// moment somebody edits a few rules.
+    pub fn recent_calls(&self, limit: i64) -> Result<Vec<RequestLog>> {
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT {REQ_COLS} FROM requests WHERE action_type IS NOT 'admin' \
+             ORDER BY id DESC LIMIT ?1"
+        );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![limit], row_to_request)?;
         let mut out = Vec::new();
@@ -485,6 +539,8 @@ impl Store {
             error: None,
             duration_ms: None,
             response_json: Some(detail.to_string()),
+            token_id: None,
+            replayed: None,
         })
     }
 
@@ -841,6 +897,72 @@ mod tests {
         assert_eq!(left[0].method.as_deref(), Some("admin/token.revoke"));
         assert!(left[0].response_json.as_deref().unwrap().contains("Claude"));
         let _ = call;
+    }
+
+    #[test]
+    fn the_home_screen_asks_for_the_clients_calls_only() {
+        // One table holds both on purpose — a token issued at 14:02 explains a call at 14:03 —
+        // so "what have the clients been doing" is a narrower read of the same log, not a
+        // second log. Filtered in SQL rather than in the window: a page of six rows fetched and
+        // then filtered goes empty the moment somebody edits half a dozen rules.
+        let s = Store::open_memory().unwrap();
+        for i in 0..8 {
+            s.log_admin("identity.rule", Some("claude"), &format!("rule {i}"))
+                .unwrap();
+        }
+        s.log_request(NewRequestLog {
+            identity: Some("claude".into()),
+            method: Some("tools/call".into()),
+            tool: Some("send_message".into()),
+            status: Some("ok".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let calls = s.recent_calls(6).unwrap();
+        assert_eq!(calls.len(), 1, "the eight admin rows must not crowd it out");
+        assert_eq!(calls[0].tool.as_deref(), Some("send_message"));
+        assert_eq!(
+            s.recent_requests(20).unwrap().len(),
+            9,
+            "the live log still keeps everything"
+        );
+    }
+
+    #[test]
+    fn a_database_written_before_the_new_columns_gains_them() {
+        // `migrate` runs on every open, including on a database an older build created. A
+        // missing column is not something to fix by hand afterwards: the window would fail to
+        // read its own log, and the gateway would fail to write it.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE requests (
+               id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, identity TEXT,
+               client_name TEXT, method TEXT, tool TEXT, args_json TEXT, decision TEXT,
+               action_type TEXT, upstream TEXT, status TEXT, error TEXT, duration_ms INTEGER,
+               response_json TEXT);
+             CREATE TABLE sends (
+               idempotency_key TEXT PRIMARY KEY, chat_id TEXT NOT NULL, text_hash TEXT NOT NULL,
+               message_id TEXT, ts TEXT NOT NULL, completed_at TEXT, response_json TEXT);",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        assert!(columns(&conn, "requests").contains("token_id"));
+        assert!(columns(&conn, "requests").contains("replayed"));
+        assert!(columns(&conn, "sends").contains("tool"));
+
+        // And again on the migrated database, because it runs on every open.
+        migrate(&conn).unwrap();
+        assert!(columns(&conn, "requests").contains("replayed"));
+    }
+
+    fn columns(conn: &Connection, table: &str) -> std::collections::HashSet<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+        rows.map(Result::unwrap).collect()
     }
 
     #[test]

@@ -128,15 +128,22 @@ fn resolve(
     state.gateway.resolve_approval(&id, resolution).map_err(err)
 }
 
+/// The live log, optionally without the operator's own actions.
+///
+/// One table holds both on purpose — a token issued at 14:02 explains a call at 14:03 — so the
+/// narrowing is a question the caller asks, not two separate logs.
 #[tauri::command]
 fn requests(
     state: tauri::State<'_, AppState>,
     limit: Option<i64>,
+    exclude_admin: Option<bool>,
 ) -> Result<Vec<RequestLog>, String> {
-    state
-        .gateway
-        .recent_requests(limit.unwrap_or(200))
-        .map_err(err)
+    let limit = limit.unwrap_or(200);
+    if exclude_admin.unwrap_or(false) {
+        state.gateway.recent_calls(limit).map_err(err)
+    } else {
+        state.gateway.recent_requests(limit).map_err(err)
+    }
 }
 
 #[tauri::command]
@@ -202,6 +209,15 @@ async fn set_paused(app: AppHandle, paused: bool) -> Result<(), String> {
         start_listener(&app).map_err(err)?;
     }
     tray::refresh(&app);
+    let _ = state.gateway.store.log_admin(
+        if paused { "gateway.pause" } else { "gateway.resume" },
+        None,
+        if paused {
+            "stopped the listener; the gateway answers nothing until it is resumed"
+        } else {
+            "started the listener again"
+        },
+    );
     let _ = app.emit("gateway", serde_json::json!({ "event": "status_changed" }));
     Ok(())
 }
@@ -314,6 +330,24 @@ fn add_connection(
         config = %state.config_path.display(),
         "added a connection"
     );
+    let _ = state.gateway.store.log_admin(
+        "downstream.add",
+        None,
+        &format!(
+            "added {} with {} tool(s): {}",
+            if applied.upstreams.is_empty() {
+                "a local command".to_string()
+            } else {
+                format!("'{}'", applied.upstreams.join("', '"))
+            },
+            applied.tools.len(),
+            if applied.tools.is_empty() {
+                "none".into()
+            } else {
+                applied.tools.join(", ")
+            }
+        ),
+    );
     Ok(Connected {
         applied: applied.into(),
         config_path: state.config_path.display().to_string(),
@@ -395,11 +429,24 @@ fn set_tool_face(
     };
 
     tracing::info!(from = %name, to = %new_name, moved = rules.moved.len(), "renamed a tool");
-    let _ = state.gateway.store.log_admin(
-        "tool.rename",
-        None,
-        &format!("'{name}' is now '{new_name}'"),
-    );
+    // Two different things happen behind one form, and a log that calls both "tool.rename"
+    // reads back as "'x' is now 'x'" for the one that only reworded the description.
+    let _ = if new_name != name {
+        state.gateway.store.log_admin(
+            "tool.rename",
+            None,
+            &format!(
+                "'{name}' is now '{new_name}'; {} client rule(s) moved with it",
+                rules.moved.len()
+            ),
+        )
+    } else {
+        state.gateway.store.log_admin(
+            "tool.describe",
+            None,
+            &format!("reworded what callers read for '{name}'"),
+        )
+    };
     Ok(Renamed {
         config_path: state.config_path.display().to_string(),
         moved: rules.moved,
@@ -599,6 +646,21 @@ fn set_publish(state: tauri::State<'_, AppState>, edit: PublishEdit) -> Result<S
         via = via.as_str(),
         config = %state.config_path.display(),
         "publishing settings changed"
+    );
+    // How the gateway is reachable is the most consequential thing on this screen: it is the
+    // difference between a loopback listener and something on the public internet.
+    let _ = state.gateway.store.log_admin(
+        "publish.change",
+        None,
+        &format!(
+            "reachable via {}{}",
+            via.as_str(),
+            if cfg.auth.access.is_some() {
+                ", behind Access"
+            } else {
+                ", bearer only"
+            }
+        ),
     );
     Ok(Saved {
         config_path: state.config_path.display().to_string(),
@@ -1050,11 +1112,24 @@ fn save_script(
     )
     .map_err(err)?;
 
-    match cfg.scripts.iter().position(|s| s.name == name) {
-        Some(i) => cfg.scripts[i] = def,
-        None => cfg.scripts.push(def),
-    }
+    let existed = match cfg.scripts.iter().position(|s| s.name == name) {
+        Some(i) => {
+            cfg.scripts[i] = def;
+            true
+        }
+        None => {
+            cfg.scripts.push(def);
+            false
+        }
+    };
     write_config(&state, &cfg)?;
+    // A script is code the gateway will run. Writing one and editing one are different enough
+    // to name differently: the second means a body that was reviewed is not the body any more.
+    let _ = state.gateway.store.log_admin(
+        if existed { "script.update" } else { "script.create" },
+        None,
+        &format!("{} '{name}' ({})", if existed { "rewrote" } else { "wrote" }, interp.as_str()),
+    );
 
     script_views(&cfg)
         .into_iter()
@@ -1093,7 +1168,12 @@ fn delete_script(state: tauri::State<'_, AppState>, name: String) -> Result<(), 
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     gatehound_core::scripts::delete(&base, &def).map_err(err)?;
-    write_config(&state, &cfg)
+    write_config(&state, &cfg)?;
+    let _ = state
+        .gateway
+        .store
+        .log_admin("script.delete", None, &format!("removed '{name}' and its body"));
+    Ok(())
 }
 
 /// Expose a script as a tool an upstream client can call.
@@ -1141,6 +1221,18 @@ fn add_script_tool(
         });
     }
     write_config(&state, &cfg)?;
+    let _ = state.gateway.store.log_admin(
+        "tool.add",
+        None,
+        &format!(
+            "'{tool}' now runs the script '{script}'{}",
+            if on_first_call == Decision::Deny {
+                ", hidden from every client until allowed"
+            } else {
+                ""
+            }
+        ),
+    );
     Ok(ApplyResult {
         applied: Applied {
             upstreams: Vec::new(),
@@ -1275,6 +1367,24 @@ fn apply_pack(
         config = %state.config_path.display(),
         "imported a pack"
     );
+    let _ = state.gateway.store.log_admin(
+        "pack.import",
+        None,
+        &format!(
+            "imported '{}': {} downstream(s), {} script(s), {} tool(s){}",
+            loaded.pack.name,
+            applied.upstreams.len(),
+            applied.scripts.len(),
+            applied.tools.len(),
+            if allow_dangerous_scripts {
+                ", including scripts the scanner flagged as dangerous"
+            } else if allow_scripts {
+                ", including scripts"
+            } else {
+                ""
+            }
+        ),
+    );
     Ok(ApplyResult {
         applied: applied.into(),
         config_path: state.config_path.display().to_string(),
@@ -1288,6 +1398,13 @@ fn apply_pack(
 #[tauri::command]
 fn restart_app(app: AppHandle) {
     let state = app.state::<AppState>();
+    // Written before the process goes, so the gap in the log afterwards has a reason next to it
+    // rather than looking like the gateway fell over.
+    let _ = state.gateway.store.log_admin(
+        "app.restart",
+        None,
+        "restarting to pick up the configuration on disk",
+    );
     if let Some(token) = state.listener.lock().unwrap().take() {
         token.cancel();
     }

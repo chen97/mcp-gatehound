@@ -148,8 +148,8 @@ fn refuse(realm: &str, err: &AuthError) -> Response {
 }
 
 async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: String) -> Response {
-    let identity = match gw.auth.authenticate(&headers).await {
-        Ok(id) => id,
+    let caller = match gw.auth.authenticate(&headers).await {
+        Ok(c) => c,
         Err(e) => {
             tracing::warn!(reason = %e.reason(), "rejected an unauthenticated call");
             gw.log(NewRequestLog {
@@ -162,6 +162,8 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
             return refuse(&gw.cfg.server_name, &e);
         }
     };
+    let identity = caller.identity;
+    let token_id = caller.token_id;
 
     let msg: Value = match serde_json::from_str(&body) {
         Ok(v) => v,
@@ -193,6 +195,7 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
                 status: Some("error".into()),
                 decision: Some("protocol".into()),
                 error: Some(e.message.clone()),
+                token_id: token_id.clone(),
                 ..Default::default()
             });
             return protocol_error(id, &e);
@@ -219,6 +222,7 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
                 client_name: client.clone(),
                 method: Some("initialize".into()),
                 status: Some("ok".into()),
+                token_id: token_id.clone(),
                 ..Default::default()
             });
             rpc_result(
@@ -241,6 +245,7 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
                 client_name: auth::client_name(&params),
                 method: Some("server/discover".into()),
                 status: Some("ok".into()),
+                token_id: token_id.clone(),
                 ..Default::default()
             });
             rpc_result(
@@ -276,6 +281,7 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
                 method: Some("tools/list".into()),
                 status: Some("ok".into()),
                 response_json: Some(format!("{{\"tools\":{}}}", tools.len())),
+                token_id: token_id.clone(),
                 ..Default::default()
             });
             rpc_result(
@@ -293,7 +299,7 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            call_tool(&gw, id, &identity, &name, args, &era).await
+            call_tool(&gw, id, &identity, token_id.as_deref(), &name, args, &era).await
         }
         "" => rpc_error(id, -32600, "invalid request: no method"),
         other => {
@@ -321,10 +327,12 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
 
 const DISCOVER_INSTRUCTIONS: &str = "Tools are bound to fixed actions by the gateway's configuration; a caller names a tool and never chooses an action. Every call is checked against a per-identity policy and recorded, a tool the policy holds waits for a human decision, and a tool marked idempotent requires an idempotency_key — repeating one replays the first result instead of acting again.";
 
+#[allow(clippy::too_many_arguments)] // One JSON-RPC call's worth of context, named.
 async fn call_tool(
     gw: &Arc<Gateway>,
     id: Value,
     identity: &str,
+    token_id: Option<&str>,
     name: &str,
     args: Value,
     era: &Era,
@@ -342,6 +350,7 @@ async fn call_tool(
             status: Some("error".into()),
             error: Some("unknown tool".into()),
             duration_ms: Some(started.elapsed().as_millis() as i64),
+            token_id: token_id.map(str::to_string),
             ..Default::default()
         });
         return rpc_error(id, -32602, &format!("unknown tool: {name}"));
@@ -376,6 +385,7 @@ async fn call_tool(
                     status: Some("error".into()),
                     error: Some(message.clone()),
                     duration_ms: Some(started.elapsed().as_millis() as i64),
+                    token_id: token_id.map(str::to_string),
                     ..Default::default()
                 });
                 return tool_err(gw, era, id, &message, other.error_code());
@@ -396,6 +406,7 @@ async fn call_tool(
             status: Some("error".into()),
             error: Some(message.clone()),
             duration_ms: Some(started.elapsed().as_millis() as i64),
+            token_id: token_id.map(str::to_string),
             ..Default::default()
         });
         return tool_err(gw, era, id, &message, "not_permitted");
@@ -414,6 +425,10 @@ async fn call_tool(
                 status: Some("ok".into()),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
                 response_json: Some(redact::for_log(&payload, redact::LOG_BYTES)),
+                token_id: token_id.map(str::to_string),
+                // The engine already tells the caller whether this acted or replayed; read it
+                // back off the payload rather than plumbing a second return value for it.
+                replayed: payload.get("duplicate").and_then(Value::as_bool),
                 ..Default::default()
             });
             tool_ok(gw, era, id, payload)
@@ -431,6 +446,7 @@ async fn call_tool(
                 status: Some("error".into()),
                 error: Some(redact::truncate(&message, redact::LOG_BYTES)),
                 duration_ms: Some(started.elapsed().as_millis() as i64),
+                token_id: token_id.map(str::to_string),
                 ..Default::default()
             });
             tool_err(gw, era, id, &message, "action_failed")

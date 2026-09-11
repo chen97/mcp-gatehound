@@ -209,6 +209,19 @@ impl CfAccessVerifier {
     }
 }
 
+/// Who got in, and on what.
+///
+/// The identity is what policy, the approval queue and the log key off. The token id is
+/// carried alongside it rather than folded in, because it answers a question the identity
+/// cannot: two tokens may be issued for one identity, and once one of them is revoked only the
+/// id says which of them made a given call.
+#[derive(Debug, Clone)]
+pub struct Caller {
+    pub identity: String,
+    /// `None` for the configured super token, which is not an issued one.
+    pub token_id: Option<String>,
+}
+
 pub struct Authenticator {
     bearer: String,
     bearer_identity: String,
@@ -261,7 +274,7 @@ impl Authenticator {
     }
 
     /// Check both factors and return the caller's identity string.
-    pub async fn authenticate(&self, headers: &HeaderMap) -> Result<String, AuthError> {
+    pub async fn authenticate(&self, headers: &HeaderMap) -> Result<Caller, AuthError> {
         let Some(token) = bearer(headers) else {
             return Err(AuthError::MissingBearer);
         };
@@ -274,10 +287,15 @@ impl Authenticator {
         if issued.is_none() && !eq_secret(&token, &self.bearer) {
             return Err(AuthError::BadBearer);
         }
+        let token_id = issued.as_ref().map(|(id, _)| id.clone());
+        let issued_identity = issued.map(|(_, identity)| identity);
 
         let Some(verifier) = self.access.as_ref() else {
             // No Access configured: loopback development. The bearer alone got us here.
-            return Ok(issued.unwrap_or_else(|| self.bearer_identity.clone()));
+            return Ok(Caller {
+                identity: issued_identity.unwrap_or_else(|| self.bearer_identity.clone()),
+                token_id,
+            });
         };
 
         let Some(jwt) = access_token(headers) else {
@@ -301,13 +319,17 @@ impl Authenticator {
         // service token can front the tunnel while many issued tokens distinguish the clients
         // behind it. Access stays a gate that had to pass; it is no longer the only source of
         // identity once a caller has a token of its own.
-        Ok(issued.unwrap_or(identity))
+        Ok(Caller {
+            identity: issued_identity.unwrap_or(identity),
+            token_id,
+        })
     }
 
-    /// The identity behind a presented token, or `None` when it is not an issued token at all.
+    /// The id and identity behind a presented token, or `None` when it is not an issued token
+    /// at all.
     /// A token that looks like ours but is unknown, revoked or wrong is an error, never a
     /// fallthrough to the super-token comparison.
-    fn resolve_issued(&self, presented: &str) -> Result<Option<String>, AuthError> {
+    fn resolve_issued(&self, presented: &str) -> Result<Option<(String, String)>, AuthError> {
         let Some((id, secret)) = crate::tokens::split(presented) else {
             return Ok(None);
         };
@@ -327,7 +349,7 @@ impl Authenticator {
         if let Err(e) = store.touch_token(id) {
             tracing::warn!(error = %e, "could not record token use");
         }
-        Ok(Some(identity))
+        Ok(Some((id.to_string(), identity)))
     }
 }
 
@@ -548,18 +570,21 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            a.authenticate(&headers(Some(&minted.secret), None))
-                .await
-                .unwrap(),
-            "claude-desktop"
-        );
+        let issued = a
+            .authenticate(&headers(Some(&minted.secret), None))
+            .await
+            .unwrap();
+        assert_eq!(issued.identity, "claude-desktop");
+        assert_eq!(issued.token_id.as_deref(), Some(minted.id.as_str()));
         // The super token still works, and is still the owner.
-        assert_eq!(
-            a.authenticate(&headers(Some("0123456789abcdef0123"), None))
-                .await
-                .unwrap(),
-            "bearer"
+        let owner = a
+            .authenticate(&headers(Some("0123456789abcdef0123"), None))
+            .await
+            .unwrap();
+        assert_eq!(owner.identity, "bearer");
+        assert!(
+            owner.token_id.is_none(),
+            "the configured bearer is not an issued token, so there is no id to record"
         );
     }
 
@@ -734,13 +759,15 @@ mod tests {
         ));
 
         let jwt = sign("aud123", ISS, Some("me@example.com"), None, None, 600);
+        let caller = a
+            .authenticate(&headers(Some(&minted.secret), Some(&jwt)))
+            .await
+            .unwrap();
         assert_eq!(
-            a.authenticate(&headers(Some(&minted.secret), Some(&jwt)))
-                .await
-                .unwrap(),
-            "edge-worker",
+            caller.identity, "edge-worker",
             "the token names the client more precisely than the shared Access identity"
         );
+        assert_eq!(caller.token_id.as_deref(), Some(minted.id.as_str()));
     }
 
     #[tokio::test]
@@ -757,12 +784,12 @@ mod tests {
         ));
 
         let jwt = sign("aud123", ISS, Some("me@example.com"), None, None, 600);
-        assert_eq!(
-            a.authenticate(&headers(Some("0123456789abcdef0123"), Some(&jwt)))
-                .await
-                .unwrap(),
-            "me@example.com"
-        );
+        let caller = a
+            .authenticate(&headers(Some("0123456789abcdef0123"), Some(&jwt)))
+            .await
+            .unwrap();
+        assert_eq!(caller.identity, "me@example.com");
+        assert!(caller.token_id.is_none());
     }
 
     #[tokio::test]
@@ -798,12 +825,12 @@ mod tests {
     async fn without_access_configured_the_bearer_identity_is_used() {
         let a = Authenticator::new(&cfg(false)).unwrap();
         assert!(!a.access_required());
-        assert_eq!(
-            a.authenticate(&headers(Some("0123456789abcdef0123"), None))
-                .await
-                .unwrap(),
-            "bearer"
-        );
+        let caller = a
+            .authenticate(&headers(Some("0123456789abcdef0123"), None))
+            .await
+            .unwrap();
+        assert_eq!(caller.identity, "bearer");
+        assert!(caller.token_id.is_none());
     }
 
     #[test]

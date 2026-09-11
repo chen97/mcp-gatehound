@@ -196,6 +196,12 @@ interface RequestLog {
   error: string | null;
   duration_ms: number | null;
   response_json: string | null;
+  /// Which issued token got in. Null for the configured bearer, and for anything the operator
+  /// did in this window.
+  token_id: string | null;
+  /// For an idempotent tool: whether this call acted, or replayed an earlier result. Null when
+  /// the tool is not idempotent and the question does not arise.
+  replayed: boolean | null;
 }
 
 interface IdentityRule {
@@ -344,7 +350,9 @@ function recentHtml(rows: RequestLog[]): string {
           <td><code>${esc(r.identity ?? "—")}</code></td>
           <td><code>${esc(r.tool ?? r.method ?? "")}</code></td>
           <td><span class="pill ${esc(r.decision ?? "")}">${esc(r.decision ?? "")}</span></td>
-          <td><span class="pill ${esc(r.status ?? "")}">${esc(r.status ?? "")}</span></td>
+          <td><span class="pill ${esc(r.status ?? "")}">${esc(
+            r.replayed ? "replayed" : (r.status ?? ""),
+          )}</span></td>
           <td class="meta">${r.duration_ms != null ? `${r.duration_ms}ms` : ""}</td>
         </tr>`,
       )
@@ -1003,7 +1011,9 @@ async function renderHome(snap: Snapshot): Promise<void> {
   const [rules, access, recent, pending] = await Promise.all([
     invoke<IdentityRule[]>("identities"),
     invoke<Access>("access"),
-    invoke<RequestLog[]>("requests", { limit: 6 }),
+    // Excluded in SQL, not here: six rows fetched and then filtered would go empty the moment
+    // somebody edited half a dozen rules, which is exactly when the screen matters least.
+    invoke<RequestLog[]>("requests", { limit: 6, excludeAdmin: true }),
     invoke<Pending[]>("pending"),
   ]);
   // Two containers, painted separately. The flow animates itself into place on the way in, and
@@ -1112,7 +1122,9 @@ async function renderLog(): Promise<void> {
                    <td>${esc(r.tool ?? "")}</td>
                    <td><span class="pill">${esc(r.decision ?? "")}</span></td>
                    <td>${esc(r.action_type ?? "")}${r.upstream ? ` → ${esc(r.upstream)}` : ""}</td>
-                   <td><span class="pill ${esc(r.status ?? "")}">${esc(r.status ?? "")}</span></td>
+                   <td><span class="pill ${esc(r.status ?? "")}">${esc(r.status ?? "")}</span>${
+                     r.replayed ? ' <span class="pill">replayed</span>' : ""
+                   }</td>
                    <td>${r.duration_ms ?? ""}</td>
                  </tr>`,
                )
@@ -1139,6 +1151,10 @@ async function renderLog(): Promise<void> {
           <h3>Request #${row.id}</h3>
           <div class="meta">${esc(row.ts)} · ${esc(row.identity ?? "—")}${
             row.client_name ? ` · ${esc(row.client_name)}` : ""
+          }${
+            // Which token, not just which identity: one identity can hold several, and after
+            // one is revoked this is the only thing that says which of them made the call.
+            row.token_id ? ` · token <code>${esc(row.token_id)}</code>` : ""
           }</div>
           ${row.error ? `<div class="meta" style="color:var(--bad)">${esc(row.error)}</div>` : ""}
           <div class="meta" style="margin-top:8px">Arguments (redacted, truncated)</div>

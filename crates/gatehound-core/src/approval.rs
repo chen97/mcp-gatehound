@@ -138,6 +138,19 @@ impl ApprovalQueue {
                     if let Err(e) = self.store.set_decision(identity, tool, decision) {
                         tracing::error!(error = %e, "could not persist approval decision");
                     }
+                    // "Always" writes the same rule the Upstream tab writes, and that one is
+                    // recorded. Without this the more consequential of the two — a permanent
+                    // grant made in a hurry, from a prompt — was the one that left no trace.
+                    if let Err(e) = self.store.log_admin(
+                        "identity.rule",
+                        Some(identity),
+                        &format!(
+                            "answered a held call: {identity} may {} {tool} from now on",
+                            decision.as_str()
+                        ),
+                    ) {
+                        tracing::warn!(error = %e, "could not record the rule the answer wrote");
+                    }
                 }
                 if resolution.allows() {
                     Outcome::Allowed
