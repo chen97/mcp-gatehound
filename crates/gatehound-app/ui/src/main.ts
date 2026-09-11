@@ -659,9 +659,58 @@ function applyPendingFocus(): void {
   }
 }
 
+/// Whether to animate a scroll. Read at the moment of use rather than cached, because the
+/// system setting can change while the window is open.
+function scrollBehaviour(): ScrollBehavior {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+}
+
+/// The head of a row that was just opened, as a selector, for the next paint to bring into view.
+///
+/// Held rather than acted on because opening repaints: the row you clicked is thrown away and
+/// rebuilt, so scrolling to it here would scroll to an element already detached from the page.
+let pendingReveal: string | null = null;
+
+/// Bring a just-opened row into view and leave the keyboard on it.
+///
+/// `block: "nearest"` and not "center": a row already fully on screen must not move at all, and
+/// one hanging half off the bottom should rise by exactly the half that was missing. Centring
+/// every row you open turns a list you are reading into one that jumps whenever you touch it.
+/// The card is what gets scrolled to, not the head — what you opened it for is underneath.
+function applyPendingReveal(): void {
+  const sel = pendingReveal;
+  if (!sel) return;
+  pendingReveal = null;
+  const head = document.querySelector<HTMLElement>(sel);
+  if (!head) return;
+  // Focus first and without its own scroll: focusing scrolls the element into view by itself,
+  // to wherever the browser likes, and the deliberate scroll below would then be a second
+  // competing move rather than the only one.
+  head.focus({ preventScroll: true });
+  (head.closest<HTMLElement>(".card") ?? head).scrollIntoView({
+    block: "nearest",
+    behavior: scrollBehaviour(),
+  });
+}
+
+/// Wire a row that opens and closes.
+///
+/// These rows are `div`s rather than `button`s because they carry a health dot, pills and a
+/// line of detail — content a button has no business containing. `role="button"` on the markup
+/// promises the keyboard contract a real button would have had; this is where that promise is
+/// kept.
+function onToggle(el: HTMLElement, run: () => void): void {
+  el.addEventListener("click", run);
+  el.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault(); // Space scrolls the page otherwise.
+    run();
+  });
+}
+
 function markArrival(el: HTMLElement | null): void {
   if (!el) return;
-  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.scrollIntoView({ block: "center", behavior: scrollBehaviour() });
   el.classList.remove("arrived");
   void el.getBoundingClientRect();
   el.classList.add("arrived");
@@ -1169,7 +1218,8 @@ function servicesHtml(snap: Snapshot, configFile: string): string {
         : `<div class="meta">No tools exposed from this one yet.</div>`;
 
       return `<div class="card">
-        <div class="row svc-head" data-key="${esc(r.key)}" style="margin-top:0;cursor:pointer">
+        <div class="row svc-head" data-key="${esc(r.key)}" role="button" tabindex="0"
+             aria-expanded="${open}" style="margin-top:0;cursor:pointer">
           <span class="twist">${open ? "▾" : "▸"}</span>
           ${
             health.has(r.key)
@@ -1230,6 +1280,7 @@ function redrawActions(): void {
     return;
   }
   paintActions(lastSnapshot, cachedConfigPath, cachedScripts);
+  applyPendingReveal();
 }
 
 function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView[]): void {
@@ -1259,10 +1310,13 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
     connDirty = false;
     redrawActions();
   });
-  for (const h of Array.from(document.querySelectorAll<HTMLElement>(".svc-head"))) {
-    h.addEventListener("click", () => {
+  for (const h of Array.from(document.querySelectorAll<HTMLElement>(".svc-head[data-key]"))) {
+    onToggle(h, () => {
       const key = h.dataset.key!;
-      if (!expanded.delete(key)) expanded.add(key);
+      if (!expanded.delete(key)) {
+        expanded.add(key);
+        pendingReveal = `.svc-head[data-key="${CSS.escape(key)}"]`;
+      }
       redrawActions();
     });
   }
@@ -2174,7 +2228,8 @@ function scriptsHtml(list: ScriptView[]): string {
             const open = expandedScripts.has(sc.name);
             const worst = worstOf(sc.findings);
             return `<div class="card">
-              <div class="row svc-head script-head" data-name="${esc(sc.name)}" style="margin-top:0;cursor:pointer">
+              <div class="row svc-head script-head" data-name="${esc(sc.name)}" role="button"
+                   tabindex="0" aria-expanded="${open}" style="margin-top:0;cursor:pointer">
                 <span class="twist">${open ? "\u25be" : "\u25b8"}</span>
                 <code>${esc(sc.name)}</code>
                 <span class="pill">${esc(sc.interpreter)}</span>
@@ -2314,9 +2369,12 @@ async function openScriptEditor(): Promise<void> {
 
 function wireScripts(list: ScriptView[]): void {
   for (const h of Array.from(document.querySelectorAll<HTMLElement>(".script-head"))) {
-    h.addEventListener("click", () => {
+    onToggle(h, () => {
       const name = h.dataset.name!;
-      if (!expandedScripts.delete(name)) expandedScripts.add(name);
+      if (!expandedScripts.delete(name)) {
+        expandedScripts.add(name);
+        pendingReveal = `.script-head[data-name="${CSS.escape(name)}"]`;
+      }
       redrawActions();
     });
   }
@@ -2870,7 +2928,8 @@ function clientCard(c: Client, snap: Snapshot, owner: string): string {
     : "";
 
   return `<div class="card">
-    <div class="row svc-head" data-client="${esc(c.identity)}" style="margin-top:0;cursor:pointer">
+    <div class="row svc-head" data-client="${esc(c.identity)}" role="button" tabindex="0"
+         aria-expanded="${open}" style="margin-top:0;cursor:pointer">
       <span class="twist">${open ? "▾" : "▸"}</span>
       <code>${esc(c.identity)}</code>
       <span style="margin-left:auto">${clientSummary(c, owner)}</span>
@@ -3022,6 +3081,11 @@ function wireGrantPicker(): void {
       b.title = `${open ? "Hide" : "Show"} the tools under this`;
       const tw = b.querySelector(".twist");
       if (tw) tw.textContent = open ? "\u25be" : "\u25b8";
+      // No repaint here, so no pending anything: the group can be brought into view at once,
+      // because the element is still the one that was clicked.
+      if (open) {
+        b.closest(".grant-group")?.scrollIntoView({ block: "nearest", behavior: scrollBehaviour() });
+      }
     });
   }
   for (const box of Array.from(document.querySelectorAll<HTMLInputElement>(".grant-all"))) {
@@ -3253,9 +3317,12 @@ function wireToolFace(): void {
 function wireClients(): void {
   wireGrantPicker();
   for (const h of Array.from(document.querySelectorAll<HTMLElement>(".svc-head[data-client]"))) {
-    h.addEventListener("click", () => {
+    onToggle(h, () => {
       const key = h.dataset.client!;
-      if (!expandedClients.delete(key)) expandedClients.add(key);
+      if (!expandedClients.delete(key)) {
+        expandedClients.add(key);
+        pendingReveal = `.svc-head[data-client="${CSS.escape(key)}"]`;
+      }
       void refresh();
     });
   }
@@ -3906,6 +3973,7 @@ async function refresh(): Promise<void> {
       else if (screen === "network") await renderNetwork();
       tickTimes();
       applyPendingFocus();
+      applyPendingReveal();
     } while (refreshQueued);
   } catch (e) {
     console.error(e);

@@ -145,6 +145,10 @@ pre { --scroll-face: var(--bg); }
 .card {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
   padding: var(--s4); margin-bottom: var(--s3); box-shadow: var(--shadow);
+  /* A card scrolled into view by opening it stops short of the window edge rather than flush
+     against it. `scroll-margin` is the declarative half of that; `block: "nearest"` is the
+     other half, and neither works without the other. */
+  scroll-margin-block: var(--s4);
 }
 .card h3 {
   margin: 0 0 var(--s1); font-size: 13px; font-weight: 650; letter-spacing: -0.006em;
