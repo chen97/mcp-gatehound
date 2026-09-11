@@ -1477,6 +1477,7 @@ pub fn show_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.set_focus();
+        let _ = app.emit("watched", true);
     }
 }
 
@@ -1611,6 +1612,11 @@ fn main() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                // Say so, rather than leaving the window to work it out. A hidden window costs
+                // nothing only if it knows to stop polling and stop animating, and whether a
+                // hidden webview reports `visibilitychange` is a per-platform accident. This is
+                // not: the hide happens here.
+                let _ = window.app_handle().emit("watched", false);
             }
         })
         .build(tauri::generate_context!())

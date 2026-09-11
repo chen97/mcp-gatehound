@@ -563,6 +563,14 @@ pre {
 .board:has(.trace-spark.run) .trace-drift { opacity: .08; }
 .board.paused .trace-drift { animation-play-state: paused; opacity: .1; }
 
+/* Nobody is looking. Closing this window hides it rather than quitting, so that is most of the
+   time — and the drift is the one thing on this page that costs a style recalculation and a
+   repaint of the whole diagram every single frame. Measured at 4-6% of a core, continuously,
+   for motion whose entire job is to be noticed by a person who is not there. */
+body.unwatched .trace-drift,
+body.unwatched .chip .dot.green::after,
+body.unwatched .pill.hot { animation-play-state: paused; }
+
 @keyframes tile-in-left  { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
 @keyframes tile-in-right { from { opacity: 0; transform: translateX(12px); }  to { opacity: 1; transform: none; } }
 @keyframes tile-in       { from { opacity: 0; transform: translateY(10px); }  to { opacity: 1; transform: none; } }

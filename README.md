@@ -573,6 +573,25 @@ content; the record of a token you removed is the only thing left saying it ever
 window, so a burst of rule edits cannot crowd the six rows it has. **Live log** shows
 everything.
 
+### What it costs while you are not using it
+
+Closing the window hides it; the gateway keeps running in the tray. That is most of this app's
+life, so nothing that costs something per second or per frame runs there.
+
+The window's five-second re-read is a safety net for anything an event missed, and it stops
+while the window is hidden — events still arrive and still redraw, so nothing goes stale, and
+the first thing it does on the way back is catch up. The diagram's ambient drift stops too: it
+is the one thing on that page that costs a style recalculation and a repaint of the whole
+diagram every frame, measured at 4–6% of a core, and its entire job is to be noticed by a
+person who is not there. The shell says when it hides the window rather than leaving the page
+to infer it, because whether a hidden webview reports `visibilitychange` is a per-platform
+accident.
+
+Reading the Downstream screen means reading and hashing every script file on disk — that is how
+"changed on disk" is noticed. It happens when you arrive on the screen and after anything that
+could have changed one, and at most every thirty seconds otherwise, rather than twelve times a
+minute for a screen sitting still.
+
 ## Data on disk, and whose it is
 
 The audit log accumulates a plaintext copy of whatever passes through — which, depending on

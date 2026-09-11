@@ -1326,15 +1326,28 @@ function servicesHtml(snap: Snapshot, configFile: string): string {
 /// far too much work to sit between a dropdown and its own options changing.
 let cachedConfigPath = "";
 let cachedScripts: ScriptView[] = [];
+/// When those files were last read. Re-reading is how "changed on disk" is noticed, so it has
+/// to happen — but it is disk work, and the five-second safety net was doing it twelve times a
+/// minute for a screen sitting still. Arriving on the screen or changing something clears this
+/// and reads immediately; an idle screen settles for twice a minute.
+let scriptsReadAt = 0;
+const SCRIPT_REREAD_MS = 30_000;
+
+/// Read the scripts from disk again on the next paint of this screen.
+function scriptsAreStale(): void {
+  scriptsReadAt = 0;
+}
 
 async function renderActions(snap: Snapshot): Promise<void> {
   if (actionsAreBeingEdited()) return;
+  const fresh = scriptsReadAt > 0 && Date.now() - scriptsReadAt < SCRIPT_REREAD_MS;
   const [configFile, scriptList] = await Promise.all([
     invoke<string>("config_path"),
-    invoke<ScriptView[]>("scripts"),
+    fresh ? Promise.resolve(cachedScripts) : invoke<ScriptView[]>("scripts"),
   ]);
   cachedConfigPath = configFile;
   cachedScripts = scriptList;
+  if (!fresh) scriptsReadAt = Date.now();
   paintActions(snap, configFile, scriptList);
 }
 
@@ -2575,6 +2588,7 @@ function wireScripts(list: ScriptView[]): void {
         return;
       }
       expandedScripts.delete(name);
+      scriptsAreStale();
       void refresh();
     });
   }
@@ -2745,6 +2759,7 @@ function wireScriptEditor(): void {
     scriptReview = null;
     scriptDirty = false;
     expandedScripts.add(saved);
+    scriptsAreStale();
     void refresh();
 
     // Step two, for the path that came in through "add a downstream". A file on disk that
@@ -2944,6 +2959,7 @@ function wirePackPanel(): void {
       // A fresh pack is a fresh decision: consent never carries over from the last file.
       allowScripts = false;
       allowDangerousScripts = false;
+      scriptsAreStale();
       packPlan = await invoke<PackPlan>("inspect_pack", { path: chosen });
       packPath = chosen;
       packChoices = packPlan.missing_files.map(() => "");
@@ -4132,6 +4148,7 @@ async function show(next: string): Promise<void> {
     }
     publishDirty = false;
   }
+  if (next === "actions") scriptsAreStale();
   screen = next;
   document.querySelectorAll<HTMLElement>(".screen").forEach((s) => s.classList.add("hidden"));
   $(`#${next}`).classList.remove("hidden");
@@ -4219,5 +4236,46 @@ function watchBoard(): void {
   const board = document.querySelector(".board");
   if (board) boardWatcher.observe(board);
 }
-// A slow safety net for anything an event did not cover (a timed-out hold, say).
-setInterval(() => void refresh(), 5000);
+/// Whether anybody is looking at this window.
+///
+/// Closing it hides it rather than quitting — the gateway keeps running in the tray, which is
+/// the whole point of a menubar app — so hidden is where this window spends most of its life.
+/// Everything that costs something per second or per frame stops there and picks up again on
+/// the way back.
+function watched(): boolean {
+  return shellSaysWatched ?? document.visibilityState !== "hidden";
+}
+
+/// Overrides `document.visibilityState` when the shell has told us directly. Whether a hidden
+/// webview reports `visibilitychange` is a per-platform accident; the shell hiding the window
+/// is not, so when it says, that wins.
+let shellSaysWatched: boolean | null = null;
+
+/// Only transitions matter. Called at startup too, where a refresh is already on its way.
+let wasWatched = true;
+
+function setWatched(): void {
+  const now = watched();
+  document.body.classList.toggle("unwatched", !now);
+  // Nothing was polled or drawn while it was away, so the first thing it does on return is
+  // catch up — otherwise the window would come back showing a five-second-old gateway.
+  if (now && !wasWatched) void refresh();
+  wasWatched = now;
+}
+document.addEventListener("visibilitychange", () => {
+  // A visibility change the browser noticed is current news; drop the shell's older word.
+  shellSaysWatched = null;
+  setWatched();
+});
+void listen<boolean>("watched", (e) => {
+  shellSaysWatched = e.payload;
+  setWatched();
+});
+setWatched();
+
+// A slow safety net for anything an event did not cover (a timed-out hold, say). Events still
+// arrive and still refresh while hidden; this is only the net, and a net nobody is standing
+// under does not need checking twelve times a minute.
+setInterval(() => {
+  if (watched()) void refresh();
+}, 5000);
