@@ -111,7 +111,7 @@ pub fn refresh(app: &AppHandle) {
     let label = match status {
         GatewayStatus::Listening => "MCP Gatehound — listening",
         GatewayStatus::Paused => "MCP Gatehound — paused",
-        GatewayStatus::Degraded => "MCP Gatehound — an upstream is not answering",
+        GatewayStatus::Degraded => "MCP Gatehound — a downstream is not answering",
     };
     let tooltip = if count > 0 {
         format!("{label} · {count} waiting")

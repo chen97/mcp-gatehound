@@ -67,6 +67,9 @@ struct Downstream {
     kind: &'static str,
     /// Where it is. Empty for local commands, which have no address.
     target: String,
+    /// Whether it answered its last health probe. Per-service, because the gateway being up and
+    /// a service behind it being up are two different questions.
+    healthy: bool,
 }
 
 // ---- IPC commands ---------------------------------------------------------
@@ -80,6 +83,7 @@ fn snapshot(state: tauri::State<'_, AppState>) -> Result<Snapshot, String> {
     } else {
         GatewayStatus::Paused
     };
+    let down = gw.unhealthy();
     Ok(Snapshot {
         status,
         colour: status.colour(),
@@ -97,11 +101,13 @@ fn snapshot(state: tauri::State<'_, AppState>) -> Result<Snapshot, String> {
                     name: u.name.clone(),
                     kind: "MCP server",
                     target: url.clone(),
+                    healthy: !down.contains(&u.name),
                 },
                 gatehound_core::config::UpstreamKind::Http { base_url, .. } => Downstream {
                     name: u.name.clone(),
                     kind: "REST API",
                     target: base_url.clone(),
+                    healthy: !down.contains(&u.name),
                 },
             })
             .collect(),

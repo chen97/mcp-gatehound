@@ -77,6 +77,7 @@ header .ghost { margin-left: auto; }
 .dot.green { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
 .dot.grey  { background: var(--mut); }
 .dot.red   { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent); }
+.dot.amber { background: var(--am); box-shadow: 0 0 0 3px color-mix(in srgb, var(--am) 18%, transparent); }
 
 nav { display: flex; gap: var(--s1); padding: 0 var(--s5); position: relative; }
 nav button {
@@ -327,7 +328,7 @@ pre {
 .rail.left .tile-slot { animation-name: tile-in-left; }
 .rail.right .tile-slot { animation-name: tile-in-right; }
 /* Compact by default so a rail of a dozen still fits. */
-.rail.left .tile-slot, .rail.right .tile-slot { width: 132px; }
+.rail.left .tile-slot, .rail.right .tile-slot { width: 150px; }
 .rail.bottom .tile-slot { width: 128px; flex: none; }
 
 /* Columns. Past six a rail splits, so twenty clients are three short columns rather than one
@@ -353,7 +354,14 @@ pre {
 .rail.right .tile  { right: 0; left: 0; }
 .rail.bottom .tile { left: 0;  right: 0; }
 
-.tile-icon { flex: none; width: 18px; height: 18px; color: var(--mut); }
+/* The icon carries the service's own light, in its corner. On the node itself rather than on
+   the gateway: one service not answering is not the gateway being unwell. */
+.tile-icon { flex: none; width: 18px; height: 18px; color: var(--mut); position: relative; }
+.tile-dot {
+  position: absolute; right: -3px; bottom: -1px; width: 7px; height: 7px;
+  box-shadow: 0 0 0 2px var(--panel-2);
+}
+.tile:hover .tile-dot, .tile:focus-visible .tile-dot { box-shadow: 0 0 0 2px var(--in); }
 .tile-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5;
                  stroke-linecap: round; stroke-linejoin: round; }
 .tile-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }

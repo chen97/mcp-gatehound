@@ -8,12 +8,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 type Status = "listening" | "paused" | "degraded";
+type Dot = "green" | "grey" | "red" | "amber";
 type Resolution = "allow_once" | "allow_always" | "reject" | "reject_always";
 type Decision = "allow" | "deny" | "ask";
 
 interface Snapshot {
   status: Status;
-  colour: "green" | "grey" | "red";
+  colour: Dot;
   running: boolean;
   listen_addr: string;
   auth: string;
@@ -26,6 +27,7 @@ interface Downstream {
   name: string;
   kind: string;
   target: string;
+  healthy: boolean;
 }
 
 interface ToolInfo {
@@ -255,12 +257,22 @@ let statusFilter = "";
 
 // ---- header and tray mirror ------------------------------------------------
 
+/// "1 tool", "3 tools" — the count and the word that goes with it.
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
 async function renderHeader(): Promise<Snapshot> {
   const s = await invoke<Snapshot>("snapshot");
+  const down = s.upstreams.filter((u) => !u.healthy).length;
   $("#dot").className = `dot ${s.colour}`;
   $("#subtitle").textContent =
-    `${s.listen_addr} · ${s.auth} · ${s.upstreams.length} upstream(s) · ${s.tools.length} tools` +
-    (s.status === "degraded" ? " · an upstream is not answering" : "");
+    // "downstream", not "upstream" — these are the services the gateway calls out to, which is
+    // what every other screen calls them. The count of the ones not answering rather than a
+    // bare "one of them": with six services, which is the useful half of the sentence.
+    `${s.listen_addr} · ${s.auth} · ${plural(s.upstreams.length, "downstream", "downstreams")} ` +
+    `with ${plural(s.tools.length, "tool", "tools")}` +
+    (down > 0 ? ` · ${plural(down, "downstream is", "downstreams are")} not answering` : "");
   const badge = $("#badge");
   badge.textContent = String(s.pending);
   badge.className = s.pending > 0 ? "badge hot" : "badge";
@@ -390,7 +402,8 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
             icon: u.kind.toLowerCase().includes("mcp") ? "mcp" : "api",
             label: u.target,
             short: shortLabel(u.target),
-            sub: `${u.kind} · ${n} tool${n === 1 ? "" : "s"}`,
+            sub: `${u.healthy ? u.kind : "not answering"} · ${n} tool${n === 1 ? "" : "s"}`,
+            dot: u.healthy ? "green" : "red",
             goto: "actions",
             focus: `service:${u.name}`,
             attr: `data-service="${esc(u.name)}"`,
@@ -433,7 +446,9 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
       <div class="chip" id="flow-hub" style="--d:${gateAt}ms">
         <div class="chip-die">
           <div class="chip-core">
-            <div class="chip-name"><span class="dot ${esc(snap.colour)}"></span>MCP Gatehound</div>
+            <div class="chip-name" title="${snap.running ? "Listening" : "Paused"}">
+              <span class="dot ${snap.running ? "green" : "grey"}"></span>MCP Gatehound
+            </div>
             <div class="chip-meta">${esc(snap.listen_addr)}</div>
             ${snap.pending ? `<span class="pill hot">${snap.pending} waiting</span>` : ""}
           </div>
@@ -475,6 +490,9 @@ function tile(o: {
   short: string;
   sub: string;
   goto: string;
+  /// Its own health, when it has one. A service that is not answering says so on itself — the
+  /// gateway's light is about the gateway.
+  dot?: Dot;
   /// A key the destination screen knows how to find and open. Without it a click lands you on
   /// the right screen and leaves you to hunt for the row you asked about.
   focus?: string;
@@ -484,7 +502,9 @@ function tile(o: {
   return `<div class="tile-slot" ${o.attr ?? ""} style="--d:${o.delay}ms">
     <button class="tile" data-goto="${esc(o.goto)}" ${o.focus ? `data-focus="${esc(o.focus)}"` : ""}
       title="${esc(o.label)} — open ${esc(TAB_NAMES[o.goto] ?? o.goto)}">
-      <span class="tile-icon">${ICONS[o.icon] ?? ""}</span>
+      <span class="tile-icon">${ICONS[o.icon] ?? ""}${
+        o.dot ? `<span class="dot ${o.dot} tile-dot"></span>` : ""
+      }</span>
       <span class="tile-text">
         <span class="tile-short">${esc(o.short)}</span>
         <span class="tile-label">${esc(o.label)}</span>
@@ -1027,6 +1047,7 @@ function servicesHtml(snap: Snapshot, configFile: string): string {
     (groups.get(key) ?? groups.set(key, []).get(key)!).push(t);
   }
 
+  const health = new Map(snap.upstreams.map((u) => [u.name, u.healthy]));
   const rows = snap.upstreams.map((u) => ({
     key: u.name,
     title: u.target,
@@ -1068,9 +1089,17 @@ function servicesHtml(snap: Snapshot, configFile: string): string {
       return `<div class="card">
         <div class="row svc-head" data-key="${esc(r.key)}" style="margin-top:0;cursor:pointer">
           <span class="twist">${open ? "▾" : "▸"}</span>
+          ${
+            health.has(r.key)
+              ? `<span class="dot ${health.get(r.key) ? "green" : "red"}"
+                       title="${health.get(r.key) ? "Answering" : "Not answering its health probe"}"></span>`
+              : ""
+          }
           <code>${esc(r.title)}</code>
           <span class="pill">${r.tools.length} tool${r.tools.length === 1 ? "" : "s"}</span>
-          <span class="meta" style="margin-left:auto">${esc(r.sub)}</span>
+          <span class="meta" style="margin-left:auto">${
+            health.get(r.key) === false ? "not answering · " : ""
+          }${esc(r.sub)}</span>
         </div>
         <div class="${open ? "" : "hidden"}">${tools}</div>
       </div>`;

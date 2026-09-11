@@ -65,6 +65,13 @@ pub struct Gateway {
     pub events: EventBus,
     pub started_at: DateTime<Utc>,
     status: Mutex<GatewayStatus>,
+    /// Upstreams that did not answer their last health probe, by name.
+    ///
+    /// Kept per-upstream rather than folded into `status`, because they answer different
+    /// questions. The gateway's status is whether *this* is up; an upstream not answering is a
+    /// fact about that upstream, and a shell that only had the rolled-up version had to show a
+    /// red light on the gateway to say a service somewhere behind it was down.
+    unhealthy: Mutex<Vec<String>>,
 }
 
 impl Gateway {
@@ -118,6 +125,7 @@ impl Gateway {
             events,
             started_at: Utc::now(),
             status: Mutex::new(GatewayStatus::Paused),
+            unhealthy: Mutex::new(Vec::new()),
         }))
     }
 
@@ -197,6 +205,7 @@ impl Gateway {
         tokio::spawn(async move {
             loop {
                 let down = self.engine.upstreams().unhealthy().await;
+                *self.unhealthy.lock().unwrap() = down.clone();
                 if down.is_empty() {
                     self.set_status(GatewayStatus::Listening, None);
                 } else {
@@ -245,6 +254,11 @@ impl Gateway {
 
     pub fn status(&self) -> GatewayStatus {
         *self.status.lock().unwrap()
+    }
+
+    /// Upstreams that did not answer their last probe.
+    pub fn unhealthy(&self) -> Vec<String> {
+        self.unhealthy.lock().unwrap().clone()
     }
 
     fn set_status(&self, status: GatewayStatus, detail: Option<String>) {

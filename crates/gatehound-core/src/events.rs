@@ -12,7 +12,11 @@ pub enum GatewayStatus {
     Listening,
     /// Listener stopped by the user.
     Paused,
-    /// Listening, but an upstream is not answering.
+    /// Listening, and something it fronts is not answering.
+    ///
+    /// This is not the gateway being unwell. It is up and accepting calls; a service behind it
+    /// is not. Amber rather than red for exactly that reason — red on the gateway reads as
+    /// "the gateway is down", which is the opposite of true here.
     Degraded,
 }
 
@@ -22,7 +26,7 @@ impl GatewayStatus {
         match self {
             GatewayStatus::Listening => "green",
             GatewayStatus::Paused => "grey",
-            GatewayStatus::Degraded => "red",
+            GatewayStatus::Degraded => "amber",
         }
     }
 }
@@ -68,5 +72,25 @@ impl EventBus {
 impl Default for EventBus {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_service_being_down_does_not_paint_the_gateway_red() {
+        // The light on the gateway answers "is this up". It used to go red when something it
+        // fronts stopped answering, which says the opposite of what was true: the gateway was
+        // listening and taking calls the whole time.
+        assert_eq!(GatewayStatus::Listening.colour(), "green");
+        assert_eq!(GatewayStatus::Paused.colour(), "grey");
+        assert_eq!(GatewayStatus::Degraded.colour(), "amber");
+        assert_ne!(
+            GatewayStatus::Degraded.colour(),
+            "red",
+            "red on the gateway reads as the gateway being down"
+        );
     }
 }
