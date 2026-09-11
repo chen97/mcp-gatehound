@@ -521,7 +521,7 @@ pub fn scan(body: &str) -> Vec<Finding> {
                 severity: Severity::Warn,
                 rule: "minified".into(),
                 line: n + 1,
-                excerpt: format!("{}…", &line.chars().take(80).collect::<String>()),
+                excerpt: format!("{}…", line.chars().take(80).collect::<String>()),
                 why: "a single very long line is unreadable, and unreadable is unreviewable".into(),
             });
             continue;
