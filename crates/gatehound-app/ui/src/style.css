@@ -120,13 +120,25 @@ main { flex: 1 1 auto; padding: var(--s5); overflow-y: scroll; scrollbar-gutter:
 /* Cards and prose stop at a readable width; a 1600px window should not give 1600px sentences. */
 .screen { max-width: 1080px; margin: 0 auto; }
 
-main::-webkit-scrollbar { width: 10px; }
-main::-webkit-scrollbar-track { background: transparent; }
-main::-webkit-scrollbar-thumb {
+/* One scrollbar for the whole window. The platform default is a grey bar in a grey groove —
+   the single control that dates a window fastest, and inside a card it draws a hard trough
+   across a design that has no other hard edges. Ours is a capsule floating on the surface it
+   scrolls: a transparent track, and a thumb inset by a border painted in that surface's own
+   colour, which is what `--scroll-face` carries. A box that scrolls over something other than
+   the page background sets it; everything else inherits the page.
+   `scrollbar-width`/`scrollbar-color` are deliberately absent: setting either makes Chromium
+   ignore these rules entirely, and the Windows webview is Chromium. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
   background: var(--line-strong); border-radius: 999px;
-  border: 3px solid var(--bg); background-clip: padding-box;
+  border: 3px solid var(--scroll-face, var(--bg)); background-clip: padding-box;
+  min-height: 32px; min-width: 32px;
 }
-main::-webkit-scrollbar-thumb:hover { background: var(--mut); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--mut); background-clip: padding-box; }
+.card, .modal { --scroll-face: var(--panel); }
+input, select, textarea, .script-body { --scroll-face: var(--in); }
+pre { --scroll-face: var(--bg); }
 
 /* ---- Cards ----------------------------------------------------------------- */
 
