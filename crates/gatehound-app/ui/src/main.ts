@@ -372,6 +372,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
           return tile({
             icon: c.identity === access.owner ? "key" : "client",
             label: c.identity,
+            short: c.identity,
             sub: c.identity === access.owner ? "super token" : what,
             goto: "upstream",
             attr: `data-caller="${esc(c.identity)}"`,
@@ -388,6 +389,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
           return tile({
             icon: u.kind.toLowerCase().includes("mcp") ? "mcp" : "api",
             label: u.target,
+            short: shortLabel(u.target),
             sub: `${u.kind} · ${n} tool${n === 1 ? "" : "s"}`,
             goto: "actions",
             attr: `data-service="${esc(u.name)}"`,
@@ -404,16 +406,17 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
   // remaining screen, so between the three rails every tab is one click from the picture that
   // explains what it is for.
   const bottom = [
-    tile({ icon: "token", label: "Tokens", sub: `${live} live`, goto: "upstream", delay: 0 }),
+    tile({ icon: "token", label: "Tokens", short: "Tokens", sub: `${live} live`, goto: "upstream", delay: 0 }),
     tile({
       icon: "script",
       label: "Scripts & tools",
+      short: "Scripts",
       sub: `${snap.tools.length} exposed${local ? `, ${local} local` : ""}`,
       goto: "actions",
       delay: STAGGER_MS,
     }),
-    tile({ icon: "globe", label: "Reach", sub: snap.auth, goto: "network", delay: STAGGER_MS * 2 }),
-    tile({ icon: "log", label: "Live log", sub: "every call, kept", goto: "log", delay: STAGGER_MS * 3 }),
+    tile({ icon: "globe", label: "Reach", short: "Reach", sub: snap.auth, goto: "network", delay: STAGGER_MS * 2 }),
+    tile({ icon: "log", label: "Live log", short: "Live log", sub: "every call, kept", goto: "log", delay: STAGGER_MS * 3 }),
   ].join("");
 
   const gateAt =
@@ -444,33 +447,58 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
   </div>`;
 }
 
-/// One tile on the board. A button, not a box: every one of them goes somewhere.
+/// One tile on the board.
+///
+/// A fixed-size slot holds the space; the button inside it is absolutely positioned and grows
+/// past the slot on hover. That is the whole trick: a rail of twelve services stays a rail of
+/// twelve small rectangles, and the one you point at becomes readable without moving the other
+/// eleven — or the traces, which are measured against the slots and so never see the change.
 function tile(o: {
   icon: string;
   label: string;
+  short: string;
   sub: string;
   goto: string;
   attr?: string;
   delay: number;
 }): string {
-  return `<button class="tile" data-goto="${esc(o.goto)}" ${o.attr ?? ""} style="--d:${o.delay}ms"
-    title="${esc(o.label)} — open ${esc(TAB_NAMES[o.goto] ?? o.goto)}">
-    <span class="tile-icon">${ICONS[o.icon] ?? ""}</span>
-    <span class="tile-text">
-      <span class="tile-label">${esc(o.label)}</span>
-      <span class="tile-sub">${esc(o.sub)}</span>
-    </span>
-  </button>`;
+  return `<div class="tile-slot" ${o.attr ?? ""} style="--d:${o.delay}ms">
+    <button class="tile" data-goto="${esc(o.goto)}"
+      title="${esc(o.label)} — open ${esc(TAB_NAMES[o.goto] ?? o.goto)}">
+      <span class="tile-icon">${ICONS[o.icon] ?? ""}</span>
+      <span class="tile-text">
+        <span class="tile-short">${esc(o.short)}</span>
+        <span class="tile-label">${esc(o.label)}</span>
+        <span class="tile-sub">${esc(o.sub)}</span>
+      </span>
+    </button>
+  </div>`;
 }
 
 function emptyTile(label: string, sub: string, goto: string): string {
-  return `<button class="tile empty-tile" data-goto="${esc(goto)}" style="--d:0ms">
-    <span class="tile-icon">${ICONS.plus}</span>
-    <span class="tile-text">
-      <span class="tile-label">${esc(label)}</span>
-      <span class="tile-sub">${esc(sub)}</span>
-    </span>
-  </button>`;
+  return `<div class="tile-slot" style="--d:0ms">
+    <button class="tile empty-tile" data-goto="${esc(goto)}">
+      <span class="tile-icon">${ICONS.plus}</span>
+      <span class="tile-text">
+        <span class="tile-short">${esc(label)}</span>
+        <span class="tile-label">${esc(label)}</span>
+        <span class="tile-sub">${esc(sub)}</span>
+      </span>
+    </button>
+  </div>`;
+}
+
+/// What a tile says when it is not being pointed at.
+///
+/// A full URL in a 150px box is a row of ellipses that distinguishes nothing. The host and port
+/// are what actually tell two downstreams apart, and the rest is one hover away.
+function shortLabel(v: string): string {
+  try {
+    const u = new URL(v);
+    return u.port ? `${u.hostname}:${u.port}` : u.hostname;
+  } catch {
+    return v;
+  }
 }
 
 const TAB_NAMES: Record<string, string> = {
@@ -538,32 +566,36 @@ function drawBoard(): void {
   if (!board || !svg || !chip) return;
 
   const b = board.getBoundingClientRect();
-  const c = chip.getBoundingClientRect();
   svg.setAttribute("viewBox", `0 0 ${b.width} ${b.height}`);
   const rel = (r: DOMRect) => ({
-    l: r.left - b.left, r: r.right - b.left, t: r.top - b.top, bo: r.bottom - b.top,
-    cx: r.left + r.width / 2 - b.left, cy: r.top + r.height / 2 - b.top,
+    l: r.left - b.left,
+    r: r.right - b.left,
+    t: r.top - b.top,
+    bo: r.bottom - b.top,
+    cx: r.left + r.width / 2 - b.left,
+    cy: r.top + r.height / 2 - b.top,
   });
-  const chipBox = rel(c);
+  const chipBox = rel(chip.getBoundingClientRect());
+
+  // How far from the chip every trace on a side turns. One shared column rather than the
+  // midpoint of each gap: a fanout is a bundle leaving the package together and splitting once,
+  // and turning each trace in a different place made a set of unrelated zigzags out of it.
+  const BREAKOUT = 30;
 
   type Leg = { d: string; attr: string; delay: number };
   const legs: Leg[] = [];
 
-  const sides: [string, "left" | "right"][] = [
-    [".rail.left .tile", "left"],
-    [".rail.right .tile", "right"],
-  ];
-  for (const [sel, side] of sides) {
-    const tiles = Array.from(board.querySelectorAll<HTMLElement>(sel));
-    tiles.forEach((el, i) => {
+  for (const side of ["left", "right"] as const) {
+    const slots = Array.from(board.querySelectorAll<HTMLElement>(`.rail.${side} .tile-slot`));
+    const busX = side === "left" ? chipBox.l - BREAKOUT : chipBox.r + BREAKOUT;
+    slots.forEach((el, i) => {
       const t = rel(el.getBoundingClientRect());
-      // Fan the attachment points down the chip's edge rather than piling them on one spot —
-      // two traces meeting at the same pixel read as one line that forked.
-      const y = chipBox.t + ((i + 1) * (chipBox.bo - chipBox.t)) / (tiles.length + 1);
-      const from = side === "left" ? { x: t.r, y: t.cy } : { x: chipBox.r, y };
-      const to = side === "left" ? { x: chipBox.l, y } : { x: t.l, y: t.cy };
+      // Fanned down the chip's edge: two traces meeting at one pixel read as a line that forked.
+      const pinY = chipBox.t + ((i + 1) * (chipBox.bo - chipBox.t)) / (slots.length + 1);
+      const pinX = side === "left" ? chipBox.l : chipBox.r;
+      const tileX = side === "left" ? t.r : t.l;
       legs.push({
-        d: elbow(from, to),
+        d: bus([pinX, pinY], busX, [tileX, t.cy], "h"),
         attr: el.dataset.caller
           ? `data-caller="${el.dataset.caller}"`
           : el.dataset.service
@@ -574,15 +606,14 @@ function drawBoard(): void {
     });
   }
 
-  const bottom = Array.from(board.querySelectorAll<HTMLElement>(".rail.bottom .tile"));
+  const bottom = Array.from(board.querySelectorAll<HTMLElement>(".rail.bottom .tile-slot"));
+  const busY = chipBox.bo + BREAKOUT;
   bottom.forEach((el, i) => {
     const t = rel(el.getBoundingClientRect());
-    const x = chipBox.l + ((i + 1) * (chipBox.r - chipBox.l)) / (bottom.length + 1);
-    legs.push({ d: vElbow({ x, y: chipBox.bo }, { x: t.cx, y: t.t }), attr: "", delay: i * STAGGER_MS });
+    const pinX = chipBox.l + ((i + 1) * (chipBox.r - chipBox.l)) / (bottom.length + 1);
+    legs.push({ d: bus([pinX, chipBox.bo], busY, [t.cx, t.t], "v"), attr: "", delay: i * STAGGER_MS });
   });
 
-  // Two paths per leg: the trace itself, and a faint dash drifting along it. A call adds a
-  // third, briefly.
   // Through `paint`, so a redraw with the same geometry changes nothing. Resizing fires this
   // repeatedly, and rewriting identical paths would restart every trace's draw-in animation.
   const drawn = paint(
@@ -604,38 +635,42 @@ function drawBoard(): void {
   }
 }
 
-/// A horizontal orthogonal run: out, across, in — with quarter-arc corners rather than
-/// mitres, because a right angle drawn sharp reads as a mistake at this weight.
-function elbow(a: { x: number; y: number }, z: { x: number; y: number }): string {
-  const midX = (a.x + z.x) / 2;
-  if (Math.abs(a.y - z.y) < 1) return `M${a.x},${a.y} L${z.x},${z.y}`;
-  // Clamped by both runs. Taking `|| 10` when one of them was zero let the radius exceed the
-  // segment it had to fit inside, and the arc overshot into a stub that connected nothing.
-  const r = Math.max(0, Math.min(10, Math.abs(z.y - a.y) / 2, Math.abs(z.x - a.x) / 2));
-  const dy = Math.sign(z.y - a.y);
-  const dx = Math.sign(z.x - a.x);
-  return (
-    `M${a.x},${a.y} L${midX - r * dx},${a.y}` +
-    ` Q${midX},${a.y} ${midX},${a.y + r * dy}` +
-    ` L${midX},${z.y - r * dy}` +
-    ` Q${midX},${z.y} ${midX + r * dx},${z.y}` +
-    ` L${z.x},${z.y}`
-  );
-}
+/// A trace from a pin on the chip, out to a shared turn column, along it, and into a tile.
+///
+/// `axis` is the direction it leaves the chip: `h` for the side rails, `v` for the one
+/// underneath. Corners are quarter-arcs, clamped by both runs so an arc can never be larger
+/// than the segment it has to fit inside — a radius that overshoots draws a stub connecting
+/// nothing, which is exactly what the first version of this did.
+function bus(pin: [number, number], busAt: number, tile: [number, number], axis: "h" | "v"): string {
+  const [px, py] = pin;
+  const [tx, ty] = tile;
+  const along = axis === "h" ? ty - py : tx - px;
+  if (Math.abs(along) < 1) return `M${px},${py} L${tx},${ty}`;
 
-/// The same run turned through ninety degrees, for the rail underneath.
-function vElbow(a: { x: number; y: number }, z: { x: number; y: number }): string {
-  const midY = (a.y + z.y) / 2;
-  if (Math.abs(a.x - z.x) < 1) return `M${a.x},${a.y} L${z.x},${z.y}`;
-  const r = Math.max(0, Math.min(10, Math.abs(z.x - a.x) / 2, Math.abs(z.y - a.y) / 2));
-  const dx = Math.sign(z.x - a.x);
-  const dy = Math.sign(z.y - a.y);
+  const r = (a: number, c: number) => Math.max(0, Math.min(9, Math.abs(a) / 2, Math.abs(c) / 2));
+  if (axis === "h") {
+    const out = busAt - px;
+    const rr = r(along, out) || 0;
+    const so = Math.sign(out);
+    const sa = Math.sign(along);
+    return (
+      `M${px},${py} L${busAt - rr * so},${py}` +
+      ` Q${busAt},${py} ${busAt},${py + rr * sa}` +
+      ` L${busAt},${ty - rr * sa}` +
+      ` Q${busAt},${ty} ${busAt + rr * so},${ty}` +
+      ` L${tx},${ty}`
+    );
+  }
+  const out = busAt - py;
+  const rr = r(along, out) || 0;
+  const so = Math.sign(out);
+  const sa = Math.sign(along);
   return (
-    `M${a.x},${a.y} L${a.x},${midY - r * dy}` +
-    ` Q${a.x},${midY} ${a.x + r * dx},${midY}` +
-    ` L${z.x - r * dx},${midY}` +
-    ` Q${z.x},${midY} ${z.x},${midY + r * dy}` +
-    ` L${z.x},${z.y}`
+    `M${px},${py} L${px},${busAt - rr * so}` +
+    ` Q${px},${busAt} ${px + rr * sa},${busAt}` +
+    ` L${tx - rr * sa},${busAt}` +
+    ` Q${tx},${busAt} ${tx},${busAt + rr * so}` +
+    ` L${tx},${ty}`
   );
 }
 
@@ -661,7 +696,7 @@ function traceRequest(row: RequestLog): void {
   const caller = row.identity ?? "";
   if (caller && flowRows.callers.includes(caller)) {
     pulse(`[data-caller="${CSS.escape(caller)}"]`, kind, 0);
-    light(`.tile[data-caller="${CSS.escape(caller)}"]`, 0);
+    light(`.tile-slot[data-caller="${CSS.escape(caller)}"]`, 0);
   }
   light("#flow-hub", 250);
 
@@ -669,7 +704,7 @@ function traceRequest(row: RequestLog): void {
   const service = row.upstream ?? "";
   if (kind === "ok" && service && flowRows.services.includes(service)) {
     pulse(`[data-service="${CSS.escape(service)}"]`, kind, 700);
-    light(`.tile[data-service="${CSS.escape(service)}"]`, 1200);
+    light(`.tile-slot[data-service="${CSS.escape(service)}"]`, 1200);
   }
 }
 

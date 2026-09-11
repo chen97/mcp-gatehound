@@ -298,7 +298,7 @@ pre {
   overflow: visible; pointer-events: none;
 }
 
-.rail { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
+.rail { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
 .rail.left { grid-column: 1; align-items: stretch; }
 .rail.right { grid-column: 3; align-items: stretch; }
 .rail.bottom {
@@ -311,42 +311,72 @@ pre {
 }
 .rail.right .rail-head { text-align: right; }
 
-/* ---- Tiles ---- */
+/* ---- Tiles ----
+   A slot holds the space; the button inside is absolutely positioned and grows past it on
+   hover. A rail of a dozen services stays a rail of a dozen small rectangles, and the one you
+   point at becomes readable without moving the other eleven — or the traces, which are
+   measured against the slots. */
 
-.tile {
-  position: relative; z-index: 1;
-  display: flex; align-items: center; gap: var(--s3); min-width: 0;
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r);
-  padding: 10px var(--s3); font: inherit; color: var(--tx); text-align: left; cursor: pointer;
-  transition: border-color 180ms var(--ease-out), background 180ms var(--ease-out),
-              transform 180ms var(--ease-out);
+.tile-slot {
+  position: relative; height: 40px; min-width: 0;
   animation: tile-in 320ms var(--ease-out) both; animation-delay: var(--d, 0ms);
 }
-.rail.left .tile { animation-name: tile-in-left; }
-.rail.right .tile { animation-name: tile-in-right; }
-.rail.bottom .tile { flex: 0 1 auto; }
+.rail.left .tile-slot { animation-name: tile-in-left; }
+.rail.right .tile-slot { animation-name: tile-in-right; }
+/* Compact by default so a rail of a dozen still fits. Anchored toward the chip, so the traces
+   meet a consistent edge whatever the label length. */
+.rail.left .tile-slot, .rail.right .tile-slot { width: 176px; }
+.rail.left { align-items: flex-end; }
+.rail.right { align-items: flex-start; }
+.rail.bottom .tile-slot { width: 128px; flex: none; }
 
-@media (hover: hover) and (pointer: fine) {
-  .tile:hover { border-color: var(--line-strong); background: var(--in); }
+.tile {
+  position: absolute; top: 0; height: 40px; z-index: 1;
+  display: flex; align-items: center; gap: var(--s2); min-width: 0;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 0 var(--s3); font: inherit; color: var(--tx); text-align: left; cursor: pointer;
+  transition: border-color 180ms var(--ease-out), background 180ms var(--ease-out),
+              box-shadow 180ms var(--ease-out);
 }
-.tile:active { transform: scale(.985); }
-.tile:focus-visible { outline: 2px solid var(--am); outline-offset: 2px; }
-/* State indication when this tile is part of a call. */
-.tile.lit {
-  border-color: var(--am);
-  background: color-mix(in srgb, var(--am) 8%, var(--panel-2));
-}
+/* Growing away from the chip, so an expanded tile never covers the traces. */
+.rail.left .tile   { left: 0;  right: 0; }
+.rail.right .tile  { right: 0; left: 0; }
+.rail.bottom .tile { left: 0;  right: 0; }
 
-.tile-icon { flex: none; width: 20px; height: 20px; color: var(--mut); }
-.tile-icon svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.4;
+.tile-icon { flex: none; width: 18px; height: 18px; color: var(--mut); }
+.tile-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5;
                  stroke-linecap: round; stroke-linejoin: round; }
-.tile:hover .tile-icon, .tile.lit .tile-icon { color: var(--am); }
 .tile-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.tile-label {
+.tile-short, .tile-label {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tile-sub { color: var(--mut); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Compact by default: the short name only. The full one and its detail are one hover away. */
+.tile-label, .tile-sub { display: none; }
+.tile-sub { color: var(--mut); font-size: 11px; white-space: nowrap; }
+
+/* Expanded. Out of flow already, so this costs the layout nothing. */
+.tile:hover, .tile:focus-visible {
+  z-index: 5; width: max-content; max-width: 320px;
+  border-color: var(--line-strong); background: var(--in);
+  box-shadow: var(--shadow);
+}
+.rail.right .tile:hover, .rail.right .tile:focus-visible { left: auto; }
+.rail.left .tile:hover,  .rail.left .tile:focus-visible  { right: auto; }
+.rail.bottom .tile:hover, .rail.bottom .tile:focus-visible { right: auto; }
+.tile:hover .tile-short, .tile:focus-visible .tile-short { display: none; }
+.tile:hover .tile-label, .tile:focus-visible .tile-label,
+.tile:hover .tile-sub, .tile:focus-visible .tile-sub { display: block; }
+.tile:hover .tile-icon, .tile:focus-visible .tile-icon { color: var(--am); }
+.tile:active { transform: scale(.985); }
+.tile:focus-visible { outline: 2px solid var(--am); outline-offset: 2px; }
+
+/* State indication when this tile is part of a call. */
+.tile-slot.lit .tile {
+  border-color: var(--am);
+  background: color-mix(in srgb, var(--am) 8%, var(--panel-2));
+}
+.tile-slot.lit .tile-icon { color: var(--am); }
 .empty-tile { border-style: dashed; }
 
 /* ---- The chip ---- */
