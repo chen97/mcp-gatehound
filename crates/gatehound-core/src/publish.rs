@@ -1039,418 +1039,416 @@ mod tests {
     // contents rather than the environment — tests run in one process, so an environment
     // variable set by one is visible to another running at the same time.
 
-    struct Fake {
-        dir: PathBuf,
-    }
-
-    impl Fake {
-        /// A stand-in `tailscale` that logs its arguments, answers `status --json`, and either
-        /// succeeds or fails as asked.
-        fn new(succeeds: bool) -> Self {
-            let dir = std::env::temp_dir().join(format!("gh-pub-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&dir).unwrap();
-            let log = dir.join("calls.log");
-            let script = format!(
-                r#"#!/bin/sh
-echo "$@" >> '{log}'
-if [ "$1" = "status" ]; then
-  echo '{{"Self":{{"DNSName":"test-node.tail0000.ts.net.","HostName":"test-node"}}}}'
-  exit 0
-fi
-{body}
-"#,
-                log = log.display(),
-                body = if succeeds {
-                    "exit 0"
-                } else {
-                    "echo \"not logged in, run 'tailscale up' first\" >&2\nexit 1"
-                }
-            );
-            let bin = dir.join("tailscale");
-            std::fs::write(&bin, script).unwrap();
-            std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-                .unwrap();
-            Self { dir }
+    // Everything in here stands a shell script in for `cloudflared` or `tailscale`, which is how
+    // you get a daemon that exits on cue, announces late, floods stderr, or dies after a delay
+    // without installing one. Windows has no shebang, so the technique does not travel — one
+    // module rather than an attribute per test, because the helpers are compiled whether or not
+    // a test uses them, and gating the tests alone left `PermissionsExt` behind to fail the
+    // build. The supervision these exercise is platform-independent Rust; the stand-in is not.
+    #[cfg(unix)]
+    mod with_a_stand_in_daemon {
+        use super::*;
+        struct Fake {
+            dir: PathBuf,
         }
 
-        fn cfg(&self) -> PublishConfig {
-            PublishConfig {
-                via: PublishVia::Tailscale,
-                binary: Some(self.dir.join("tailscale")),
-                ..Default::default()
+        impl Fake {
+            /// A stand-in `tailscale` that logs its arguments, answers `status --json`, and either
+            /// succeeds or fails as asked.
+            fn new(succeeds: bool) -> Self {
+                let dir = std::env::temp_dir().join(format!("gh-pub-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let log = dir.join("calls.log");
+                let script = format!(
+                    r#"#!/bin/sh
+    echo "$@" >> '{log}'
+    if [ "$1" = "status" ]; then
+      echo '{{"Self":{{"DNSName":"test-node.tail0000.ts.net.","HostName":"test-node"}}}}'
+      exit 0
+    fi
+    {body}
+    "#,
+                    log = log.display(),
+                    body = if succeeds {
+                        "exit 0"
+                    } else {
+                        "echo \"not logged in, run 'tailscale up' first\" >&2\nexit 1"
+                    }
+                );
+                let bin = dir.join("tailscale");
+                std::fs::write(&bin, script).unwrap();
+                std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                    .unwrap();
+                Self { dir }
+            }
+
+            fn cfg(&self) -> PublishConfig {
+                PublishConfig {
+                    via: PublishVia::Tailscale,
+                    binary: Some(self.dir.join("tailscale")),
+                    ..Default::default()
+                }
+            }
+
+            fn calls(&self) -> String {
+                std::fs::read_to_string(self.dir.join("calls.log")).unwrap_or_default()
             }
         }
 
-        fn calls(&self) -> String {
-            std::fs::read_to_string(self.dir.join("calls.log")).unwrap_or_default()
+        impl Drop for Fake {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.dir).ok();
+            }
         }
-    }
 
-    impl Drop for Fake {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.dir).ok();
+        /// A stand-in `cloudflared`: a daemon that either falls over at once, the way a real one
+        /// does with no tunnel configured, or stays up.
+        struct FakeDaemon {
+            dir: PathBuf,
         }
-    }
 
-    /// A stand-in `cloudflared`: a daemon that either falls over at once, the way a real one
-    /// does with no tunnel configured, or stays up.
-    struct FakeDaemon {
-        dir: PathBuf,
-    }
+        impl FakeDaemon {
+            fn new(survives: bool) -> Self {
+                let dir = std::env::temp_dir().join(format!("gh-daemon-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let body = if survives {
+                    // Long enough to outlive any grace a test uses.
+                    "sleep 30"
+                } else {
+                    "echo 'Cannot determine default origin certificate path' >&2\nexit 255"
+                };
+                let bin = dir.join("cloudflared");
+                std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                    .unwrap();
+                Self { dir }
+            }
 
-    impl FakeDaemon {
-        fn new(survives: bool) -> Self {
-            let dir = std::env::temp_dir().join(format!("gh-daemon-{}", uuid::Uuid::new_v4()));
+            fn cfg(&self) -> PublishConfig {
+                PublishConfig {
+                    via: PublishVia::Cloudflare,
+                    binary: Some(self.dir.join("cloudflared")),
+                    cloudflare: CloudflareConfig {
+                        hostname: Some("gatehound.example.com".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            }
+        }
+
+        impl Drop for FakeDaemon {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.dir).ok();
+            }
+        }
+
+        #[tokio::test]
+        async fn a_daemon_that_exits_at_once_is_not_reported_as_published() {
+            // The failure that matters: `spawn` succeeds because the binary is there, then
+            // cloudflared gives up because the machine has no tunnel. Calling that published tells
+            // the operator their tools are on the public internet with nothing in front of them,
+            // which is both false and the exact warning that must stay believable.
+            let fake = FakeDaemon::new(false);
+            let p = Publisher::new(fake.cfg(), "127.0.0.1:8790")
+                .with_grace(std::time::Duration::from_millis(400));
+
+            let state = p.start().await;
+            match &state {
+                PublishState::Failed { via, error } => {
+                    assert_eq!(via, "cloudflare");
+                    assert!(error.contains("exited immediately"), "{error}");
+                    assert!(error.contains("255"), "{error}");
+                    // The reason the backend gave, not just a number.
+                    assert!(error.contains("origin certificate"), "{error}");
+                }
+                other => panic!("expected a failure, got {other:?}"),
+            }
+            assert_eq!(p.state(), state);
+            // Nothing published means loopback, so the panel reports a factor rather than none.
+            assert_eq!(state.reach(), Reach::Loopback);
+        }
+
+        /// A cloudflared stand-in that announces a registered connection after a delay.
+        fn announcing_daemon(delay: &str) -> (PathBuf, PublishConfig) {
+            let dir = std::env::temp_dir().join(format!("gh-ready-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&dir).unwrap();
-            let body = if survives {
-                // Long enough to outlive any grace a test uses.
-                "sleep 30"
-            } else {
-                "echo 'Cannot determine default origin certificate path' >&2\nexit 255"
-            };
             let bin = dir.join("cloudflared");
-            std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::write(
+                &bin,
+                format!(
+                    "#!/bin/sh\n\
+                     echo 'INF Starting tunnel' >&2\n\
+                     sleep {delay}\n\
+                     echo 'INF Registered tunnel connection connIndex=0 location=lhr01' >&2\n\
+                     sleep 30\n"
+                ),
+            )
+            .unwrap();
             std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
                 .unwrap();
-            Self { dir }
-        }
-
-        fn cfg(&self) -> PublishConfig {
-            PublishConfig {
+            let cfg = PublishConfig {
                 via: PublishVia::Cloudflare,
-                binary: Some(self.dir.join("cloudflared")),
+                binary: Some(bin),
                 cloudflare: CloudflareConfig {
                     hostname: Some("gatehound.example.com".into()),
                     ..Default::default()
                 },
                 ..Default::default()
+            };
+            (dir, cfg)
+        }
+
+        #[tokio::test]
+        async fn a_tunnel_that_says_it_connected_is_reported_as_connected() {
+            // "Did not exit" is weaker than "is carrying traffic". cloudflared can stay up for a
+            // while failing to register, and calling that published overstates what is known.
+            let (dir, cfg) = announcing_daemon("0.1");
+            let p =
+                Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_secs(3));
+
+            let started = std::time::Instant::now();
+            match p.start().await {
+                PublishState::Published(pub_) => {
+                    assert!(pub_.confirmed, "it announced a connection")
+                }
+                other => panic!("expected published, got {other:?}"),
             }
+            // And confirming ends the wait rather than serving out the whole window.
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "took {:?}; confirming should cut the grace window short",
+                started.elapsed()
+            );
+
+            p.stop().await;
+            std::fs::remove_dir_all(&dir).ok();
         }
-    }
 
-    impl Drop for FakeDaemon {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.dir).ok();
-        }
-    }
+        #[tokio::test]
+        async fn a_tunnel_that_connects_late_stops_being_reported_as_starting() {
+            // Slower than the window, which is the case that would otherwise read as "starting"
+            // for the rest of the session even though the tunnel came up fine.
+            let (dir, cfg) = announcing_daemon("0.6");
+            let p = Publisher::new(cfg, "127.0.0.1:8790")
+                .with_grace(std::time::Duration::from_millis(80));
 
-    // Unix only: these stand a shell script in for `cloudflared`, which is how you get a
-    // daemon that exits on cue, floods stderr, or dies after a delay without installing one.
-    // Windows has no shebang, so the technique does not travel — the supervision they exercise
-    // is platform-independent Rust, and is covered on the platforms that can run the stand-in.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_daemon_that_exits_at_once_is_not_reported_as_published() {
-        // The failure that matters: `spawn` succeeds because the binary is there, then
-        // cloudflared gives up because the machine has no tunnel. Calling that published tells
-        // the operator their tools are on the public internet with nothing in front of them,
-        // which is both false and the exact warning that must stay believable.
-        let fake = FakeDaemon::new(false);
-        let p = Publisher::new(fake.cfg(), "127.0.0.1:8790")
-            .with_grace(std::time::Duration::from_millis(400));
-
-        let state = p.start().await;
-        match &state {
-            PublishState::Failed { via, error } => {
-                assert_eq!(via, "cloudflare");
-                assert!(error.contains("exited immediately"), "{error}");
-                assert!(error.contains("255"), "{error}");
-                // The reason the backend gave, not just a number.
-                assert!(error.contains("origin certificate"), "{error}");
+            match p.start().await {
+                PublishState::Published(pub_) => {
+                    assert!(!pub_.confirmed, "it had not announced anything yet")
+                }
+                other => panic!("expected published, got {other:?}"),
             }
-            other => panic!("expected a failure, got {other:?}"),
-        }
-        assert_eq!(p.state(), state);
-        // Nothing published means loopback, so the panel reports a factor rather than none.
-        assert_eq!(state.reach(), Reach::Loopback);
-    }
 
-    /// A cloudflared stand-in that announces a registered connection after a delay.
-    fn announcing_daemon(delay: &str) -> (PathBuf, PublishConfig) {
-        let dir = std::env::temp_dir().join(format!("gh-ready-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("cloudflared");
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\n\
-                 echo 'INF Starting tunnel' >&2\n\
-                 sleep {delay}\n\
-                 echo 'INF Registered tunnel connection connIndex=0 location=lhr01' >&2\n\
-                 sleep 30\n"
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            for _ in 0..40 {
+                if matches!(p.state(), PublishState::Published(ref x) if x.confirmed) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            match p.state() {
+                PublishState::Published(pub_) => assert!(
+                    pub_.confirmed,
+                    "a connection announced after start must still be noticed"
+                ),
+                other => panic!("expected published, got {other:?}"),
+            }
+
+            p.stop().await;
+            std::fs::remove_dir_all(&dir).ok();
+        }
+
+        #[tokio::test]
+        async fn a_chatty_daemon_is_not_left_blocked_on_a_pipe_nobody_reads() {
+            // The failure this guards against is invisible: a backend whose stderr is piped and
+            // never read blocks once the kernel buffer fills, at around 64KB. cloudflared logs a
+            // line per connection event, so a real tunnel stops serving after a few hundred of
+            // them — with the process still alive, so everything still claims to be published.
+            let dir = std::env::temp_dir().join(format!("gh-chatty-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let done = dir.join("finished");
+            let bin = dir.join("cloudflared");
+            std::fs::write(
+                &bin,
+                format!(
+                    "#!/bin/sh\n\
+                     i=0\n\
+                     while [ $i -lt 4000 ]; do\n\
+                       echo \"INF connection heartbeat connIndex=0 padding to make the line realistic\" >&2\n\
+                       i=$((i + 1))\n\
+                     done\n\
+                     touch '{}'\n\
+                     sleep 30\n",
+                    done.display()
+                ),
+            )
             .unwrap();
-        let cfg = PublishConfig {
-            via: PublishVia::Cloudflare,
-            binary: Some(bin),
-            cloudflare: CloudflareConfig {
-                hostname: Some("gatehound.example.com".into()),
+            std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+
+            let cfg = PublishConfig {
+                via: PublishVia::Cloudflare,
+                binary: Some(bin),
+                cloudflare: CloudflareConfig {
+                    hostname: Some("gatehound.example.com".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        };
-        (dir, cfg)
-    }
+            };
+            // Not so short that a loaded machine races the spawn; the point of the test is what
+            // happens after it is up, not how fast it gets there.
+            //
+            // Seen failing twice on a machine also running a full build, and not reproduced in
+            // fifteen runs since. If it fails again, the assertion below prints the state: a
+            // `Failed { error: "could not start: ..." }` is the OS refusing to fork under load
+            // rather than anything about draining, and the test wants making cheaper. Anything
+            // else is real.
+            let p = Publisher::new(cfg, "127.0.0.1:8790")
+                .with_grace(std::time::Duration::from_millis(200));
+            let st = p.start().await;
+            assert!(matches!(st, PublishState::Published(_)), "got {st:?}");
 
-    #[tokio::test]
-    async fn a_tunnel_that_says_it_connected_is_reported_as_connected() {
-        // "Did not exit" is weaker than "is carrying traffic". cloudflared can stay up for a
-        // while failing to register, and calling that published overstates what is known.
-        let (dir, cfg) = announcing_daemon("0.1");
-        let p = Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_secs(3));
-
-        let started = std::time::Instant::now();
-        match p.start().await {
-            PublishState::Published(pub_) => assert!(pub_.confirmed, "it announced a connection"),
-            other => panic!("expected published, got {other:?}"),
-        }
-        // And confirming ends the wait rather than serving out the whole window.
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "took {:?}; confirming should cut the grace window short",
-            started.elapsed()
-        );
-
-        p.stop().await;
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[tokio::test]
-    async fn a_tunnel_that_connects_late_stops_being_reported_as_starting() {
-        // Slower than the window, which is the case that would otherwise read as "starting"
-        // for the rest of the session even though the tunnel came up fine.
-        let (dir, cfg) = announcing_daemon("0.6");
-        let p =
-            Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_millis(80));
-
-        match p.start().await {
-            PublishState::Published(pub_) => {
-                assert!(!pub_.confirmed, "it had not announced anything yet")
+            // Far more than a pipe holds. If nothing is draining, it never gets to the end.
+            for _ in 0..100 {
+                if done.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            other => panic!("expected published, got {other:?}"),
+            assert!(
+                done.exists(),
+                "the backend blocked writing to a pipe nobody read"
+            );
+            assert!(matches!(p.state(), PublishState::Published(_)));
+
+            p.stop().await;
+            std::fs::remove_dir_all(&dir).ok();
         }
 
-        for _ in 0..40 {
-            if matches!(p.state(), PublishState::Published(ref x) if x.confirmed) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        match p.state() {
-            PublishState::Published(pub_) => assert!(
-                pub_.confirmed,
-                "a connection announced after start must still be noticed"
-            ),
-            other => panic!("expected published, got {other:?}"),
-        }
+        #[tokio::test]
+        async fn a_daemon_that_gives_up_later_stops_being_reported_as_published() {
+            // Surviving the grace window is not a promise to keep running. Without noticing the
+            // exit, the panel would say "on the public internet, nothing in front of it" for the
+            // rest of the session — about a gateway that is loopback only.
+            let dir = std::env::temp_dir().join(format!("gh-late-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let bin = dir.join("cloudflared");
+            std::fs::write(&bin, "#!/bin/sh\nsleep 0.3\nexit 1\n").unwrap();
+            std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
 
-        p.stop().await;
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    // Unix only: these stand a shell script in for `cloudflared`, which is how you get a
-    // daemon that exits on cue, floods stderr, or dies after a delay without installing one.
-    // Windows has no shebang, so the technique does not travel — the supervision they exercise
-    // is platform-independent Rust, and is covered on the platforms that can run the stand-in.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_chatty_daemon_is_not_left_blocked_on_a_pipe_nobody_reads() {
-        // The failure this guards against is invisible: a backend whose stderr is piped and
-        // never read blocks once the kernel buffer fills, at around 64KB. cloudflared logs a
-        // line per connection event, so a real tunnel stops serving after a few hundred of
-        // them — with the process still alive, so everything still claims to be published.
-        let dir = std::env::temp_dir().join(format!("gh-chatty-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let done = dir.join("finished");
-        let bin = dir.join("cloudflared");
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\n\
-                 i=0\n\
-                 while [ $i -lt 4000 ]; do\n\
-                   echo \"INF connection heartbeat connIndex=0 padding to make the line realistic\" >&2\n\
-                   i=$((i + 1))\n\
-                 done\n\
-                 touch '{}'\n\
-                 sleep 30\n",
-                done.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
-
-        let cfg = PublishConfig {
-            via: PublishVia::Cloudflare,
-            binary: Some(bin),
-            cloudflare: CloudflareConfig {
-                hostname: Some("gatehound.example.com".into()),
+            let cfg = PublishConfig {
+                via: PublishVia::Cloudflare,
+                binary: Some(bin),
+                cloudflare: CloudflareConfig {
+                    hostname: Some("gatehound.example.com".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        };
-        // Not so short that a loaded machine races the spawn; the point of the test is what
-        // happens after it is up, not how fast it gets there.
-        //
-        // Seen failing twice on a machine also running a full build, and not reproduced in
-        // fifteen runs since. If it fails again, the assertion below prints the state: a
-        // `Failed { error: "could not start: ..." }` is the OS refusing to fork under load
-        // rather than anything about draining, and the test wants making cheaper. Anything
-        // else is real.
-        let p =
-            Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_millis(200));
-        let st = p.start().await;
-        assert!(matches!(st, PublishState::Published(_)), "got {st:?}");
+            };
+            let p = Publisher::new(cfg, "127.0.0.1:8790")
+                .with_grace(std::time::Duration::from_millis(50));
 
-        // Far more than a pipe holds. If nothing is draining, it never gets to the end.
-        for _ in 0..100 {
-            if done.exists() {
-                break;
+            assert!(
+                matches!(p.start().await, PublishState::Published(_)),
+                "it was up when we looked"
+            );
+
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+            match p.state() {
+                PublishState::Failed { via, error } => {
+                    assert_eq!(via, "cloudflare");
+                    assert!(error.contains("loopback only"), "{error}");
+                }
+                other => panic!("a backend that exited must not still be published: {other:?}"),
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert_eq!(p.state().reach(), Reach::Loopback);
+            std::fs::remove_dir_all(&dir).ok();
         }
-        assert!(
-            done.exists(),
-            "the backend blocked writing to a pipe nobody read"
-        );
-        assert!(matches!(p.state(), PublishState::Published(_)));
 
-        p.stop().await;
-        std::fs::remove_dir_all(&dir).ok();
-    }
+        #[tokio::test]
+        async fn a_daemon_that_stays_up_is_published_with_its_hostname() {
+            let fake = FakeDaemon::new(true);
+            let p = Publisher::new(fake.cfg(), "127.0.0.1:8790")
+                .with_grace(std::time::Duration::from_millis(200));
 
-    // Unix only: these stand a shell script in for `cloudflared`, which is how you get a
-    // daemon that exits on cue, floods stderr, or dies after a delay without installing one.
-    // Windows has no shebang, so the technique does not travel — the supervision they exercise
-    // is platform-independent Rust, and is covered on the platforms that can run the stand-in.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_daemon_that_gives_up_later_stops_being_reported_as_published() {
-        // Surviving the grace window is not a promise to keep running. Without noticing the
-        // exit, the panel would say "on the public internet, nothing in front of it" for the
-        // rest of the session — about a gateway that is loopback only.
-        let dir = std::env::temp_dir().join(format!("gh-late-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("cloudflared");
-        std::fs::write(&bin, "#!/bin/sh\nsleep 0.3\nexit 1\n").unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
-
-        let cfg = PublishConfig {
-            via: PublishVia::Cloudflare,
-            binary: Some(bin),
-            cloudflare: CloudflareConfig {
-                hostname: Some("gatehound.example.com".into()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let p =
-            Publisher::new(cfg, "127.0.0.1:8790").with_grace(std::time::Duration::from_millis(50));
-
-        assert!(
-            matches!(p.start().await, PublishState::Published(_)),
-            "it was up when we looked"
-        );
-
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-
-        match p.state() {
-            PublishState::Failed { via, error } => {
-                assert_eq!(via, "cloudflare");
-                assert!(error.contains("loopback only"), "{error}");
-            }
-            other => panic!("a backend that exited must not still be published: {other:?}"),
+            assert_eq!(
+                p.start().await,
+                PublishState::Published(Published {
+                    via: "cloudflare",
+                    reach: Reach::Internet,
+                    url: Some("https://gatehound.example.com/mcp".into()),
+                    // A bare `sleep` says nothing, so it is running but not confirmed connected.
+                    confirmed: false,
+                })
+            );
+            // And it is not left running once the gateway is done with it.
+            p.stop().await;
+            assert_eq!(p.state(), PublishState::NotPublished);
         }
-        assert_eq!(p.state().reach(), Reach::Loopback);
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[tokio::test]
-    async fn a_daemon_that_stays_up_is_published_with_its_hostname() {
-        let fake = FakeDaemon::new(true);
-        let p = Publisher::new(fake.cfg(), "127.0.0.1:8790")
-            .with_grace(std::time::Duration::from_millis(200));
+        #[tokio::test]
+        async fn publishing_on_the_tailnet_reports_the_url_the_daemon_gave() {
+            let fake = Fake::new(true);
+            let p = Publisher::new(fake.cfg(), "127.0.0.1:8790");
+            assert_eq!(p.state(), PublishState::NotPublished);
 
-        assert_eq!(
-            p.start().await,
-            PublishState::Published(Published {
-                via: "cloudflare",
-                reach: Reach::Internet,
-                url: Some("https://gatehound.example.com/mcp".into()),
-                // A bare `sleep` says nothing, so it is running but not confirmed connected.
-                confirmed: false,
-            })
-        );
-        // And it is not left running once the gateway is done with it.
-        p.stop().await;
-        assert_eq!(p.state(), PublishState::NotPublished);
-    }
+            let state = p.start().await;
+            assert_eq!(
+                state,
+                PublishState::Published(Published {
+                    via: "tailscale",
+                    reach: Reach::Tailnet,
+                    url: Some("https://test-node.tail0000.ts.net/mcp".into()),
+                    // `tailscale serve` exiting zero is the confirmation.
+                    confirmed: true,
+                })
+            );
+            assert_eq!(p.state(), state);
 
-    #[tokio::test]
-    async fn publishing_on_the_tailnet_reports_the_url_the_daemon_gave() {
-        let fake = Fake::new(true);
-        let p = Publisher::new(fake.cfg(), "127.0.0.1:8790");
-        assert_eq!(p.state(), PublishState::NotPublished);
+            let calls = fake.calls();
+            assert!(
+                calls.contains("serve --https=443 localhost:8790"),
+                "{calls}"
+            );
+            assert!(
+                calls.contains("status --json"),
+                "the URL must be asked for, not guessed: {calls}"
+            );
+        }
 
-        let state = p.start().await;
-        assert_eq!(
-            state,
-            PublishState::Published(Published {
-                via: "tailscale",
-                reach: Reach::Tailnet,
-                url: Some("https://test-node.tail0000.ts.net/mcp".into()),
-                // `tailscale serve` exiting zero is the confirmation.
-                confirmed: true,
-            })
-        );
-        assert_eq!(p.state(), state);
+        #[tokio::test]
+        async fn stopping_a_configured_backend_actually_unpublishes_it() {
+            // The failure this guards against is silent and lasting: `tailscale serve` config
+            // survives the process and a reboot, so a stop that only killed a child would leave
+            // the gateway published with nothing watching it.
+            let fake = Fake::new(true);
+            let p = Publisher::new(fake.cfg(), "127.0.0.1:8790");
+            p.start().await;
+            p.stop().await;
 
-        let calls = fake.calls();
-        assert!(
-            calls.contains("serve --https=443 localhost:8790"),
-            "{calls}"
-        );
-        assert!(
-            calls.contains("status --json"),
-            "the URL must be asked for, not guessed: {calls}"
-        );
-    }
+            let calls = fake.calls();
+            assert!(
+                calls.contains("serve --https=443 localhost:8790 off"),
+                "stopping must run the off command: {calls}"
+            );
+            assert_eq!(p.state(), PublishState::NotPublished);
+        }
 
-    #[tokio::test]
-    async fn stopping_a_configured_backend_actually_unpublishes_it() {
-        // The failure this guards against is silent and lasting: `tailscale serve` config
-        // survives the process and a reboot, so a stop that only killed a child would leave
-        // the gateway published with nothing watching it.
-        let fake = Fake::new(true);
-        let p = Publisher::new(fake.cfg(), "127.0.0.1:8790");
-        p.start().await;
-        p.stop().await;
-
-        let calls = fake.calls();
-        assert!(
-            calls.contains("serve --https=443 localhost:8790 off"),
-            "stopping must run the off command: {calls}"
-        );
-        assert_eq!(p.state(), PublishState::NotPublished);
-    }
-
-    #[tokio::test]
-    async fn a_backend_that_will_not_start_is_reported_and_does_not_stop_the_gateway() {
-        let fake = Fake::new(false);
-        match Publisher::new(fake.cfg(), "127.0.0.1:8790").start().await {
-            PublishState::Failed { via, error } => {
-                assert_eq!(via, "tailscale");
-                assert!(
-                    error.contains("not logged in"),
-                    "the backend's own explanation is the only useful one: {error}"
-                );
+        #[tokio::test]
+        async fn a_backend_that_will_not_start_is_reported_and_does_not_stop_the_gateway() {
+            let fake = Fake::new(false);
+            match Publisher::new(fake.cfg(), "127.0.0.1:8790").start().await {
+                PublishState::Failed { via, error } => {
+                    assert_eq!(via, "tailscale");
+                    assert!(
+                        error.contains("not logged in"),
+                        "the backend's own explanation is the only useful one: {error}"
+                    );
+                }
+                other => panic!("a failure must be recorded, not swallowed: {other:?}"),
             }
-            other => panic!("a failure must be recorded, not swallowed: {other:?}"),
         }
     }
 
