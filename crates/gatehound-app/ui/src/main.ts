@@ -673,33 +673,89 @@ function scrollBehaviour(): ScrollBehavior {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
 }
 
-/// The head of a row that was just opened, as a selector, for the next paint to bring into view.
+/// What the next paint should bring into view, as a selector.
 ///
-/// Held rather than acted on because opening repaints: the row you clicked is thrown away and
-/// rebuilt, so scrolling to it here would scroll to an element already detached from the page.
+/// Held rather than acted on because revealing something repaints: the row or button you
+/// clicked is thrown away and rebuilt, so scrolling to it here would scroll to an element
+/// already detached from the page. A selector that matches nothing after the paint costs
+/// nothing — it clears itself and the screen does not move, which is what makes it safe to set
+/// from a button whose click might not reveal anything after all.
 let pendingReveal: string | null = null;
 
-/// Bring a just-opened row into view and leave the keyboard on it.
+/// Fields worth landing on. Deliberately not buttons: the first focusable thing in a card is
+/// sometimes "Delete", and arriving on it with the keyboard makes Enter dangerous.
+const FIELDS =
+  'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled])';
+
+/// Bring what was just revealed into view and leave the keyboard on it.
 ///
-/// `block: "nearest"` and not "center": a row already fully on screen must not move at all, and
-/// one hanging half off the bottom should rise by exactly the half that was missing. Centring
-/// every row you open turns a list you are reading into one that jumps whenever you touch it.
-/// The card is what gets scrolled to, not the head — what you opened it for is underneath.
+/// `block: "nearest"` and not "center": something already fully on screen must not move at
+/// all, and something hanging half off the bottom should rise by exactly the half that was
+/// missing. Centring everything you touch turns a page you are reading into one that jumps.
+/// The card is what gets scrolled to, because what you opened it for is inside it.
 function applyPendingReveal(): void {
   const sel = pendingReveal;
   if (!sel) return;
   pendingReveal = null;
-  const head = document.querySelector<HTMLElement>(sel);
-  if (!head) return;
+  const el = document.querySelector<HTMLElement>(sel);
+  if (!el) return;
+  const card = el.closest<HTMLElement>(".card") ?? el;
+
+  // What to bring into view. A row head is only half of what was revealed — the body it just
+  // opened is underneath — so for those the unit is the whole card. Everything else is asked
+  // for by name and is the unit itself: scrolling its card instead lands you at the top of a
+  // long form when what appeared was three-quarters of the way down it.
+  const isHead = el.matches('[role="button"][tabindex]');
+  const unit = isHead ? card : el;
+
+  // Where to put the keyboard. A field if there is one — inside what was revealed first, then
+  // anywhere in its card — and otherwise the region itself, made reachable programmatically
+  // without joining the tab order. Deliberately never a button: the first focusable thing in a
+  // card is sometimes "Delete", and arriving on it makes Enter dangerous.
+  let target = el.matches(`${FIELDS}, [tabindex]`)
+    ? el
+    : (el.querySelector<HTMLElement>(FIELDS) ?? card.querySelector<HTMLElement>(FIELDS) ?? card);
+
+  // `nearest` is right for anything that fits: already on screen means do not move, half off
+  // means rise by exactly the half that was missing. For something taller than the window
+  // `nearest` settles on whichever edge is closer, which put the top of a long form above the
+  // fold — so those start at the top instead, where you would begin reading them.
+  const room = document.querySelector("main")?.clientHeight ?? window.innerHeight;
+  const box = unit.getBoundingClientRect();
+  const fits = box.height <= room;
+
+  // Starting at the top puts everything below one screenful out of sight, and the keyboard
+  // must not be one of those things: the pack panel's first field is its consent checkbox,
+  // most of a page down, and focusing it unseen makes Space agree to something you cannot
+  // read. Where the field will not make the cut, the region takes focus instead — reachable
+  // programmatically without joining the tab order, and announced on arrival.
+  if (!fits && target !== unit && target.getBoundingClientRect().top - box.top > room - 48) {
+    target = unit;
+  }
+  if (!target.matches(`${FIELDS}, [tabindex]`)) target.tabIndex = -1;
+
   // Focus first and without its own scroll: focusing scrolls the element into view by itself,
   // to wherever the browser likes, and the deliberate scroll below would then be a second
   // competing move rather than the only one.
-  head.focus({ preventScroll: true });
-  (head.closest<HTMLElement>(".card") ?? head).scrollIntoView({
-    block: "nearest",
-    behavior: scrollBehaviour(),
-  });
+  target.focus({ preventScroll: true });
+  unit.scrollIntoView({ block: fits ? "nearest" : "start", behavior: scrollBehaviour() });
 }
+
+/// Let any button say what it puts on screen.
+///
+/// Clicking something that reveals a component and then leaving the reader to find it is the
+/// same failure whether the component is a folded row, a form, or a panel further down the
+/// page — so this is one rule rather than a line in every handler. Capture phase, because the
+/// button's own handler repaints the screen synchronously: a listener that ran after it would
+/// set the request for a paint that had already happened.
+document.addEventListener(
+  "click",
+  (e) => {
+    const b = (e.target as HTMLElement | null)?.closest<HTMLElement>("[data-reveals]");
+    if (b) pendingReveal = b.dataset.reveals!;
+  },
+  true,
+);
 
 /// Wire a row that opens and closes.
 ///
@@ -1308,24 +1364,24 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
         : `<div class="card">
            <h3>Add a downstream</h3>
            <div class="meta">
-             One service and the tools bound to it. Build it here, write a script of your own,
-             or import a pack someone else wrote — all three end up as the same thing.
+             Another MCP server, a REST API, a script you write, or a local command. It asks
+             which, then only for what that one needs — all four end up as the same thing:
+             tools a client can call.
            </div>
            <div class="row">
              <button id="c-open" class="primary">Add a downstream…</button>
-             <button id="pack-pick" class="ghost">Import a pack…</button>
+             <button id="pack-pick" class="ghost" data-reveals="#pack-panel">Import a pack…</button>
            </div>
          </div>`) +
     (draft || scriptDraft ? "" : renderPackPlanIfAny()) +
-    (draft || scriptDraft ? "" : scriptsHtml(scriptList)) +
-    servicesHtml(snap, configFile);
+    servicesHtml(snap, configFile) +
+    // Last, and deliberately: this is the library of files, not a second way to add a
+    // downstream. Sitting directly under "Add a downstream" it read as a competing entry
+    // point — two buttons, side by side, for what is one decision made in the chooser.
+    (draft || scriptDraft ? "" : scriptsHtml(scriptList));
   if (!paint($("#actions"), html)) return;
 
-  $("#c-open")?.addEventListener("click", () => {
-    draft = newDraft("mcp");
-    connDirty = false;
-    redrawActions();
-  });
+  $("#c-open")?.addEventListener("click", () => void chooseKind());
   for (const h of Array.from(document.querySelectorAll<HTMLElement>(".svc-head[data-key]"))) {
     onToggle(h, () => {
       const key = h.dataset.key!;
@@ -1367,6 +1423,13 @@ interface Field {
   required?: boolean;
 }
 
+/// One option in a modal that asks which of several things you meant.
+interface Choice {
+  value: string;
+  label: string;
+  hint?: string;
+}
+
 let openModal: (() => void) | null = null;
 
 /// Split a message written for a one-line dialog into a lead and the rest.
@@ -1397,6 +1460,8 @@ function showModal<T>(o: {
   title: string;
   body?: string[];
   fields?: Field[];
+  choices?: Choice[];
+  chosen?: string;
   confirm: string;
   cancel: string | null;
   danger?: boolean;
@@ -1411,7 +1476,9 @@ function showModal<T>(o: {
   const previous = openModal;
   return new Promise<T | null>((resolve) => {
     const start = (): void => {
-      const size = o.size ?? (o.fields ? "lg" : (o.body?.join("").length ?? 0) > 260 ? "md" : "sm");
+      const size =
+        o.size ??
+        (o.fields ? "lg" : o.choices ? "md" : (o.body?.join("").length ?? 0) > 260 ? "md" : "sm");
       const returnFocus = document.activeElement as HTMLElement | null;
       const wrap = document.createElement("div");
       // Appended in its from-state, released on the next frame: that is what gives the
@@ -1424,6 +1491,14 @@ function showModal<T>(o: {
           <h3 id="modal-title">${esc(o.title)}</h3>
           ${(o.body ?? []).map((p) => `<p class="modal-p">${esc(p)}</p>`).join("")}
           ${o.fields ? `<div class="modal-form">${o.fields.map(fieldHtml).join("")}</div>` : ""}
+          ${
+            o.choices
+              ? `<div class="modal-form modal-choices" role="radiogroup"
+                      aria-labelledby="modal-title">${o.choices
+                        .map((c, i) => choiceHtml(c, o.chosen ? c.value === o.chosen : i === 0))
+                        .join("")}</div>`
+              : ""
+          }
           <div class="modal-foot">
             ${o.cancel ? `<button class="ghost" data-act="cancel">${esc(o.cancel)}</button>` : ""}
             <button class="${o.danger ? "danger" : "primary"}" data-act="ok">${esc(o.confirm)}</button>
@@ -1497,6 +1572,7 @@ function showModal<T>(o: {
 
       // A form wants the first field; a question wants its answer button.
       const focusFirst =
+        panel.querySelector<HTMLElement>(".modal-choices input:checked") ??
         panel.querySelector<HTMLElement>(".modal-form input, .modal-form textarea") ??
         panel.querySelector<HTMLElement>('[data-act="ok"]');
       requestAnimationFrame(() => focusFirst?.focus());
@@ -1511,6 +1587,38 @@ function showModal<T>(o: {
     } else {
       start();
     }
+  });
+}
+
+function choiceHtml(c: Choice, checked: boolean): string {
+  return `<label class="modal-choice">
+    <input type="radio" name="modal-choice" value="${esc(c.value)}"${checked ? " checked" : ""} />
+    <span class="modal-choice-text">
+      <span class="modal-choice-label">${esc(c.label)}</span>
+      ${c.hint ? `<span class="modal-hint">${esc(c.hint)}</span>` : ""}
+    </span>
+  </label>`;
+}
+
+/// Ask which of several things the operator meant.
+///
+/// A dropdown inside a form is the wrong control for a choice that changes which form you are
+/// filling in — picking an option should not navigate. Asking first, and separately, is what
+/// keeps the form a form.
+async function choose(
+  title: string,
+  choices: Choice[],
+  o?: { body?: string[]; confirm?: string; chosen?: string },
+): Promise<string | null> {
+  return showModal<string>({
+    title,
+    body: o?.body,
+    choices,
+    chosen: o?.chosen,
+    confirm: o?.confirm ?? "Continue",
+    cancel: "Cancel",
+    read: (panel) =>
+      panel.querySelector<HTMLInputElement>('.modal-choices input:checked')?.value ?? "",
   });
 }
 
@@ -1706,6 +1814,37 @@ const KINDS: { value: KindChoice; label: string; hint: string }[] = [
   },
 ];
 
+/// Ask what is being added, then open the right thing for it.
+///
+/// This used to be a `<select>` inside the form, which made a dropdown navigate: choosing "a
+/// script you write" replaced the form you were filling in with a different screen entirely,
+/// and there was no way back to it except Cancel. A choice that decides which form you fill in
+/// is a step before the form, not a control inside it.
+async function chooseKind(current?: KindChoice): Promise<void> {
+  const picked = await choose(
+    "What are you adding?",
+    KINDS.map((k) => ({ value: k.value, label: k.label, hint: k.hint })),
+    {
+      body: ["All four end up as the same thing: tools a client can call, through this gateway."],
+      chosen: current,
+    },
+  );
+  if (!picked) return;
+
+  if (picked === "script") {
+    draft = null;
+    connDirty = false;
+    // Writing the file is half the job. The other half — naming the tool that runs it — used
+    // to be a separate errand you had to know to go on, from a different card.
+    await openScriptEditor({ thenExpose: true });
+    return;
+  }
+  draft = newDraft(picked as ConnKind);
+  connDirty = false;
+  pendingReveal = "#connect-form";
+  redrawActions();
+}
+
 /// The token row, shared by the two kinds that have one.
 /// Just the token. No variable name, because an app opened from Finder inherits no shell
 /// environment — the same reason the app writes its own bearer token into the config rather
@@ -1759,7 +1898,7 @@ function discoveredList(d: Draft): string {
       ${d.discovered.length} tool${d.discovered.length === 1 ? "" : "s"} offered. Tick what this
       gateway may expose — the rest stay unreachable through it, whatever the server advertises.
     </div>
-    <div class="checks">
+    <div class="checks" id="c-picked">
       ${d.discovered
         .map(
           (t, i) => `<label class="check">
@@ -1860,15 +1999,12 @@ function connectForm(d: Draft): string {
            </div>
            ${manualTools(d)}`;
 
-  return `<div class="card">
-    <h3>Add a downstream</h3>
+  return `<div class="card" id="connect-form">
+    <h3>Add a downstream · ${esc(kind.label)}</h3>
     <div class="meta">${esc(kind.hint)}</div>
 
     <div class="row">
-      <label class="meta" style="min-width:130px">Kind</label>
-      <select id="c-kind">
-        ${KINDS.map((k) => `<option value="${k.value}"${k.value === d.kind ? " selected" : ""}>${esc(k.label)}</option>`).join("")}
-      </select>
+      <button id="c-kind-change" class="ghost">Add something else instead…</button>
     </div>
 
     ${body}
@@ -2013,20 +2149,7 @@ function wireConnectForm(): void {
     el.addEventListener("input", touch);
   }
 
-  $("#c-kind")?.addEventListener("change", (e) => {
-    // Changing kind changes which fields exist, so the draft restarts rather than carrying
-    // over half-filled values that no longer mean anything.
-    const kind = (e.currentTarget as HTMLSelectElement).value as KindChoice;
-    if (kind === "script") {
-      draft = null;
-      connDirty = false;
-      void openScriptEditor();
-      return;
-    }
-    draft = newDraft(kind);
-    connDirty = false;
-    redrawActions();
-  });
+  $("#c-kind-change")?.addEventListener("click", () => void chooseKind(draft?.kind));
 
   $("#c-cancel")?.addEventListener("click", () => {
     draft = null;
@@ -2075,6 +2198,9 @@ function wireConnectForm(): void {
     }
     d.busy = false;
     connDirty = false;
+    // The answer lands below the fold on a form this long, and it is the whole reason the
+    // button was pressed.
+    pendingReveal = "#c-picked";
     redrawActions();
   });
 
@@ -2171,6 +2297,9 @@ let scriptDraft: {
   interpreter: string;
   description: string;
   body: string;
+  /// Reached from "add a downstream", where a saved file on its own is not what was asked for:
+  /// saving continues straight into naming the tool that runs it.
+  thenExpose: boolean;
 } | null = null;
 let scriptReview: ScriptReview | null = null;
 let scriptDirty = false;
@@ -2317,8 +2446,20 @@ function scriptEditor(): string {
     )
     .join("");
 
-  return `<div class="card">
-    <h3>${d.original ? `Edit <code>${esc(d.original)}</code>` : "Write a script"}</h3>
+  return `<div class="card" id="script-editor">
+    <h3>${
+      d.original
+        ? `Edit <code>${esc(d.original)}</code>`
+        : d.thenExpose
+          ? "Add a downstream · a script you write"
+          : "Write a script"
+    }</h3>
+    ${
+      d.thenExpose
+        ? `<div class="meta"><strong>Step 1 of 2.</strong> Write it here; next you name the
+             tool that runs it, which is what a client calls.</div>`
+        : ""
+    }
     <div class="meta">
       Caller input reaches this script through its arguments and standard input, and nowhere
       else \u2014 nothing here templates the program text, so an f-string or a template literal
@@ -2358,7 +2499,7 @@ function scriptEditor(): string {
     </div>
 
     <div class="row">
-      <button id="sd-save" class="primary">Save</button>
+      <button id="sd-save" class="primary">${d.thenExpose ? "Save and name the tool…" : "Save"}</button>
       <button id="sd-cancel" class="ghost">Cancel</button>
     </div>
   </div>`;
@@ -2366,7 +2507,7 @@ function scriptEditor(): string {
 
 /// Start a new script. Reached from the Kind dropdown and from the list's own button, so it
 /// lives in one place rather than being written twice and drifting.
-async function openScriptEditor(): Promise<void> {
+async function openScriptEditor(o?: { thenExpose?: boolean }): Promise<void> {
   if (interpreterList.length === 0) {
     interpreterList = await invoke<InterpreterView[]>("interpreters");
   }
@@ -2377,9 +2518,11 @@ async function openScriptEditor(): Promise<void> {
     interpreter: interp,
     description: "",
     body: SCRIPT_STARTER[interp] ?? "",
+    thenExpose: o?.thenExpose ?? false,
   };
   scriptReview = null;
   scriptDirty = false;
+  pendingReveal = "#sd-name";
   redrawActions();
 }
 
@@ -2410,9 +2553,13 @@ function wireScripts(list: ScriptView[]): void {
         interpreter: sc.interpreter,
         description: sc.description,
         body: sc.body,
+        // Editing an existing script is not the add-a-downstream flow: it may already back
+        // several tools, and forcing another one on every save would be wrong.
+        thenExpose: false,
       };
       scriptReview = null;
       scriptDirty = false;
+      pendingReveal = "#sd-name";
       redrawActions();
     });
   }
@@ -2433,17 +2580,20 @@ function wireScripts(list: ScriptView[]): void {
   }
 
   for (const b of Array.from(document.querySelectorAll<HTMLElement>(".script-expose"))) {
-    b.addEventListener("click", () => exposeScript(b.dataset.name!));
+    b.addEventListener("click", () => void exposeScript(b.dataset.name!));
   }
 }
 
 /// Turn a script into a tool an upstream client can call.
 ///
-/// Deliberately separate from writing the script: one script can back several tools with
-/// different arguments, and policy attaches to the tool a caller names, not to the file.
-async function exposeScript(script: string): Promise<void> {
+/// Still its own step, because one script can back several tools with different arguments and
+/// policy attaches to the tool a caller names rather than to the file. It is reached from the
+/// script list, and reached automatically as step two of adding a script as a downstream.
+///
+/// Returns whether a tool was actually added, so the caller can say what happened if it was not.
+async function exposeScript(script: string, description?: string): Promise<boolean> {
   const answers = await form(
-    `Expose ${script} as a tool`,
+    `Name the tool that runs ${script}`,
     [
       {
         name: "tool",
@@ -2455,6 +2605,7 @@ async function exposeScript(script: string): Promise<void> {
       {
         name: "description",
         label: "Description",
+        value: description ?? "",
         placeholder: "what a caller should understand this does",
         hint: "One line, shown in the client's tool list.",
       },
@@ -2471,14 +2622,19 @@ async function exposeScript(script: string): Promise<void> {
         hint: "Long content belongs here rather than in an argument. Leave blank for nothing.",
       },
     ],
-    { confirm: "Expose it" },
+    {
+      body: [
+        `The script is saved. This is what a client sees and asks for; the script is what runs.`,
+      ],
+      confirm: "Add the tool",
+    },
   );
-  if (!answers) return;
+  if (!answers) return false;
 
   const tool = answers.tool.trim();
   if (!tool) {
     await say("A tool needs a name — that is what a client calls and what policy attaches to.");
-    return;
+    return false;
   }
 
   try {
@@ -2504,9 +2660,10 @@ async function exposeScript(script: string): Promise<void> {
     }
   } catch (e) {
     await say(String(e));
-    return;
+    return false;
   }
   void refresh();
+  return true;
 }
 
 let reviewTimer: number | undefined;
@@ -2582,16 +2739,34 @@ function wireScriptEditor(): void {
     }
     const wasNew = d.original === null;
     const saved = d.name.trim();
+    const describedAs = d.description;
+    const thenExpose = d.thenExpose;
     scriptDraft = null;
     scriptReview = null;
     scriptDirty = false;
     expandedScripts.add(saved);
     void refresh();
+
+    // Step two, for the path that came in through "add a downstream". A file on disk that
+    // nothing calls is not what was asked for, and leaving the operator to discover the
+    // "Expose as a tool" button in a different card is how that used to end.
+    if (thenExpose) {
+      if (!(await exposeScript(saved, describedAs))) {
+        await say(
+          `${saved} is saved but nothing calls it yet.\n\n` +
+            `Expose it as a tool whenever you like — it is in the Scripts list at the bottom ` +
+            `of this screen.`,
+          "Saved, not yet callable",
+        );
+      }
+      return;
+    }
+
     if (
       await ask(
         `Saved ${saved}.\n\n` +
           (wasNew
-            ? `Nothing calls it yet — expose it as a tool from the list.\n\n`
+            ? `Nothing calls it yet — expose it as a tool from the Scripts list.\n\n`
             : ``) +
           `The gateway is still serving the configuration it started with. Restart now to apply?\n\n${RESTART_WARNS}`,
       )
@@ -2622,7 +2797,7 @@ function renderPackPanel(): string {
   const blocked = p.adds === null && p.replaces === null;
 
   return `
-    <div class="card">
+    <div class="card" id="pack-panel">
       <h3>Import a pack</h3>
       <div class="meta">Nothing is written until you press Import.</div>
 
@@ -3146,7 +3321,8 @@ function clientsHtml(snap: Snapshot, rules: IdentityRule[], access: Access): str
         Who calls this gateway: what each may do, and what it presents to prove it is itself.
       </div>
       <div class="row">
-        <button id="issue-open" class="primary" ${issuingToken ? "disabled" : ""}>Issue a token…</button>
+        <button id="issue-open" class="primary" data-reveals="#token-name"
+                ${issuingToken ? "disabled" : ""}>Issue a token…</button>
       </div>
     </div>${issueForm}${
       clients.length
@@ -3288,6 +3464,7 @@ function wireToolFace(): void {
       // The editor renders inside the service's own list, so that list has to stay open —
       // otherwise clicking Edit collapses the very row you are editing.
       expanded.add(t.upstream ?? LOCAL_KEY);
+      pendingReveal = "#tf-name";
       redrawActions();
     });
   }

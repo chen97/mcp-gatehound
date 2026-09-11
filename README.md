@@ -362,8 +362,15 @@ second, independent brake on a runaway agent.
 
 ### Adding a downstream from the window
 
-**Downstream** adds a service without a text editor. Three kinds, matching the actions
-above: another MCP server, a REST API, or local commands.
+**Downstream** adds a service without a text editor. It asks first what you are adding — another
+MCP server, a REST API, a script you write, or local commands — and then only for what that one
+needs. Deliberately a step rather than a dropdown inside the form: which kind you are adding
+decides which form you are filling in, and a control that replaces the page under you is not a
+control, it is navigation wearing a select's clothes.
+
+A script takes two steps, and the window walks you through both: write the file, then name the
+tool that runs it. The second is what a client actually calls, and leaving it to be discovered
+later meant the flow ended with a file on disk that nothing could reach.
 
 You give it the address — `http://127.0.0.1:23373/v0/mcp`, an API's base URL, or a command —
 and nothing else. The config file needs a name because tools refer to their target by one, but

@@ -145,11 +145,12 @@ pre { --scroll-face: var(--bg); }
 .card {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
   padding: var(--s4); margin-bottom: var(--s3); box-shadow: var(--shadow);
-  /* A card scrolled into view by opening it stops short of the window edge rather than flush
-     against it. `scroll-margin` is the declarative half of that; `block: "nearest"` is the
-     other half, and neither works without the other. */
-  scroll-margin-block: var(--s4);
 }
+
+/* Anything a click can scroll to stops short of the window edge rather than flush against it.
+   `scroll-margin` is the declarative half of that; `block: "nearest"` is the other half, and
+   neither works without the other. Zero specificity, so it never competes with a real rule. */
+:where(.card, .checks, .row, table, input, select, textarea) { scroll-margin-block: var(--s4); }
 .card h3 {
   margin: 0 0 var(--s1); font-size: 13px; font-weight: 650; letter-spacing: -0.006em;
 }
@@ -828,6 +829,28 @@ pre {
   padding-right: var(--s2);
 }
 .modal-field { display: flex; flex-direction: column; gap: var(--s2); }
+
+/* A list of options, one of which you are picking. Each is a whole target rather than a small
+   circle beside some words: a choice that decides which form you fill in next deserves more
+   than a 13px hit area, and the hint is part of the choice, not decoration beside it. */
+.modal-choices { gap: var(--s2); }
+.modal-choice {
+  display: flex; align-items: flex-start; gap: var(--s3); cursor: pointer;
+  padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--panel-2);
+  transition: border-color 160ms var(--ease-out), background 160ms var(--ease-out);
+}
+.modal-choice:hover { border-color: var(--line-strong); background: var(--in); }
+.modal-choice input { margin: 2px 0 0; flex: none; accent-color: var(--am); }
+.modal-choice:has(input:checked) {
+  border-color: var(--am);
+  background: color-mix(in srgb, var(--am) 8%, var(--panel-2));
+}
+.modal-choice:has(input:focus-visible) {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--am) 25%, transparent);
+}
+.modal-choice-text { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
+.modal-choice-label { font-weight: 600; }
 .modal-label { font-weight: 600; font-size: 12.5px; }
 .modal-label .req {
   color: var(--mut); font-weight: 500; font-size: 10px; text-transform: uppercase;
