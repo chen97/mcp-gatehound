@@ -1369,12 +1369,10 @@ function redrawActions(): void {
 }
 
 function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView[]): void {
+  // The add-a-downstream flow lives in the modal now, start to finish, so this screen is only
+  // ever what you already have.
   const html =
-    (draft
-      ? connectForm(draft)
-      : scriptDraft
-        ? scriptEditor()
-        : `<div class="card">
+    `<div class="card">
            <h3>Add a downstream</h3>
            <div class="meta">
              Another MCP server, a REST API, a script you write, or a local command. It asks
@@ -1385,13 +1383,13 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
              <button id="c-open" class="primary">Add a downstream…</button>
              <button id="pack-pick" class="ghost" data-reveals="#pack-panel">Import a pack…</button>
            </div>
-         </div>`) +
-    (draft || scriptDraft ? "" : renderPackPlanIfAny()) +
+         </div>` +
+    renderPackPlanIfAny() +
     servicesHtml(snap, configFile) +
     // Last, and deliberately: this is the library of files, not a second way to add a
     // downstream. Sitting directly under "Add a downstream" it read as a competing entry
     // point — two buttons, side by side, for what is one decision made in the chooser.
-    (draft || scriptDraft ? "" : scriptsHtml(scriptList));
+    scriptsHtml(scriptList);
   if (!paint($("#actions"), html)) return;
 
   $("#c-open")?.addEventListener("click", () => void chooseKind());
@@ -1424,7 +1422,7 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
 //
 // One dialog at a time, by construction: a second call while one is open waits for it.
 
-type ModalSize = "sm" | "md" | "lg";
+type ModalSize = "sm" | "md" | "lg" | "xl";
 
 interface Field {
   name: string;
@@ -1475,6 +1473,13 @@ function showModal<T>(o: {
   fields?: Field[];
   choices?: Choice[];
   chosen?: string;
+  /// A step that owns its own body and its own buttons. `render` returns the body; `wire` is
+  /// run after every render and is handed a `redraw` for controls that change the form's shape,
+  /// and a `done` to finish. Given this, `confirm`/`cancel`/`read` are not used: the body has
+  /// its own footer, because a form with a "list its tools" button in the middle of it does not
+  /// want a second, generic one underneath.
+  render?: () => string;
+  wire?: (redraw: () => void, done: (value: T | null) => void) => void;
   confirm: string;
   cancel: string | null;
   danger?: boolean;
@@ -1512,10 +1517,15 @@ function showModal<T>(o: {
                         .join("")}</div>`
               : ""
           }
-          <div class="modal-foot">
+          ${o.render ? `<div class="modal-step"></div>` : ""}
+          ${
+            o.render
+              ? ""
+              : `<div class="modal-foot">
             ${o.cancel ? `<button class="ghost" data-act="cancel">${esc(o.cancel)}</button>` : ""}
             <button class="${o.danger ? "danger" : "primary"}" data-act="ok">${esc(o.confirm)}</button>
-          </div>
+          </div>`
+          }
         </div>`;
       root.appendChild(wrap);
       requestAnimationFrame(() => wrap.classList.remove("pre"));
@@ -1542,8 +1552,15 @@ function showModal<T>(o: {
           close(null);
           return;
         }
-        // Enter submits, except inside a textarea where it is a newline somebody meant.
-        if (e.key === "Enter" && !(e.target instanceof HTMLTextAreaElement) && !e.shiftKey) {
+        // Enter submits, except inside a textarea where it is a newline somebody meant — and
+        // except in a step, which has several fields and a primary button of its own, so a
+        // global Enter would answer a question the reader has not finished reading.
+        if (
+          !o.render &&
+          e.key === "Enter" &&
+          !(e.target instanceof HTMLTextAreaElement) &&
+          !e.shiftKey
+        ) {
           e.preventDefault();
           close(o.read(panel));
           return;
@@ -1583,10 +1600,25 @@ function showModal<T>(o: {
         delete wrap.dataset.fromBackdrop;
       });
 
+      // A step draws itself, and draws itself again whenever a control changes the shape of
+      // the form — listing an upstream's tools, adding a row. Through `paint`, so an unchanged
+      // body is left alone and handlers are re-attached only when the elements are new.
+      if (o.render && o.wire) {
+        const host = panel.querySelector<HTMLElement>(".modal-step")!;
+        const redraw = (): void => {
+          if (paint(host, o.render!())) {
+            o.wire!(redraw, close);
+            applyPendingReveal();
+          }
+        };
+        redraw();
+      }
+
       // A form wants the first field; a question wants its answer button.
       const focusFirst =
         panel.querySelector<HTMLElement>(".modal-choices input:checked") ??
         panel.querySelector<HTMLElement>(".modal-form input, .modal-form textarea") ??
+        panel.querySelector<HTMLElement>(FIELDS) ??
         panel.querySelector<HTMLElement>('[data-act="ok"]');
       requestAnimationFrame(() => focusFirst?.focus());
       openModal = () => close(null);
@@ -1827,6 +1859,33 @@ const KINDS: { value: KindChoice; label: string; hint: string }[] = [
   },
 ];
 
+/// The modal step currently showing, if the flow is in one.
+///
+/// A step redraws itself and finishes itself; the handlers below do not need to know which of
+/// the two they are running in, only how to say "the form changed shape" and "I am done".
+let stepRedraw: (() => void) | null = null;
+let stepDone: ((value: null) => void) | null = null;
+
+/// Redraw whatever is showing the draft: the step if the flow is in one, the screen otherwise.
+function redrawStep(): void {
+  if (stepRedraw) {
+    stepRedraw();
+    return;
+  }
+  redrawActions();
+}
+
+/// Finish the step, or clear the screen's copy of the draft if there is no step.
+function endStep(): void {
+  if (stepDone) {
+    stepDone(null);
+    return;
+  }
+  draft = null;
+  scriptDraft = null;
+  redrawActions();
+}
+
 /// Ask what is being added, then open the right thing for it.
 ///
 /// This used to be a `<select>` inside the form, which made a dropdown navigate: choosing "a
@@ -1854,8 +1913,51 @@ async function chooseKind(current?: KindChoice): Promise<void> {
   }
   draft = newDraft(picked as ConnKind);
   connDirty = false;
-  pendingReveal = "#connect-form";
+  await connectStep();
+}
+
+/// The form for the chosen kind, on the surface that asked which kind.
+///
+/// It used to close and hand you back to the screen, which is where a flow visibly breaks: you
+/// answer a question and the thing that asked it disappears, leaving you to find what it did.
+/// One surface, changing what is on it.
+async function connectStep(): Promise<void> {
+  const kind = KINDS.find((k) => k.value === draft?.kind);
+  if (!kind) return;
+  await stepModal(`Add a downstream · ${kind.label}`, "xl", () => connectBody(draft!), () =>
+    wireConnectForm(),
+  );
+  draft = null;
+  connDirty = false;
   redrawActions();
+}
+
+/// Run one step of a flow in the modal, with the handlers it needs.
+///
+/// `render` is re-run whenever a control changes the shape of the form, and `wire` re-attached
+/// to what came back — the same contract the screens have, on the surface the flow is already
+/// using.
+async function stepModal(
+  title: string,
+  size: ModalSize,
+  render: () => string,
+  wire: () => void,
+): Promise<void> {
+  await showModal<null>({
+    title,
+    size,
+    render,
+    wire: (redraw, done) => {
+      stepRedraw = redraw;
+      stepDone = done;
+      wire();
+    },
+    confirm: "",
+    cancel: null,
+    read: () => null,
+  });
+  stepRedraw = null;
+  stepDone = null;
 }
 
 /// The token row, shared by the two kinds that have one.
@@ -1973,7 +2075,7 @@ function slug(s: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-function connectForm(d: Draft): string {
+function connectBody(d: Draft): string {
   const kind = KINDS.find((k) => k.value === d.kind)!;
   const body =
     d.kind === "mcp"
@@ -2012,8 +2114,8 @@ function connectForm(d: Draft): string {
            </div>
            ${manualTools(d)}`;
 
-  return `<div class="card" id="connect-form">
-    <h3>Add a downstream · ${esc(kind.label)}</h3>
+  // No heading: the modal hosting this step has one, and two would be one too many.
+  return `<div id="connect-form">
     <div class="meta">${esc(kind.hint)}</div>
 
     <div class="row">
@@ -2054,13 +2156,13 @@ function connectForm(d: Draft): string {
         : ""
     }
 
-    <div class="row">
-      <button id="c-save" class="primary">Add downstream</button>
-      <button id="c-cancel" class="ghost">Cancel</button>
-      <label class="check" style="margin-left:8px">
+    <div class="modal-foot">
+      <label class="check" style="margin-right:auto">
         <input id="c-replace" type="checkbox" ${d.replace ? "checked" : ""} />
         <span class="meta">Replace anything already using these names</span>
       </label>
+      <button id="c-cancel" class="ghost">Cancel</button>
+      <button id="c-save" class="primary">Add downstream</button>
     </div>
   </div>`;
 }
@@ -2157,24 +2259,30 @@ function wireConnectForm(): void {
     connDirty = true;
   };
   for (const el of Array.from(
-    document.querySelectorAll<HTMLElement>("#actions input, #actions select"),
+    document.querySelectorAll<HTMLElement>("#connect-form input, #connect-form select"),
   )) {
     el.addEventListener("input", touch);
   }
 
-  $("#c-kind-change")?.addEventListener("click", () => void chooseKind(draft?.kind));
+  $("#c-kind-change")?.addEventListener("click", () => {
+    // Back to the question that opened this, rather than back to the screen: ending the step
+    // first is what lets the chooser take the surface, and the queue hands it over.
+    const was = draft?.kind;
+    connDirty = false;
+    endStep();
+    void chooseKind(was);
+  });
 
   $("#c-cancel")?.addEventListener("click", () => {
-    draft = null;
     connDirty = false;
-    redrawActions();
+    endStep();
   });
 
   $("#c-add-tool")?.addEventListener("click", () => {
     readDraft(d);
     d.tools.push(blankTool());
     connDirty = false;
-    redrawActions();
+    redrawStep();
   });
 
   for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>(".c-drop"))) {
@@ -2183,7 +2291,7 @@ function wireConnectForm(): void {
       d.tools.splice(Number(b.dataset.i), 1);
       if (d.tools.length === 0) d.tools.push(blankTool());
       connDirty = false;
-      redrawActions();
+      redrawStep();
     });
   }
 
@@ -2192,7 +2300,7 @@ function wireConnectForm(): void {
     d.busy = true;
     d.error = null;
     connDirty = false;
-    redrawActions();
+    redrawStep();
     try {
       const found = await invoke<{ tools: { name: string; description: string; input_schema: unknown }[] }>(
         "discover_tools",
@@ -2214,7 +2322,7 @@ function wireConnectForm(): void {
     // The answer lands below the fold on a form this long, and it is the whole reason the
     // button was pressed.
     pendingReveal = "#c-picked";
-    redrawActions();
+    redrawStep();
   });
 
   $("#c-save")?.addEventListener("click", async () => {
@@ -2235,12 +2343,12 @@ function wireConnectForm(): void {
     } catch (e) {
       d.error = String(e);
       connDirty = false;
-      redrawActions();
+      redrawStep();
       return;
     }
 
-    draft = null;
     connDirty = false;
+    endStep();
     const env = result.missing_env.length
       ? `\n\nStill to set in the environment: ${result.missing_env.join(", ")}`
       : "";
@@ -2448,7 +2556,7 @@ function scriptsHtml(list: ScriptView[]): string {
   </div>`;
 }
 
-function scriptEditor(): string {
+function scriptBody(): string {
   const d = scriptDraft!;
   const options = interpreterList
     .map(
@@ -2459,14 +2567,8 @@ function scriptEditor(): string {
     )
     .join("");
 
-  return `<div class="card" id="script-editor">
-    <h3>${
-      d.original
-        ? `Edit <code>${esc(d.original)}</code>`
-        : d.thenExpose
-          ? "Add a downstream · a script you write"
-          : "Write a script"
-    }</h3>
+  // No heading: the modal hosting this step has one.
+  return `<div id="script-editor">
     ${
       d.thenExpose
         ? `<div class="meta"><strong>Step 1 of 2.</strong> Write it here; next you name the
@@ -2511,9 +2613,9 @@ function scriptEditor(): string {
       somebody else's pack.
     </div>
 
-    <div class="row">
-      <button id="sd-save" class="primary">${d.thenExpose ? "Save and name the tool…" : "Save"}</button>
+    <div class="modal-foot">
       <button id="sd-cancel" class="ghost">Cancel</button>
+      <button id="sd-save" class="primary">${d.thenExpose ? "Save and name the tool…" : "Save"}</button>
     </div>
   </div>`;
 }
@@ -2535,7 +2637,25 @@ async function openScriptEditor(o?: { thenExpose?: boolean }): Promise<void> {
   };
   scriptReview = null;
   scriptDirty = false;
-  pendingReveal = "#sd-name";
+  await scriptStep();
+}
+
+/// The editor, on the surface the flow is already using.
+///
+/// A wide step rather than a wide dialog: this one holds a program, and a code box in a
+/// question-sized box is a code box nobody can read.
+async function scriptStep(): Promise<void> {
+  const d = scriptDraft;
+  if (!d) return;
+  const title = d.original
+    ? `Edit ${d.original}`
+    : d.thenExpose
+      ? "Add a downstream · a script you write"
+      : "Write a script";
+  await stepModal(title, "xl", scriptBody, () => wireScriptEditor());
+  scriptDraft = null;
+  scriptReview = null;
+  scriptDirty = false;
   redrawActions();
 }
 
@@ -2572,8 +2692,7 @@ function wireScripts(list: ScriptView[]): void {
       };
       scriptReview = null;
       scriptDirty = false;
-      pendingReveal = "#sd-name";
-      redrawActions();
+      await scriptStep();
     });
   }
 
@@ -2707,7 +2826,7 @@ function wireScriptEditor(): void {
       d.body = SCRIPT_STARTER[d.interpreter] ?? "";
       if (body) body.value = d.body;
     }
-    redrawActions();
+    redrawStep();
   });
 
   body?.addEventListener("input", () => {
@@ -2733,10 +2852,8 @@ function wireScriptEditor(): void {
   });
 
   $("#sd-cancel")?.addEventListener("click", () => {
-    scriptDraft = null;
-    scriptReview = null;
     scriptDirty = false;
-    redrawActions();
+    endStep();
   });
 
   $("#sd-save")?.addEventListener("click", async () => {
@@ -2755,9 +2872,8 @@ function wireScriptEditor(): void {
     const saved = d.name.trim();
     const describedAs = d.description;
     const thenExpose = d.thenExpose;
-    scriptDraft = null;
-    scriptReview = null;
     scriptDirty = false;
+    endStep();
     expandedScripts.add(saved);
     scriptsAreStale();
     void refresh();

@@ -824,6 +824,24 @@ body.unwatched .pill.hot { animation-play-state: paused; }
 .modal-sm { max-width: 420px; }
 .modal-md { max-width: 560px; }
 .modal-lg { max-width: 660px; }
+/* A step of a flow, not a question: room for a form with its own sections and a list of what an
+   upstream offered. */
+.modal-xl { max-width: 860px; }
+
+/* A step owns its own footer, so it needs the scroll and the gap the generic body would have
+   given it. The footer inside it is the real one, and it stays put while the body scrolls. */
+.modal-step {
+  display: flex; flex-direction: column; min-height: 0;
+  overflow-y: auto; margin: var(--s1) 0; padding-right: var(--s2);
+}
+.modal-step .modal-foot { position: sticky; bottom: 0; background: var(--panel); }
+/* A program needs room, but not the whole window: the rest of the step still has to be
+   reachable without scrolling past a wall of code. */
+.modal-step .script-edit-area { min-height: 200px; }
+/* The label column is sized for a screen that had more of it to spare; inside a step the
+   fields should use the width they are given rather than a width inherited from elsewhere. */
+.modal-step .kv td:first-child { width: 140px; }
+.modal-step .kv input, .modal-step .kv select { width: 100%; max-width: 460px; }
 
 .modal h3 { margin: 0; font-size: 15px; line-height: 1.4; }
 .modal-p { margin: 0; color: var(--mut); line-height: 1.55; white-space: pre-wrap; }

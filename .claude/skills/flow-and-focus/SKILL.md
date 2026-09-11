@@ -75,6 +75,22 @@ with no way back.
 inside it.** Ask first — a modal with the options and what each one means — then open the right
 form, and leave a way back to the question.
 
+**And keep the surface.** Answering the question and having the thing that asked it disappear is
+the same failure as rule 1, one level up: you acted, and now you have to go and find what your
+answer did. The panel that asked should become the form — and become the next form after that.
+Mechanically this means the dialog owns a body it can re-render, not a fixed one:
+
+```js
+// `render` returns the body for the current state; `wire` re-attaches after every render and is
+// handed a `redraw`, so a control that changes the form's shape — listing what a server offers,
+// adding a row — asks for a new body instead of closing anything.
+stepModal({ title, render: () => formFor(draft), wire: (redraw, done) => wireForm(redraw, done) })
+```
+
+Two things make this work rather than merely render: put the redraw through the same diffing
+write the screens use, so an unchanged body is left alone and half-typed input survives; and read
+the fields back into your draft *before* redrawing, or the redraw is what loses them.
+
 The same principle in its other common form: **a row that opens must be reachable by keyboard.**
 If it is a `div` because it carries pills and a status dot (legitimate — those do not belong
 inside a `button`), then it owes `role="button"`, `tabindex="0"`, `aria-expanded`, and an

@@ -394,6 +394,11 @@ needs. Deliberately a step rather than a dropdown inside the form: which kind yo
 decides which form you are filling in, and a control that replaces the page under you is not a
 control, it is navigation wearing a select's clothes.
 
+**The whole flow happens on one surface.** Answering the question does not close it and hand you
+back to the screen to find what it did — the same panel changes to the form for the kind you
+chose, and changes again when listing an upstream's tools adds a list to it. "Add something else
+instead" goes back to the question rather than out to the screen.
+
 A script takes two steps, and the window walks you through both: write the file, then name the
 tool that runs it. The second is what a client actually calls, and leaving it to be discovered
 later meant the flow ended with a file on disk that nothing could reach.
