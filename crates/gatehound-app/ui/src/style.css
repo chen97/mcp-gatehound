@@ -472,12 +472,19 @@ pre {
 
 /* A faint dash drifting outward while nothing is happening. Deliberately not a signal: no
    colour, a third of the trace's weight, and gone while a call is on the wire. */
+/* The dash rides the stroke, so it follows every bend the path takes — including after a
+   resize moves them, because the path is re-pointed rather than replaced.
+   
+   No animation until `ready`: the pattern is written in terms of the path's own length, which
+   only the browser can measure, and the frames before that is known have no valid pattern to
+   draw. Duration comes from the length too, set per path, so a long trace and a short one move
+   at the same speed rather than in the same time. */
 .trace-drift {
   fill: none; stroke: var(--am); stroke-width: 1.6; stroke-linecap: round;
   stroke-dasharray: 22 calc(var(--len) - 22);
   opacity: .5;
-  animation: drift 3.2s linear infinite;
 }
+.trace-drift.ready { animation: drift 3200ms linear infinite; }
 @keyframes drift { from { stroke-dashoffset: var(--len); } to { stroke-dashoffset: 0; } }
 
 /* A call. Brighter, faster, once — and it takes the colour of what happened. */
@@ -486,7 +493,7 @@ pre {
   stroke-dasharray: 34 calc(var(--len) - 34);
   stroke-dashoffset: var(--len);
 }
-.trace-spark.run { animation: drift 700ms linear; }
+.trace-spark.run { animation: drift 700ms linear; animation-timing-function: linear; }
 .trace-spark.run.ok { stroke: var(--ok); }
 .trace-spark.run.err { stroke: var(--bad); }
 .trace-spark.run.held { stroke: var(--am); }

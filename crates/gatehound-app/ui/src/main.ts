@@ -571,18 +571,23 @@ const ICONS: Record<string, string> = {
 ///
 /// A dash swept along the measured path rather than a dot positioned by hand: the traces bend,
 /// and anything travelling them has to bend with them.
-function pulse(sel: string, kind: string, delayMs: number): void {
+/// Send a spark along one trace. Returns how long it will take, so the next leg can start when
+/// this one actually arrives rather than after a guessed interval.
+function pulse(sel: string, kind: string, delayMs: number): number {
   const path = document.querySelector<SVGPathElement>(`.trace-spark${sel}`);
-  if (!path) return;
+  if (!path) return 0;
+  const ms = Number(path.dataset.ms) || 700;
   window.setTimeout(() => {
     path.classList.remove("run", "ok", "err", "held");
     // Reading a layout property between removing and adding restarts the animation; without it
     // a second call while the first is still running would be ignored.
     void path.getBoundingClientRect();
+    path.style.animationDuration = `${ms}ms`;
     path.classList.add("run", kind);
     const done = (): void => path.classList.remove("run", kind);
     path.addEventListener("animationend", done, { once: true });
   }, delayMs);
+  return delayMs + ms;
 }
 
 /// Briefly mark a node as part of the call in flight.
@@ -733,26 +738,63 @@ function drawBoard(): void {
     legs.push({ d: bus([pinX, chipBox.bo], busY, [t.cx, t.t], "v", false), attr: "", delay: i * STAGGER_MS });
   });
 
-  // Through `paint`, so a redraw with the same geometry changes nothing. Resizing fires this
-  // repeatedly, and rewriting identical paths would restart every trace's draw-in animation.
-  const drawn = paint(
-    svg,
-    legs
-      .map(
-        (l) =>
-          `<path class="trace" d="${l.d}" style="--d:${l.delay}ms"/>` +
-          `<path class="trace-drift" d="${l.d}" style="animation-delay:-${(l.delay * 7) % 3200}ms"/>` +
-          `<path class="trace-spark" ${l.attr} d="${l.d}"/>`,
-      )
-      .join(""),
-  );
-  if (!drawn) return;
+  // Rebuilt only when the *set* of traces changes. When it is the same traces at new
+  // coordinates — which is every resize — the existing paths are re-pointed in place, so a
+  // dash part-way along one keeps going and follows the new geometry instead of vanishing and
+  // starting again from the chip.
+  const signature = legs.map((l) => l.attr).join("|") + `#${legs.length}`;
+  const paths = svg.querySelectorAll<SVGPathElement>(".trace");
+  if (signature !== drawnSignature || paths.length !== legs.length) {
+    drawnSignature = signature;
+    paint(
+      svg,
+      legs
+        .map(
+          (l) =>
+            `<path class="trace" d="${l.d}" style="--d:${l.delay}ms"/>` +
+            `<path class="trace-drift" d="${l.d}" style="animation-delay:-${(l.delay * 7) % 3200}ms"/>` +
+            `<path class="trace-spark" ${l.attr} d="${l.d}"/>`,
+        )
+        .join(""),
+    );
+  } else {
+    const drifts = svg.querySelectorAll<SVGPathElement>(".trace-drift");
+    const sparks = svg.querySelectorAll<SVGPathElement>(".trace-spark");
+    legs.forEach((l, i) => {
+      paths[i].setAttribute("d", l.d);
+      drifts[i].setAttribute("d", l.d);
+      sparks[i].setAttribute("d", l.d);
+    });
+  }
 
-  // Dash animations need the length in user units, and only the browser knows it.
+  // Length in user units, which only the browser knows, and a duration derived from it.
+  //
+  // A fixed duration means a long trace's dash covers more ground in the same time than a short
+  // one's — the same "flow" moving at different speeds depending on where a tile happened to
+  // land. Pixels per millisecond instead, so everything on the board moves together and keeps
+  // doing so when a resize changes every length at once.
   for (const path of Array.from(svg.querySelectorAll<SVGPathElement>("path"))) {
-    path.style.setProperty("--len", String(Math.round(path.getTotalLength())));
+    const len = Math.max(1, Math.round(path.getTotalLength()));
+    path.style.setProperty("--len", String(len));
+    if (path.classList.contains("trace-drift")) {
+      path.style.animationDuration = `${Math.round(len / DRIFT_SPEED)}ms`;
+      // Enabled only once the length is known: the dash pattern is written in terms of it, and
+      // the frames before it is set have no valid pattern to draw.
+      path.classList.add("ready");
+    } else if (path.classList.contains("trace-spark")) {
+      path.dataset.ms = String(Math.round(len / SPARK_SPEED));
+    }
   }
 }
+
+/// Pixels per millisecond. The idle drift ambles; a real call moves about six times faster,
+/// which is what makes one read as "these paths are live" and the other as "something just
+/// went through".
+const DRIFT_SPEED = 0.075;
+const SPARK_SPEED = 0.45;
+
+/// Which traces are currently drawn, so a resize can re-point them rather than replace them.
+let drawnSignature = "";
 
 /// Where each trace meets the chip.
 ///
@@ -895,17 +937,21 @@ function traceRequest(row: RequestLog): void {
     row.status === "error" ? "err" : row.decision === "deny" || row.decision === "ask" ? "held" : "ok";
 
   const caller = row.identity ?? "";
+  // When the first leg actually arrives, rather than after a fixed interval. Trace lengths
+  // depend on where the tiles landed and change with the window, so a hardcoded hand-off made
+  // the second leg start before or after the first finished, depending on the window size.
+  let arrives = 0;
   if (caller && flowRows.callers.includes(caller)) {
-    pulse(`[data-caller="${CSS.escape(caller)}"]`, kind, 0);
+    arrives = pulse(`[data-caller="${CSS.escape(caller)}"]`, kind, 0);
     light(`.tile-slot[data-caller="${CSS.escape(caller)}"]`, 0);
   }
-  light("#flow-hub", 250);
+  light("#flow-hub", Math.max(0, arrives - 120));
 
   // Denied and held calls never reach a service, so nothing should suggest they did.
   const service = row.upstream ?? "";
   if (kind === "ok" && service && flowRows.services.includes(service)) {
-    pulse(`[data-service="${CSS.escape(service)}"]`, kind, 700);
-    light(`.tile-slot[data-service="${CSS.escape(service)}"]`, 1200);
+    const lands = pulse(`[data-service="${CSS.escape(service)}"]`, kind, arrives);
+    light(`.tile-slot[data-service="${CSS.escape(service)}"]`, Math.max(0, lands - 150));
   }
 }
 
