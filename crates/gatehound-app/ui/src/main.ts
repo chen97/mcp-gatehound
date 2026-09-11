@@ -375,12 +375,12 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
             short: c.identity,
             sub: c.identity === access.owner ? "super token" : what,
             goto: "upstream",
+            focus: `client:${c.identity}`,
             attr: `data-caller="${esc(c.identity)}"`,
             delay: i * STAGGER_MS,
           });
         })
-        .join("")
-    : emptyTile("No clients yet", "Issue a token", "upstream");
+    : [emptyTile("No clients yet", "Issue a token", "upstream")];
 
   const right = snap.upstreams.length
     ? snap.upstreams
@@ -392,12 +392,12 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
             short: shortLabel(u.target),
             sub: `${u.kind} · ${n} tool${n === 1 ? "" : "s"}`,
             goto: "actions",
+            focus: `service:${u.name}`,
             attr: `data-service="${esc(u.name)}"`,
             delay: i * STAGGER_MS,
           });
         })
-        .join("")
-    : emptyTile("No services yet", "Add a downstream", "actions");
+    : [emptyTile("No services yet", "Add a downstream", "actions")];
 
   const local = snap.tools.filter((t) => !t.upstream).length;
   const live = access.tokens.filter((t) => !t.revoked_at).length;
@@ -405,14 +405,15 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
   // Underneath: the parts of the gateway that are neither a caller nor a service. One tile per
   // remaining screen, so between the three rails every tab is one click from the picture that
   // explains what it is for.
-  const bottom = [
-    tile({ icon: "token", label: "Tokens", short: "Tokens", sub: `${live} live`, goto: "upstream", delay: 0 }),
+  const bottom: string = [
+    tile({ icon: "token", label: "Tokens", short: "Tokens", sub: `${live} live`, goto: "upstream", focus: "tokens", delay: 0 }),
     tile({
       icon: "script",
       label: "Scripts & tools",
       short: "Scripts",
       sub: `${snap.tools.length} exposed${local ? `, ${local} local` : ""}`,
       goto: "actions",
+      focus: "scripts",
       delay: STAGGER_MS,
     }),
     tile({ icon: "globe", label: "Reach", short: "Reach", sub: snap.auth, goto: "network", delay: STAGGER_MS * 2 }),
@@ -427,7 +428,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
       <svg class="board-wires" aria-hidden="true"></svg>
       <div class="rail left">
         <div class="rail-head">Upstream clients</div>
-        ${left}
+        ${columns(left)}
       </div>
       <div class="chip" id="flow-hub" style="--d:${gateAt}ms">
         <div class="chip-die">
@@ -440,11 +441,26 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
       </div>
       <div class="rail right">
         <div class="rail-head">Downstream tools</div>
-        ${right}
+        ${columns(right)}
       </div>
       <div class="rail bottom">${bottom}</div>
     </div>
   </div>`;
+}
+
+/// Split a rail into columns. Past seven a rail is taller than the chip beside it, and a
+/// twentieth client would run off the card; two short columns is the same information in a
+/// shape that fits.
+///
+/// Two, not three: three columns of 132px plus their gaps is wider than the track a rail gets
+/// at any window size this app is used at, and the third ran off the side of the card.
+function columns(tiles: string[]): string {
+  const per = Math.max(7, Math.ceil(tiles.length / 2));
+  const out: string[] = [];
+  for (let i = 0; i < tiles.length; i += per) {
+    out.push(`<div class="rail-col">${tiles.slice(i, i + per).join("")}</div>`);
+  }
+  return out.join("");
 }
 
 /// One tile on the board.
@@ -459,11 +475,14 @@ function tile(o: {
   short: string;
   sub: string;
   goto: string;
+  /// A key the destination screen knows how to find and open. Without it a click lands you on
+  /// the right screen and leaves you to hunt for the row you asked about.
+  focus?: string;
   attr?: string;
   delay: number;
 }): string {
   return `<div class="tile-slot" ${o.attr ?? ""} style="--d:${o.delay}ms">
-    <button class="tile" data-goto="${esc(o.goto)}"
+    <button class="tile" data-goto="${esc(o.goto)}" ${o.focus ? `data-focus="${esc(o.focus)}"` : ""}
       title="${esc(o.label)} — open ${esc(TAB_NAMES[o.goto] ?? o.goto)}">
       <span class="tile-icon">${ICONS[o.icon] ?? ""}</span>
       <span class="tile-text">
@@ -550,8 +569,73 @@ function pulse(sel: string, kind: string, delayMs: number): void {
 /// Every tile is a way in to the screen that owns it.
 function wireBoard(): void {
   for (const b of Array.from(document.querySelectorAll<HTMLElement>(".board [data-goto]"))) {
-    b.addEventListener("click", () => void show(b.dataset.goto!));
+    b.addEventListener("click", () => {
+      const focus = b.dataset.focus ?? null;
+      // Expand before navigating, not after. Opening the row from inside the render that was
+      // meant to show it means asking for another render from within one — which the refresh
+      // guard queues, so the mark landed on an element the queued repaint then threw away.
+      if (focus) {
+        const [kind, ...rest] = focus.split(":");
+        const key = rest.join(":");
+        if (kind === "client") expandedClients.add(key);
+        if (kind === "service") expanded.add(key);
+      }
+      pendingFocus = focus;
+      void show(b.dataset.goto!);
+    });
   }
+}
+
+/// What the next render should scroll to and mark, set by a click on the board.
+///
+/// Held rather than acted on immediately because the destination screen has not been painted
+/// yet: `show` switches tabs and starts a refresh, and the row being asked for does not exist
+/// until that finishes.
+let pendingFocus: string | null = null;
+
+/// Open, scroll to and briefly mark the thing a board click asked for.
+///
+/// Expanding first matters: a client and a service are both collapsed rows, and scrolling to a
+/// closed one lands you on a header with the answer still hidden underneath it.
+function applyPendingFocus(): void {
+  const want = pendingFocus;
+  if (!want) return;
+  pendingFocus = null;
+
+  const [kind, ...rest] = want.split(":");
+  const key = rest.join(":");
+  const head = (sel: string): HTMLElement | null => {
+    const el = document.querySelector<HTMLElement>(sel);
+    return el?.closest<HTMLElement>(".card") ?? el;
+  };
+
+  switch (kind) {
+    case "client":
+      markArrival(head(`.svc-head[data-client="${CSS.escape(key)}"]`));
+      break;
+    case "service":
+      markArrival(head(`.svc-head[data-key="${CSS.escape(key)}"]`));
+      break;
+    case "tokens":
+      markArrival(document.querySelector("#identities .card"));
+      break;
+    case "scripts":
+      markArrival(
+        Array.from(document.querySelectorAll<HTMLElement>("#actions .card")).find((c) =>
+          c.querySelector("h3")?.textContent?.trim().startsWith("Scripts"),
+        ) ?? null,
+      );
+      break;
+  }
+}
+
+function markArrival(el: HTMLElement | null): void {
+  if (!el) return;
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.classList.remove("arrived");
+  void el.getBoundingClientRect();
+  el.classList.add("arrived");
+  window.setTimeout(() => el.classList.remove("arrived"), 1500);
 }
 
 /// Draw the traces once the tiles have landed.
@@ -594,8 +678,15 @@ function drawBoard(): void {
       const pinY = chipBox.t + ((i + 1) * (chipBox.bo - chipBox.t)) / (slots.length + 1);
       const pinX = side === "left" ? chipBox.l : chipBox.r;
       const tileX = side === "left" ? t.r : t.l;
+      // Drawn from whichever end a request starts at, because everything that travels a trace
+      // travels it in path order: a client calls in, the gate calls out. Drawing both sides
+      // from the chip made the left rail's drift and sparks run backwards, out of the gate and
+      // into the caller.
       legs.push({
-        d: bus([pinX, pinY], busX, [tileX, t.cy], "h"),
+        d:
+          side === "left"
+            ? bus([tileX, t.cy], busX, [pinX, pinY], "h", true)
+            : bus([pinX, pinY], busX, [tileX, t.cy], "h", false),
         attr: el.dataset.caller
           ? `data-caller="${el.dataset.caller}"`
           : el.dataset.service
@@ -611,7 +702,7 @@ function drawBoard(): void {
   bottom.forEach((el, i) => {
     const t = rel(el.getBoundingClientRect());
     const pinX = chipBox.l + ((i + 1) * (chipBox.r - chipBox.l)) / (bottom.length + 1);
-    legs.push({ d: bus([pinX, chipBox.bo], busY, [t.cx, t.t], "v"), attr: "", delay: i * STAGGER_MS });
+    legs.push({ d: bus([pinX, chipBox.bo], busY, [t.cx, t.t], "v", false), attr: "", delay: i * STAGGER_MS });
   });
 
   // Through `paint`, so a redraw with the same geometry changes nothing. Resizing fires this
@@ -641,37 +732,87 @@ function drawBoard(): void {
 /// underneath. Corners are quarter-arcs, clamped by both runs so an arc can never be larger
 /// than the segment it has to fit inside — a radius that overshoots draws a stub connecting
 /// nothing, which is exactly what the first version of this did.
-function bus(pin: [number, number], busAt: number, tile: [number, number], axis: "h" | "v"): string {
-  const [px, py] = pin;
-  const [tx, ty] = tile;
-  const along = axis === "h" ? ty - py : tx - px;
-  if (Math.abs(along) < 1) return `M${px},${py} L${tx},${ty}`;
-
-  const r = (a: number, c: number) => Math.max(0, Math.min(9, Math.abs(a) / 2, Math.abs(c) / 2));
-  if (axis === "h") {
-    const out = busAt - px;
-    const rr = r(along, out) || 0;
-    const so = Math.sign(out);
-    const sa = Math.sign(along);
-    return (
-      `M${px},${py} L${busAt - rr * so},${py}` +
-      ` Q${busAt},${py} ${busAt},${py + rr * sa}` +
-      ` L${busAt},${ty - rr * sa}` +
-      ` Q${busAt},${ty} ${busAt + rr * so},${ty}` +
-      ` L${tx},${ty}`
-    );
+function bus(
+  from: [number, number],
+  busAt: number,
+  to: [number, number],
+  axis: "h" | "v",
+  reversed = false,
+): string {
+  // The geometry is the same either way round; only the order of the points changes. Building
+  // it once and reversing keeps the two directions from drifting apart.
+  const [ax, ay] = reversed ? to : from;
+  const [zx, zy] = reversed ? from : to;
+  const along = axis === "h" ? zy - ay : zx - ax;
+  const pts: [number, number][] = [];
+  if (Math.abs(along) < 1) {
+    pts.push([ax, ay], [zx, zy]);
+    return polyline(pts, reversed);
   }
-  const out = busAt - py;
-  const rr = r(along, out) || 0;
+
+  const out = axis === "h" ? busAt - ax : busAt - ay;
+  const r = Math.max(0, Math.min(9, Math.abs(along) / 2, Math.abs(out) / 2));
   const so = Math.sign(out);
   const sa = Math.sign(along);
+
+  const seq: string[] =
+    axis === "h"
+      ? [
+          `${ax},${ay}`,
+          `L${busAt - r * so},${ay}`,
+          `Q${busAt},${ay} ${busAt},${ay + r * sa}`,
+          `L${busAt},${zy - r * sa}`,
+          `Q${busAt},${zy} ${busAt + r * so},${zy}`,
+          `L${zx},${zy}`,
+        ]
+      : [
+          `${ax},${ay}`,
+          `L${ax},${busAt - r * so}`,
+          `Q${ax},${busAt} ${ax + r * sa},${busAt}`,
+          `L${zx - r * sa},${busAt}`,
+          `Q${zx},${busAt} ${zx},${busAt + r * so}`,
+          `L${zx},${zy}`,
+        ];
+  const forward = `M${seq.join(" ")}`;
+  return reversed ? reversePath(axis, busAt, [ax, ay], [zx, zy], r, so, sa) : forward;
+}
+
+/// The same run, emitted from the other end.
+///
+/// An SVG path has a direction, and everything that travels it — the drift, a call's spark —
+/// follows that direction. A caller's trace has to start at the caller.
+function reversePath(
+  axis: "h" | "v",
+  busAt: number,
+  a: [number, number],
+  z: [number, number],
+  r: number,
+  so: number,
+  sa: number,
+): string {
+  const [ax, ay] = a;
+  const [zx, zy] = z;
+  if (axis === "h") {
+    return (
+      `M${zx},${zy} L${busAt + r * so},${zy}` +
+      ` Q${busAt},${zy} ${busAt},${zy - r * sa}` +
+      ` L${busAt},${ay + r * sa}` +
+      ` Q${busAt},${ay} ${busAt - r * so},${ay}` +
+      ` L${ax},${ay}`
+    );
+  }
   return (
-    `M${px},${py} L${px},${busAt - rr * so}` +
-    ` Q${px},${busAt} ${px + rr * sa},${busAt}` +
-    ` L${tx - rr * sa},${busAt}` +
-    ` Q${tx},${busAt} ${tx},${busAt + rr * so}` +
-    ` L${tx},${ty}`
+    `M${zx},${zy} L${zx},${busAt + r * so}` +
+    ` Q${zx},${busAt} ${zx - r * sa},${busAt}` +
+    ` L${ax + r * sa},${busAt}` +
+    ` Q${ax},${busAt} ${ax},${busAt - r * so}` +
+    ` L${ax},${ay}`
   );
+}
+
+function polyline(pts: [number, number][], reversed: boolean): string {
+  const p = reversed ? [...pts].reverse() : pts;
+  return `M${p[0][0]},${p[0][1]} L${p[1][0]},${p[1][1]}`;
 }
 
 function light(sel: string, delayMs: number): void {
@@ -3439,6 +3580,7 @@ async function refresh(): Promise<void> {
       else if (screen === "actions") await renderActions(snap);
       else if (screen === "network") await renderNetwork();
       tickTimes();
+      applyPendingFocus();
     } while (refreshQueued);
   } catch (e) {
     console.error(e);

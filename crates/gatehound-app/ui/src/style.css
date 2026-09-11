@@ -281,7 +281,9 @@ pre {
    permanently on screen is faint or still: a drift along the traces, and nothing else. A real
    call outranks both. */
 
-.board-card { padding: var(--s5) var(--s4) var(--s4); }
+/* The board is measured geometry, so it must never be quietly cropped: if it does not fit, it
+   scrolls and you can see that it did not. */
+.board-card { padding: var(--s5) var(--s4) var(--s4); overflow-x: auto; }
 .board {
   position: relative;
   display: grid;
@@ -289,7 +291,7 @@ pre {
   align-items: center;
   /* The traces need somewhere to run. Most of the width goes to the gaps rather than to the
      rails, because the routing between the chip and a tile is the part that says what this is. */
-  column-gap: clamp(56px, 11vw, 168px);
+  column-gap: clamp(44px, 7vw, 132px);
   row-gap: clamp(40px, 6vw, 72px);
 }
 
@@ -299,6 +301,7 @@ pre {
 }
 
 .rail { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+.rail.left .rail-head, .rail.right .rail-head { flex-basis: 100%; }
 .rail.left { grid-column: 1; align-items: stretch; }
 .rail.right { grid-column: 3; align-items: stretch; }
 .rail.bottom {
@@ -323,12 +326,19 @@ pre {
 }
 .rail.left .tile-slot { animation-name: tile-in-left; }
 .rail.right .tile-slot { animation-name: tile-in-right; }
-/* Compact by default so a rail of a dozen still fits. Anchored toward the chip, so the traces
-   meet a consistent edge whatever the label length. */
-.rail.left .tile-slot, .rail.right .tile-slot { width: 176px; }
-.rail.left { align-items: flex-end; }
-.rail.right { align-items: flex-start; }
+/* Compact by default so a rail of a dozen still fits. */
+.rail.left .tile-slot, .rail.right .tile-slot { width: 132px; }
 .rail.bottom .tile-slot { width: 128px; flex: none; }
+
+/* Columns. Past six a rail splits, so twenty clients are three short columns rather than one
+   that runs off the card. The column nearest the chip is offset half a row, which is what gives
+   the far columns' traces a clear corridor between its tiles instead of a line through one. */
+.rail.left, .rail.right { flex-direction: row; align-items: flex-start; gap: var(--s3); }
+.rail.left { justify-content: flex-end; }
+.rail.right { justify-content: flex-start; }
+.rail-col { display: flex; flex-direction: column; gap: var(--s2); }
+.rail.left .rail-col:last-child, .rail.right .rail-col:first-child { margin-top: 24px; }
+.rail.left .rail-col:only-child, .rail.right .rail-col:only-child { margin-top: 0; }
 
 .tile {
   position: absolute; top: 0; height: 40px; z-index: 1;
@@ -356,8 +366,12 @@ pre {
 .tile-sub { color: var(--mut); font-size: 11px; white-space: nowrap; }
 
 /* Expanded. Out of flow already, so this costs the layout nothing. */
+/* `min-width: 100%` is load-bearing, not tidiness. A short label expands to less than its slot —
+   "Tokens · 2 live" is narrower than 128px — so the tile shrank out from under a cursor resting
+   near its edge, un-hovered, sprang back to slot width, and oscillated for as long as the
+   pointer stayed there. Expanded is never narrower than compact. */
 .tile:hover, .tile:focus-visible {
-  z-index: 5; width: max-content; max-width: 320px;
+  z-index: 5; width: max-content; min-width: 100%; max-width: 320px;
   border-color: var(--line-strong); background: var(--in);
   box-shadow: var(--shadow);
 }
@@ -657,3 +671,22 @@ pre {
    once. */
 .check.group input { width: 18px; height: 18px; margin-top: 1px; }
 .check.group { padding: var(--s3) var(--s4); gap: var(--s3); }
+
+/* ---- Arriving from the board -------------------------------------------------------
+   Clicking a node lands you on the screen that owns it, scrolled to the thing itself. The
+   flash is the bridge between those two: without it you arrive somewhere that looks like it
+   did before, with no idea which of a dozen rows you were sent to. Once, briefly, and only on
+   the way in — it marks an arrival, not a state. */
+@keyframes arrive {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--am) 60%, transparent); }
+  35%  { box-shadow: 0 0 0 4px color-mix(in srgb, var(--am) 45%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.arrived {
+  animation: arrive 1400ms var(--ease-out);
+  border-color: var(--am) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arrived { animation: none; }
+}
