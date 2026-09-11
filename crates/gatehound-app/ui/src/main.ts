@@ -1344,7 +1344,9 @@ function showModal<T>(o: {
       const size = o.size ?? (o.fields ? "lg" : (o.body?.join("").length ?? 0) > 260 ? "md" : "sm");
       const returnFocus = document.activeElement as HTMLElement | null;
       const wrap = document.createElement("div");
-      wrap.className = "modal-back";
+      // Appended in its from-state, released on the next frame: that is what gives the
+      // transition something to move away from.
+      wrap.className = "modal-back pre";
       // built once, never repainted — a fresh node with nothing to diff against.
       wrap.innerHTML = `
         <div class="modal modal-${size}" role="${o.fields ? "dialog" : "alertdialog"}"
@@ -1358,6 +1360,7 @@ function showModal<T>(o: {
           </div>
         </div>`;
       root.appendChild(wrap);
+      requestAnimationFrame(() => wrap.classList.remove("pre"));
       const panel = wrap.querySelector<HTMLElement>(".modal")!;
 
       let closed = false;
@@ -1366,8 +1369,10 @@ function showModal<T>(o: {
         closed = true;
         document.removeEventListener("keydown", onKey, true);
         wrap.classList.add("leaving");
-        // Removed when the exit finishes, so it is not yanked out from under its own animation.
-        window.setTimeout(() => wrap.remove(), 160);
+        // Removed when the exit actually finishes rather than after a guessed interval, so a
+        // duration change here never leaves a panel yanked out mid-transition or a dead
+        // backdrop sitting over the page.
+        wrap.addEventListener("transitionend", () => wrap.remove(), { once: true });
         openModal = null;
         returnFocus?.focus?.();
         resolve(value);
@@ -1430,7 +1435,9 @@ function showModal<T>(o: {
 
     if (previous) {
       previous();
-      window.setTimeout(start, 170);
+      // One question at a time, in the order they were asked. Transitions retarget, so the next
+      // one can begin while the last is still on its way out.
+      window.setTimeout(start, 60);
     } else {
       start();
     }

@@ -762,9 +762,14 @@ pre {
    sentence and two buttons, a form is a column of fields, and the middle one exists for the
    messages that are a paragraph rather than a line.
 
-   Occasional, and it is the moment the screen is asking you something — which is the tier the
-   frequency rule allows an entrance, so it gets one: 200ms, eased for arrival, scaling from
-   0.97 rather than from nothing, because nothing in the world appears from zero size. */
+   Transitions rather than keyframes, on the same duration for the panel and the backdrop, so
+   the two read as one surface arriving rather than two things that happen to move at once.
+   Transitions also retarget: open a second dialog while the first is still leaving and it
+   turns around from wherever it got to, where keyframes would restart from nothing.
+
+   `scale(0.96)`, never from zero — nothing in the world appears from no size — and the origin
+   stays centred, which is the one case exempt from scaling out of the thing that opened it: a
+   modal is not anchored to its trigger. */
 
 .modal-back {
   position: fixed; inset: 0; z-index: 100;
@@ -772,26 +777,25 @@ pre {
   padding: var(--s5);
   background: color-mix(in srgb, #000 52%, transparent);
   backdrop-filter: blur(2px);
-  animation: modal-back-in 160ms var(--ease-out) both;
+  opacity: 1;
+  transition: opacity 250ms var(--ease-out);
 }
-.modal-back.leaving { animation: modal-back-in 140ms var(--ease-out) reverse forwards; }
-@keyframes modal-back-in { from { opacity: 0; } to { opacity: 1; } }
-
 .modal {
   background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
   box-shadow: 0 24px 64px -24px rgba(0,0,0,.6), var(--shadow);
   padding: var(--s5);
   width: 100%; max-height: calc(100vh - var(--s6) * 2);
   display: flex; flex-direction: column; gap: var(--s3);
-  animation: modal-in 220ms var(--ease-out) both;
-}
-.modal-back.leaving .modal { animation: modal-in 140ms var(--ease-out) reverse forwards; }
-@keyframes modal-in {
-  from { opacity: 0; transform: scale(.97) translateY(6px); }
-  to   { opacity: 1; transform: none; }
+  transform-origin: center;
+  opacity: 1; transform: none;
+  transition: opacity 250ms var(--ease-out), transform 250ms var(--ease-out);
 }
 
-/* A confirmation, a paragraph, a form. */
+/* The state it comes from and goes back to. Applied for one frame on the way in rather than
+   through `@starting-style`, which not every webview this ships to has yet. */
+.modal-back.pre, .modal-back.leaving { opacity: 0; }
+.modal-back.pre .modal, .modal-back.leaving .modal { opacity: 0; transform: scale(.96); }
+
 .modal-sm { max-width: 420px; }
 .modal-md { max-width: 560px; }
 .modal-lg { max-width: 660px; }
@@ -827,6 +831,7 @@ pre {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .modal-back, .modal { animation-name: modal-back-in; animation-duration: 120ms; }
-  .modal-back.leaving, .modal-back.leaving .modal { animation-duration: 100ms; }
+  /* Fewer and gentler, not none: the fade still says something arrived, the movement goes. */
+  .modal-back, .modal { transition-duration: 120ms; }
+  .modal-back.pre .modal, .modal-back.leaving .modal { transform: none; }
 }
