@@ -354,10 +354,7 @@ pre {
   transition: border-color 180ms var(--ease-out), background 180ms var(--ease-out),
               box-shadow 180ms var(--ease-out);
 }
-/* Growing away from the chip, so an expanded tile never covers the traces. */
-.rail.left .tile   { left: 0;  right: 0; }
-.rail.right .tile  { right: 0; left: 0; }
-.rail.bottom .tile { left: 0;  right: 0; }
+.rail.left .tile, .rail.right .tile, .rail.bottom .tile { left: 0; right: 0; }
 
 /* The icon carries the service's own light, in its corner. On the node itself rather than on
    the gateway: one service not answering is not the gateway being unwell. */
@@ -375,7 +372,11 @@ pre {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* Compact by default: the short name only. The full one and its detail are one hover away. */
-.tile-label, .tile-sub { display: none; }
+.tile-label, .tile-sub, .tile-goes { display: none; }
+.tile-goes {
+  color: var(--am); font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+  font-weight: 600;
+}
 .tile-sub { color: var(--mut); font-size: 11px; white-space: nowrap; }
 
 /* Expanded. Out of flow already, so this costs the layout nothing. */
@@ -388,12 +389,17 @@ pre {
   border-color: var(--line-strong); background: var(--in);
   box-shadow: var(--shadow);
 }
-.rail.right .tile:hover, .rail.right .tile:focus-visible { left: auto; }
-.rail.left .tile:hover,  .rail.left .tile:focus-visible  { right: auto; }
-.rail.bottom .tile:hover, .rail.bottom .tile:focus-visible { right: auto; }
+/* Outward, always: a tile on the left grows further left, one on the right grows further
+   right. Anchoring each to its chip-facing edge meant an expanded tile grew *towards* the
+   gate, over its own trace and across the chip — which is the one direction it must not go,
+   because that is where everything it is connected to lives. */
+.rail.left .tile:hover,   .rail.left .tile:focus-visible   { right: 0; left: auto; }
+.rail.right .tile:hover,  .rail.right .tile:focus-visible  { left: 0; right: auto; }
+.rail.bottom .tile:hover, .rail.bottom .tile:focus-visible { left: 0; right: auto; }
 .tile:hover .tile-short, .tile:focus-visible .tile-short { display: none; }
 .tile:hover .tile-label, .tile:focus-visible .tile-label,
-.tile:hover .tile-sub, .tile:focus-visible .tile-sub { display: block; }
+.tile:hover .tile-sub, .tile:focus-visible .tile-sub,
+.tile:hover .tile-goes, .tile:focus-visible .tile-goes { display: block; }
 .tile:hover .tile-icon, .tile:focus-visible .tile-icon { color: var(--am); }
 .tile:active { transform: scale(.985); }
 .tile:focus-visible { outline: 2px solid var(--am); outline-offset: 2px; }

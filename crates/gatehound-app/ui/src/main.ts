@@ -501,7 +501,7 @@ function tile(o: {
 }): string {
   return `<div class="tile-slot" ${o.attr ?? ""} style="--d:${o.delay}ms">
     <button class="tile" data-goto="${esc(o.goto)}" ${o.focus ? `data-focus="${esc(o.focus)}"` : ""}
-      title="${esc(o.label)} — open ${esc(TAB_NAMES[o.goto] ?? o.goto)}">
+      aria-label="${esc(o.label)} — open ${esc(TAB_NAMES[o.goto] ?? o.goto)}">
       <span class="tile-icon">${ICONS[o.icon] ?? ""}${
         o.dot ? `<span class="dot ${o.dot} tile-dot"></span>` : ""
       }</span>
@@ -509,6 +509,7 @@ function tile(o: {
         <span class="tile-short">${esc(o.short)}</span>
         <span class="tile-label">${esc(o.label)}</span>
         <span class="tile-sub">${esc(o.sub)}</span>
+        <span class="tile-goes">open ${esc(TAB_NAMES[o.goto] ?? o.goto)} →</span>
       </span>
     </button>
   </div>`;
