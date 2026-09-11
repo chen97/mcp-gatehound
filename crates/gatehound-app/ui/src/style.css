@@ -301,8 +301,12 @@ pre {
   overflow: visible; pointer-events: none;
 }
 
+/* The heading sits on its own row above the columns. It used to be a flex item beside them,
+   which put it level with the first tile and on top of the trace running past it. */
 .rail { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
-.rail.left .rail-head, .rail.right .rail-head { flex-basis: 100%; }
+.rail-cols { display: flex; flex-direction: row; gap: var(--s3); }
+.rail.left .rail-cols { justify-content: flex-end; }
+.rail.right .rail-cols { justify-content: flex-start; }
 .rail.left { grid-column: 1; align-items: stretch; }
 .rail.right { grid-column: 3; align-items: stretch; }
 .rail.bottom {
@@ -314,6 +318,8 @@ pre {
   font-weight: 600; margin-bottom: calc(var(--s1) * -1);
 }
 .rail.right .rail-head { text-align: right; }
+/* Clear of the traces below it: a heading the lines run through is a heading you read twice. */
+.rail-head { margin-bottom: var(--s2); }
 
 /* ---- Tiles ----
    A slot holds the space; the button inside is absolutely positioned and grows past it on
@@ -334,9 +340,8 @@ pre {
 /* Columns. Past six a rail splits, so twenty clients are three short columns rather than one
    that runs off the card. The column nearest the chip is offset half a row, which is what gives
    the far columns' traces a clear corridor between its tiles instead of a line through one. */
-.rail.left, .rail.right { flex-direction: row; align-items: flex-start; gap: var(--s3); }
-.rail.left { justify-content: flex-end; }
-.rail.right { justify-content: flex-start; }
+.rail.left { align-items: flex-end; }
+.rail.right { align-items: flex-start; }
 .rail-col { display: flex; flex-direction: column; gap: var(--s2); }
 .rail.left .rail-col:last-child, .rail.right .rail-col:first-child { margin-top: 24px; }
 .rail.left .rail-col:only-child, .rail.right .rail-col:only-child { margin-top: 0; }

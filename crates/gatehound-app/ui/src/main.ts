@@ -441,7 +441,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
       <svg class="board-wires" aria-hidden="true"></svg>
       <div class="rail left">
         <div class="rail-head">Upstream clients</div>
-        ${columns(left)}
+        <div class="rail-cols">${columns(left)}</div>
       </div>
       <div class="chip" id="flow-hub" style="--d:${gateAt}ms">
         <div class="chip-die">
@@ -456,7 +456,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
       </div>
       <div class="rail right">
         <div class="rail-head">Downstream tools</div>
-        ${columns(right)}
+        <div class="rail-cols">${columns(right)}</div>
       </div>
       <div class="rail bottom">${bottom}</div>
     </div>
@@ -696,10 +696,14 @@ function drawBoard(): void {
   for (const side of ["left", "right"] as const) {
     const slots = Array.from(board.querySelectorAll<HTMLElement>(`.rail.${side} .tile-slot`));
     const busX = side === "left" ? chipBox.l - BREAKOUT : chipBox.r + BREAKOUT;
+    const pins = assignPins(
+      slots.map((el) => rel(el.getBoundingClientRect()).cy),
+      chipBox.t + 12,
+      chipBox.bo - 12,
+    );
     slots.forEach((el, i) => {
       const t = rel(el.getBoundingClientRect());
-      // Fanned down the chip's edge: two traces meeting at one pixel read as a line that forked.
-      const pinY = chipBox.t + ((i + 1) * (chipBox.bo - chipBox.t)) / (slots.length + 1);
+      const pinY = pins[i];
       const pinX = side === "left" ? chipBox.l : chipBox.r;
       const tileX = side === "left" ? t.r : t.l;
       // Drawn from whichever end a request starts at, because everything that travels a trace
@@ -748,6 +752,38 @@ function drawBoard(): void {
   for (const path of Array.from(svg.querySelectorAll<SVGPathElement>("path"))) {
     path.style.setProperty("--len", String(Math.round(path.getTotalLength())));
   }
+}
+
+/// Where each trace meets the chip.
+///
+/// Evenly fanning the pins down the edge made every trace bend, including the ones whose tile
+/// sat exactly level with the chip. So each pin wants to be at its own tile's height — that
+/// trace is then dead straight — and only gives way when two would land on top of each other:
+/// two lines meeting at one pixel read as one line that forked.
+///
+/// The nudging is the standard two-pass spread. Push down until nothing is closer than the
+/// minimum, and if that runs off the bottom edge, push back up. Both passes clamp, so a rail
+/// with more tiles than the edge can hold compresses evenly rather than spilling off it.
+function assignPins(wanted: number[], lo: number, hi: number): number[] {
+  const MIN_GAP = 11;
+  // Solved in top-to-bottom order, then put back where it came from: the tiles are laid out in
+  // columns, so DOM order is not height order and spreading by index would shuffle them.
+  const order = wanted.map((y, i) => ({ y, i })).sort((a, b) => a.y - b.y);
+  const out = order.map((o) => Math.min(hi, Math.max(lo, o.y)));
+
+  for (let k = 1; k < out.length; k++) {
+    out[k] = Math.max(out[k], out[k - 1] + MIN_GAP);
+  }
+  if (out.length && out[out.length - 1] > hi) {
+    out[out.length - 1] = hi;
+    for (let k = out.length - 2; k >= 0; k--) {
+      out[k] = Math.min(out[k], out[k + 1] - MIN_GAP);
+    }
+  }
+
+  const result = new Array<number>(wanted.length);
+  order.forEach((o, k) => (result[o.i] = out[k]));
+  return result;
 }
 
 /// A trace from a pin on the chip, out to a shared turn column, along it, and into a tile.
@@ -892,6 +928,7 @@ async function renderHome(snap: Snapshot): Promise<void> {
     wireBoard();
     // After layout, not during it: the traces are measured off where the tiles ended up.
     requestAnimationFrame(drawBoard);
+    watchBoard();
   }
   // Under the flow: the diagram is what the screen is, and an approval is something that
   // happened within it. It lived on Upstream, one tab away from the page people actually leave
@@ -3653,9 +3690,19 @@ void listen<string>("navigate", (e) => void show(e.payload));
 
 void show("home");
 syncTabBar("jump");
-window.addEventListener("resize", () => {
-  syncTabBar("jump");
-  drawBoard();
-});
+window.addEventListener("resize", () => syncTabBar("jump"));
+
+/// Redraw the traces whenever the board's own box changes.
+///
+/// A `resize` listener fires while the window is still settling, so the rects it measures are
+/// the ones on the way to the answer rather than the answer — which is how a trace ends up
+/// pointing at where a tile used to be. A `ResizeObserver` fires after layout, and catches
+/// every cause rather than only the window: a rail re-wrapping, a label getting longer, the
+/// card changing width.
+const boardWatcher = new ResizeObserver(() => drawBoard());
+function watchBoard(): void {
+  const board = document.querySelector(".board");
+  if (board) boardWatcher.observe(board);
+}
 // A slow safety net for anything an event did not cover (a timed-out hold, say).
 setInterval(() => void refresh(), 5000);
