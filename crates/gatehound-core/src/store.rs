@@ -294,8 +294,14 @@ impl Store {
             .optional()?)
     }
 
-    /// Retention: the log accumulates other people's messages, so bodies are
-    /// blanked after `days` and whole rows dropped after four times that.
+    /// Retention: the log accumulates other people's messages, so bodies are blanked after
+    /// `days` and whole rows dropped after four times that.
+    ///
+    /// What the operator did is exempt from both. Retention exists because call bodies are
+    /// somebody else's private content that should not sit here forever; an admin entry is the
+    /// operator's own record of their own action, it carries no such content, and for a deleted
+    /// token it is the only surviving evidence that the token ever existed. Ageing that out
+    /// would quietly destroy the audit trail this is supposed to be.
     pub fn prune(&self, days: i64) -> Result<usize> {
         if days <= 0 {
             return Ok(0);
@@ -305,12 +311,16 @@ impl Store {
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let blanked = conn.execute(
             "UPDATE requests SET args_json = NULL, response_json = NULL
-             WHERE ts < ?1 AND (args_json IS NOT NULL OR response_json IS NOT NULL)",
+             WHERE ts < ?1 AND action_type IS NOT 'admin'
+               AND (args_json IS NOT NULL OR response_json IS NOT NULL)",
             params![cutoff],
         )?;
         let hard_cutoff = (Utc::now() - chrono::Duration::days(days * 4))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let deleted = conn.execute("DELETE FROM requests WHERE ts < ?1", params![hard_cutoff])?;
+        let deleted = conn.execute(
+            "DELETE FROM requests WHERE ts < ?1 AND action_type IS NOT 'admin'",
+            params![hard_cutoff],
+        )?;
         Ok(blanked + deleted)
     }
 
@@ -418,8 +428,9 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Revoke, keeping the row: the audit log names the identity, and a deleted token would
-    /// leave those entries pointing at something nobody can identify afterwards.
+    /// Revoke, keeping the row. The credential stops working immediately; the row stays so the
+    /// token is still listed as revoked, and so a second token for the same identity keeps
+    /// working.
     pub fn revoke_token(&self, id: &str) -> Result<bool> {
         let conn = self.lock();
         let n = conn.execute(
@@ -427,6 +438,54 @@ impl Store {
             params![id, now()],
         )?;
         Ok(n > 0)
+    }
+
+    /// Remove a token outright.
+    ///
+    /// A revoked row that is never removed keeps its identity reserved forever: issue "claude",
+    /// revoke it, issue "claude" again and the second one is called `claude-2`, because the
+    /// first still occupies the name. The audit trail is the reason the row used to be kept,
+    /// and the request log is a better place for it — it records the identity as text, so it
+    /// survives the row going, and an explicit entry names the token as it is removed.
+    pub fn delete_token(&self, id: &str) -> Result<Option<TokenInfo>> {
+        let existing = self.list_tokens()?.into_iter().find(|t| t.id == id);
+        if existing.is_none() {
+            return Ok(None);
+        }
+        let conn = self.lock();
+        conn.execute("DELETE FROM tokens WHERE id = ?1", params![id])?;
+        Ok(existing)
+    }
+
+    /// Identities that still hold a rule, whether or not anything can authenticate as them.
+    ///
+    /// Used to keep a freshly issued token from landing on a name whose old permissions are
+    /// still sitting there — inheriting them silently is the failure this prevents.
+    pub fn identities_with_rules(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT DISTINCT identity FROM identities")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Record something the operator did, so the live log carries the whole story and not only
+    /// the calls. Deleting a token is the case that forces it: once the row is gone, this entry
+    /// is the only place that says it ever existed.
+    pub fn log_admin(&self, action: &str, identity: Option<&str>, detail: &str) -> Result<i64> {
+        self.log_request(NewRequestLog {
+            identity: identity.map(str::to_string),
+            client_name: Some("you".into()),
+            method: Some(format!("admin/{action}")),
+            tool: None,
+            args_json: None,
+            decision: None,
+            action_type: Some("admin".into()),
+            upstream: None,
+            status: Some("ok".into()),
+            error: None,
+            duration_ms: None,
+            response_json: Some(detail.to_string()),
+        })
     }
 
     pub fn set_decision(&self, identity: &str, tool: &str, decision: Decision) -> Result<()> {
@@ -710,6 +769,78 @@ mod tests {
         s.set_decision("desk", "*", Decision::Deny).unwrap();
         s.seed_decision("desk", "*", Decision::Allow).unwrap();
         assert_eq!(s.decision_for("desk", "x").unwrap(), Some(Decision::Deny));
+    }
+
+    #[test]
+    fn a_removed_token_stops_reserving_its_name() {
+        // Issue "claude", take it away, issue "claude" again: the second one has to be able to
+        // be called claude. A revoked row that was kept held the name forever, which is how
+        // `claude-2` happened.
+        let s = Store::open_memory().unwrap();
+        s.issue_token("t1", "Claude", "claude", "d1").unwrap();
+        assert_eq!(s.list_tokens().unwrap().len(), 1);
+
+        s.revoke_token("t1").unwrap();
+        assert_eq!(
+            s.list_tokens().unwrap().len(),
+            1,
+            "revoking keeps the row; removing is the separate step"
+        );
+
+        let gone = s.delete_token("t1").unwrap().expect("it was there");
+        assert_eq!(gone.identity, "claude");
+        assert!(s.list_tokens().unwrap().is_empty());
+        // Removing the same one twice is not an error worth raising, but it is not a success.
+        assert!(s.delete_token("t1").unwrap().is_none());
+    }
+
+    #[test]
+    fn rules_reserve_a_name_even_with_no_token_behind_them() {
+        // The other half of the same question. If the permissions are still there, the name is
+        // not free: a new token landing on it would inherit them without anybody saying so.
+        let s = Store::open_memory().unwrap();
+        s.set_decision("claude", "send_message", Decision::Allow)
+            .unwrap();
+        assert_eq!(s.identities_with_rules().unwrap(), vec!["claude"]);
+        s.forget_identity("claude").unwrap();
+        assert!(s.identities_with_rules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn what_the_operator_did_survives_retention() {
+        // Call bodies age out because they are somebody else's content. An admin entry is the
+        // operator's record of their own action, and for a removed token it is the only thing
+        // left saying it existed — ageing that out would destroy the trail it replaced.
+        let s = Store::open_memory().unwrap();
+        s.log_admin("token.revoke", Some("claude"), "removed 'Claude'")
+            .unwrap();
+        let call = s
+            .log_request(NewRequestLog {
+                identity: Some("claude".into()),
+                method: Some("tools/call".into()),
+                args_json: Some("{\"secret\":1}".into()),
+                status: Some("ok".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Backdate both well past the hard cutoff.
+        {
+            let conn = s.lock();
+            conn.execute("UPDATE requests SET ts = '2000-01-01T00:00:00Z'", [])
+                .unwrap();
+        }
+        s.prune(30).unwrap();
+
+        let left = s.recent_requests(50).unwrap();
+        assert_eq!(
+            left.len(),
+            1,
+            "the call should have gone, the record stayed"
+        );
+        assert_eq!(left[0].method.as_deref(), Some("admin/token.revoke"));
+        assert!(left[0].response_json.as_deref().unwrap().contains("Claude"));
+        let _ = call;
     }
 
     #[test]

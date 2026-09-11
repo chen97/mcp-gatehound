@@ -156,7 +156,13 @@ fn set_identity(
     state
         .gateway
         .set_identity(&identity, &tool, decision)
-        .map_err(err)
+        .map_err(err)?;
+    let _ = state.gateway.store.log_admin(
+        "identity.rule",
+        Some(&identity),
+        &format!("{identity} may {} {tool}", decision.as_str()),
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -168,8 +174,13 @@ fn forget_identity(
     state
         .gateway
         .forget_identity(&identity, &tool)
-        .map(|_| ())
-        .map_err(err)
+        .map_err(err)?;
+    let _ = state.gateway.store.log_admin(
+        "identity.forget",
+        Some(&identity),
+        &format!("dropped the rule for {tool}"),
+    );
+    Ok(())
 }
 
 /// Pause and resume stop and restart only the listener. The app stays open, the database
@@ -378,6 +389,11 @@ fn set_tool_face(
     };
 
     tracing::info!(from = %name, to = %new_name, moved = rules.moved.len(), "renamed a tool");
+    let _ = state.gateway.store.log_admin(
+        "tool.rename",
+        None,
+        &format!("'{name}' is now '{new_name}'"),
+    );
     Ok(Renamed {
         config_path: state.config_path.display().to_string(),
         moved: rules.moved,
@@ -639,6 +655,18 @@ fn issue_token(
             .map_err(err)?;
     }
     tracing::info!(%identity, tools = tools.len(), "issued an access token");
+    let _ = state.gateway.store.log_admin(
+        "token.issue",
+        Some(&identity),
+        &format!(
+            "issued '{name}' as {identity}, may call: {}",
+            if tools.is_empty() {
+                "nothing".into()
+            } else {
+                tools.join(", ")
+            }
+        ),
+    );
     Ok(Issued {
         secret: minted.secret,
         identity,
@@ -656,32 +684,60 @@ fn revoke_token(
     id: String,
     forget_rules: bool,
 ) -> Result<Revoked, String> {
-    // Read the identity before revoking, so the rules can be dropped by name afterwards.
-    let identity = state
+    // Read the whole row before removing it: the name is needed for the log entry that replaces
+    // it, and the identity for dropping the rules afterwards.
+    let token = state
         .gateway
         .store
         .list_tokens()
         .map_err(err)?
         .into_iter()
-        .find(|t| t.id == id)
-        .map(|t| t.identity);
+        .find(|t| t.id == id);
+    let Some(token) = token else {
+        return Err("that token was never issued, or has already been removed".into());
+    };
+    let identity = token.identity.clone();
 
-    if !state.gateway.store.revoke_token(&id).map_err(err)? {
-        return Err("that token is already revoked, or was never issued".into());
+    // Removed rather than marked revoked. A row kept for the audit trail reserved its name
+    // forever — re-issuing "claude" gave you `claude-2` — and the trail belongs in the log,
+    // which records the identity as text and so outlives the row.
+    if state
+        .gateway
+        .store
+        .delete_token(&id)
+        .map_err(err)?
+        .is_none()
+    {
+        return Err("that token has already been removed".into());
     }
-    tracing::info!(token = %id, "revoked an access token");
+    tracing::info!(token = %id, %identity, "removed an access token");
+    let _ = state.gateway.store.log_admin(
+        "token.revoke",
+        Some(&identity),
+        &format!("removed '{}' ({identity})", token.name),
+    );
 
-    // Revoking kills the credential; the rules are keyed by the identity it authenticated as
-    // and outlive it. Usually that is what you want — another token for the same name still
-    // works — but when this was the last one, the rules sit there reading as live access.
+    // The rules are keyed by the identity the token authenticated as and outlive it. Usually
+    // that is right — another token for the same name still works — but when this was the last
+    // one they sit there reading as live access, and they keep the name reserved.
     let mut forgot = Vec::new();
     if forget_rules {
-        if let Some(identity) = &identity {
-            forgot = state.gateway.store.forget_identity(identity).map_err(err)?;
-            tracing::info!(%identity, rules = forgot.len(), "forgot an identity's rules");
-        }
+        forgot = state
+            .gateway
+            .store
+            .forget_identity(&identity)
+            .map_err(err)?;
+        tracing::info!(%identity, rules = forgot.len(), "forgot an identity's rules");
+        let _ = state.gateway.store.log_admin(
+            "identity.forget",
+            Some(&identity),
+            &format!("removed {} rule(s): {}", forgot.len(), forgot.join(", ")),
+        );
     }
-    Ok(Revoked { identity, forgot })
+    Ok(Revoked {
+        identity: Some(identity),
+        forgot,
+    })
 }
 
 /// What revoking did.
@@ -712,14 +768,27 @@ fn identity_for(name: &str, state: &AppState) -> String {
         base
     };
 
-    let taken: Vec<String> = state
+    // What actually reserves a name: a token that still works, or permissions still sitting
+    // under that name. A revoked token used to reserve it too, which is why issuing "claude",
+    // revoking it and issuing "claude" again produced `claude-2` — the dead row still held the
+    // name. Rules do reserve it, and must: landing a new token on a name whose old permissions
+    // are still there would inherit them without saying so.
+    let mut taken: Vec<String> = state
         .gateway
         .store
         .list_tokens()
         .unwrap_or_default()
         .into_iter()
+        .filter(|t| t.revoked_at.is_none())
         .map(|t| t.identity)
         .collect();
+    taken.extend(
+        state
+            .gateway
+            .store
+            .identities_with_rules()
+            .unwrap_or_default(),
+    );
     if !taken.contains(&base) {
         return base;
     }

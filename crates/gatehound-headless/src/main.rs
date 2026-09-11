@@ -114,7 +114,7 @@ fn print_help() {
          export <name>             write the current setup out as a pack\n  \
          token issue <name> [tools]  mint a token; tools it may call, or none\n  \
          token list                list issued tokens\n  \
-         token revoke <id>         stop a token working\n  \
+         token revoke <id>         remove a token; its next request is refused\n  \
          publish                   show how the gateway is published\n\n\
          OPTIONS\n  \
          --config <path>           gatehound.toml\n  \
@@ -515,11 +515,24 @@ fn token(cfg: Config, db_path: Option<PathBuf>, rest: &[String]) -> Result<()> {
                 .split('_')
                 .next()
                 .unwrap_or(id);
-            if gateway.store.revoke_token(id)? {
-                println!("revoked {}{id}", tokens::PREFIX);
-                println!("Its policy rules are left in place, and the audit log still names it.");
-            } else {
-                bail!("no active token with id '{id}'");
+            // Removed, not marked. A row kept for the audit trail reserves its identity
+            // forever, so re-issuing under the same name lands on `name-2`; the log carries
+            // the record instead, and it records the identity as text so it outlives the row.
+            match gateway.store.delete_token(id)? {
+                Some(t) => {
+                    gateway.store.log_admin(
+                        "token.revoke",
+                        Some(&t.identity),
+                        &format!("removed '{}' ({})", t.name, t.identity),
+                    )?;
+                    println!("removed {}{id} ({})", tokens::PREFIX, t.identity);
+                    println!(
+                        "Its policy rules are left in place — drop them with:\n  \
+                         gatehound-headless deny {} '*'   (or edit them in the app)",
+                        t.identity
+                    );
+                }
+                None => bail!("no token with id '{id}'"),
             }
             Ok(())
         }

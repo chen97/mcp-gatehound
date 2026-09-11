@@ -3465,12 +3465,13 @@ function wireRevoke(): void {
   document.querySelectorAll<HTMLButtonElement>(".revoke").forEach((b) => {
     b.addEventListener("click", async () => {
       const identity = b.dataset.identity ?? "";
-      if (!(await ask(`Revoke "${b.dataset.name}"? Its next request is refused.`))) return;
+      if (!(await ask(`Remove "${b.dataset.name}"?\n\nIts next request is refused, the token is gone from the list, and the name is free to use again. The live log keeps the record.`))) return;
 
       // Revoking kills the credential, not the name it authenticated as — and the permissions
       // are keyed by the name. Leaving them is right when another token still uses it, and
       // misleading when this was the last one, so the choice has to be put rather than
       // guessed. Offered only when nothing else can still authenticate as that identity.
+      // Whether anything else can still authenticate as this name once this one is gone.
       const lastOne = !lastAccess?.tokens.some(
         (t) => t.identity === identity && !t.revoked_at && t.id !== b.dataset.id,
       );
