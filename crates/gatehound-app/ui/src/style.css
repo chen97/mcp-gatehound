@@ -372,11 +372,7 @@ pre {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* Compact by default: the short name only. The full one and its detail are one hover away. */
-.tile-label, .tile-sub, .tile-goes { display: none; }
-.tile-goes {
-  color: var(--am); font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
-  font-weight: 600;
-}
+.tile-label, .tile-sub { display: none; }
 .tile-sub { color: var(--mut); font-size: 11px; white-space: nowrap; }
 
 /* Expanded. Out of flow already, so this costs the layout nothing. */
@@ -401,8 +397,7 @@ pre {
 .rail.bottom .tile:hover, .rail.bottom .tile:focus-visible { left: 0; right: auto; }
 .tile:hover .tile-short, .tile:focus-visible .tile-short { display: none; }
 .tile:hover .tile-label, .tile:focus-visible .tile-label,
-.tile:hover .tile-sub, .tile:focus-visible .tile-sub,
-.tile:hover .tile-goes, .tile:focus-visible .tile-goes { display: block; }
+.tile:hover .tile-sub, .tile:focus-visible .tile-sub { display: block; }
 .tile:hover .tile-icon, .tile:focus-visible .tile-icon { color: var(--am); }
 .tile:active { transform: scale(.985); }
 .tile:focus-visible { outline: 2px solid var(--am); outline-offset: 2px; }

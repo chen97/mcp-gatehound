@@ -510,7 +510,6 @@ function tile(o: {
         <span class="tile-short">${esc(o.short)}</span>
         <span class="tile-label">${esc(o.label)}</span>
         <span class="tile-sub">${esc(o.sub)}</span>
-        <span class="tile-goes">open ${esc(TAB_NAMES[o.goto] ?? o.goto)} →</span>
       </span>
     </button>
   </div>`;
