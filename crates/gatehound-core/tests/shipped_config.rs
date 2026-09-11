@@ -17,16 +17,20 @@ fn parse(rel: &str) -> Config {
     let path = repo_root().join(rel);
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    let mut cfg: Config =
-        toml::from_str(&raw).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
+    toml::from_str(&raw).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
+}
 
-    // Both shipped configs demonstrate a local command with `/bin/df`, which is a real command
-    // on the machines they are written for and not a path Windows has. Validation resolves
-    // commands, so on Windows point those at something that is here.
-    //
-    // Done once, here, rather than in each test that validates: the same substitution was
-    // written into one test and then needed in a second and a third, which is how a fix gets
-    // applied to the instance in front of you and missed everywhere else.
+/// The same config, with anything only a Unix machine has swapped for something local.
+///
+/// Both shipped configs demonstrate a local command with `/bin/df` — a real command on the
+/// machines they are written for, and not a path Windows has. Validation resolves commands, so
+/// on Windows that one tool has to point somewhere real.
+///
+/// Deliberately not folded into `parse`: the substitution belongs to validating a config, not
+/// to reading one, and putting it there broke the test that checks what the files actually say.
+/// One helper for the tests that validate, and the shipped bytes for the tests that inspect.
+fn parse_for_validation(rel: &str) -> Config {
+    let mut cfg = parse(rel);
     if cfg!(windows) {
         let here = std::env::current_exe().unwrap().display().to_string();
         for t in &mut cfg.tools {
@@ -40,7 +44,7 @@ fn parse(rel: &str) -> Config {
 
 #[test]
 fn the_example_config_parses_and_validates() {
-    let mut cfg = parse("gatehound.example.toml");
+    let mut cfg = parse_for_validation("gatehound.example.toml");
 
     // The example deliberately keeps credentials out of the file; supply what the environment
     // would have provided.
@@ -113,7 +117,7 @@ fn the_example_demonstrates_a_write_tool_that_cannot_double_act() {
 
 #[test]
 fn the_mock_rig_config_parses_and_validates() {
-    let mut cfg = parse("tests_fixtures/gatehound.mock.toml");
+    let mut cfg = parse_for_validation("tests_fixtures/gatehound.mock.toml");
     cfg.auth.bearer_token = Some("hubsecret-0123456789abcdef".into());
     cfg.validate().expect("the mock rig config must be valid");
 
@@ -144,7 +148,9 @@ fn every_shipped_tool_binds_to_a_declared_action_and_says_what_it_does() {
                 tool.name
             );
             // validate() already proves a proxy op exists on its upstream; this covers the
-            // other half — an exec tool naming a command that is at least absolute.
+            // other half — an exec tool naming a command that is at least absolute. This reads
+            // the shipped bytes, so the shape it checks is the one the files are written in,
+            // whatever machine is running the test.
             if let Action::Exec(spec) = &tool.action {
                 assert!(
                     spec.cmd.starts_with('/'),
