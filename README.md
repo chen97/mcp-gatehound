@@ -494,6 +494,19 @@ permissions answers half a question. **Downstream** is what the gateway calls ou
 service's tools folded underneath it. **Network** is reachability, with a form to change it,
 because the alternative was telling an operator to find a TOML file.
 
+### The stack, in a picture
+
+[`docs/tech-stack.html`](docs/tech-stack.html) draws it: what is inside the one process, what is
+outside it, and which way each call travels.
+
+### Skills
+
+[`.claude/skills/`](.claude/skills/) carries three skills written out of building this window —
+verifying by driving the app rather than reading it, where the reader lands after a click, and
+what may move and what it costs. Copy the folders into another project's `.claude/skills/` to
+take the rules with you; each marks which parts are webview-specific and which carry to a native
+UI.
+
 ## Configuration
 
 `gatehound.toml` plus environment overrides — see [`gatehound.example.toml`](gatehound.example.toml)
