@@ -767,30 +767,21 @@ function drawBoard(): void {
     });
   }
 
-  // Length in user units, which only the browser knows, and a duration derived from it.
-  //
-  // A fixed duration means a long trace's dash covers more ground in the same time than a short
-  // one's — the same "flow" moving at different speeds depending on where a tile happened to
-  // land. Pixels per millisecond instead, so everything on the board moves together and keeps
-  // doing so when a resize changes every length at once.
+  // Length in user units, which only the browser knows. The spark is one dash crossing the
+  // whole path, so its duration has to come from how long that path actually is: a fixed one
+  // would cross a short trace and a long one in the same time, at different speeds.
   for (const path of Array.from(svg.querySelectorAll<SVGPathElement>("path"))) {
     const len = Math.max(1, Math.round(path.getTotalLength()));
     path.style.setProperty("--len", String(len));
-    if (path.classList.contains("trace-drift")) {
-      path.style.animationDuration = `${Math.round(len / DRIFT_SPEED)}ms`;
-      // Enabled only once the length is known: the dash pattern is written in terms of it, and
-      // the frames before it is set have no valid pattern to draw.
-      path.classList.add("ready");
-    } else if (path.classList.contains("trace-spark")) {
+    if (path.classList.contains("trace-spark")) {
       path.dataset.ms = String(Math.round(len / SPARK_SPEED));
     }
   }
 }
 
-/// Pixels per millisecond. The idle drift ambles; a real call moves about six times faster,
-/// which is what makes one read as "these paths are live" and the other as "something just
-/// went through".
-const DRIFT_SPEED = 0.075;
+/// Pixels per millisecond for a call's spark. The idle drift runs at 0.075 — 18px every 240ms,
+/// set in CSS because a repeating pattern needs no measurement — so a call moves six times
+/// faster than the traffic it travels with and visibly overtakes it.
 const SPARK_SPEED = 0.45;
 
 /// Which traces are currently drawn, so a resize can re-point them rather than replace them.

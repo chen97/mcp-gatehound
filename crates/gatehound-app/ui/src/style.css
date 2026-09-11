@@ -472,20 +472,24 @@ pre {
 
 /* A faint dash drifting outward while nothing is happening. Deliberately not a signal: no
    colour, a third of the trace's weight, and gone while a call is on the wire. */
-/* The dash rides the stroke, so it follows every bend the path takes — including after a
-   resize moves them, because the path is re-pointed rather than replaced.
+/* A repeating pattern rather than one dash per line.
    
-   No animation until `ready`: the pattern is written in terms of the path's own length, which
-   only the browser can measure, and the frames before that is known have no valid pattern to
-   draw. Duration comes from the length too, set per path, so a long trace and a short one move
-   at the same speed rather than in the same time. */
+   The single-dash version was correct and looked dead: 22px of light on a 99px trace meant a
+   line was lit under a quarter of the time, and with a cycle as long as the trace, most of the
+   board sat still most of the time. The period is fixed now — a dot every 18px, marching — so
+   every line always carries several, they all move at the same speed by construction rather
+   than by arithmetic, and none of it depends on the path's length. Which is also why it
+   survives a resize: the pattern is in path-length units, so re-pointing a path moves the dots
+   onto the new geometry with nothing to recompute. */
 .trace-drift {
   fill: none; stroke: var(--am); stroke-width: 1.6; stroke-linecap: round;
-  stroke-dasharray: 22 calc(var(--len) - 22);
-  opacity: .5;
+  stroke-dasharray: 2.5 15.5;
+  opacity: .55;
+  animation: march 240ms linear infinite;
 }
-.trace-drift.ready { animation: drift 3200ms linear infinite; }
-@keyframes drift { from { stroke-dashoffset: var(--len); } to { stroke-dashoffset: 0; } }
+/* 18px per 240ms — the same 75px/s the spark is measured against, so a call visibly overtakes
+   the traffic it is travelling with rather than blending into it. */
+@keyframes march { to { stroke-dashoffset: -18; } }
 
 /* A call. Brighter, faster, once — and it takes the colour of what happened. */
 .trace-spark {
