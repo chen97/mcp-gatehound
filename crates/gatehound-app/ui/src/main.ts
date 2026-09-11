@@ -703,6 +703,17 @@ function drawBoard(): void {
   for (const side of ["left", "right"] as const) {
     const slots = Array.from(board.querySelectorAll<HTMLElement>(`.rail.${side} .tile-slot`));
     const busX = side === "left" ? chipBox.l - BREAKOUT : chipBox.r + BREAKOUT;
+
+    // How far a tile on this side may grow when it expands. A fixed width is wrong at every
+    // window size but one: at a narrow one it runs past the edge of the card, which is what put
+    // a scrollbar under the board. The room between the rail and the board's edge is the real
+    // limit, and only a measurement knows it.
+    const rail = board.querySelector<HTMLElement>(`.rail.${side}`);
+    if (rail && slots.length) {
+      const first = rel(slots[0].getBoundingClientRect());
+      const room = side === "left" ? first.r : b.width - first.l;
+      rail.style.setProperty("--grow", `${Math.max(first.r - first.l, Math.floor(room))}px`);
+    }
     const pins = assignPins(
       slots.map((el) => rel(el.getBoundingClientRect()).cy),
       chipBox.t + 12,

@@ -385,7 +385,10 @@ pre {
    near its edge, un-hovered, sprang back to slot width, and oscillated for as long as the
    pointer stayed there. Expanded is never narrower than compact. */
 .tile:hover, .tile:focus-visible {
-  z-index: 5; width: max-content; min-width: 100%; max-width: 320px;
+  /* Capped by the room its rail actually has, measured in `drawBoard`, and by 320px so a wide
+     window does not turn one tile into a banner. Without the first, expanding at a narrow
+     window pushed the tile past the edge of the card and put a scrollbar under the board. */
+  z-index: 5; width: max-content; min-width: 100%; max-width: min(320px, var(--grow, 320px));
   border-color: var(--line-strong); background: var(--in);
   box-shadow: var(--shadow);
 }
