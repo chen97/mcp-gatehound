@@ -1001,12 +1001,20 @@ token = os.environ["GATEHOUND_TOKEN"]
             ..Default::default()
         };
         let lowered = spec.lower(&def, &base).unwrap();
-        assert_eq!(lowered.cmd, "python3");
-        assert_eq!(lowered.args[0], "-I");
-        assert!(lowered.args[1].ends_with("scripts/w.py"));
-        assert_eq!(&lowered.args[2..], &["--uid", "{uid}"]);
+        // The command is whatever this machine calls Python 3 — `py` on Windows, where
+        // `python3.exe` is a Store stub and a python.org install does not create one.
+        assert_eq!(lowered.cmd, Interpreter::Python3.command());
+        let leading = Interpreter::Python3.leading_args_for(&lowered.cmd);
+        assert_eq!(&lowered.args[..leading.len()], &leading[..]);
+        assert_eq!(*lowered.args.last().unwrap(), "{uid}");
+        let script = &lowered.args[leading.len()];
+        assert!(
+            Path::new(script).ends_with("scripts/w.py"),
+            "the script path is the argument after the interpreter's own: {script}"
+        );
+        assert_eq!(&lowered.args[leading.len() + 1..], &["--uid", "{uid}"]);
         // The path is absolute, so the gateway's cwd cannot change which file runs.
-        assert!(Path::new(&lowered.args[1]).is_absolute());
+        assert!(Path::new(script).is_absolute());
         std::fs::remove_dir_all(base).ok();
     }
 

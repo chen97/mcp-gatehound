@@ -859,7 +859,15 @@ decision = "allow"
 
     #[test]
     fn parses_upstream_ops_tools_and_identities() {
-        let cfg: Config = toml::from_str(sample()).unwrap();
+        let mut cfg: Config = toml::from_str(sample()).unwrap();
+        // The sample names `/bin/df`, which is a command on the machines it was written for
+        // and not a path Windows has. Validation resolves commands, so point it at something
+        // that is here; what this test is about is the parse.
+        if cfg!(windows) {
+            if let Action::Exec(spec) = &mut cfg.tools[1].action {
+                spec.cmd = std::env::current_exe().unwrap().display().to_string();
+            }
+        }
         cfg.validate().unwrap();
         assert_eq!(cfg.listen_addr, "127.0.0.1:9999");
         assert_eq!(cfg.tools.len(), 2);
