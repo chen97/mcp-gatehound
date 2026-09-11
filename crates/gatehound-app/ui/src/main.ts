@@ -412,26 +412,27 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
         })
     : [emptyTile("No services yet", "Add a downstream", "actions")];
 
-  const local = snap.tools.filter((t) => !t.upstream).length;
-  const live = access.tokens.filter((t) => !t.revoked_at).length;
-
-  // Underneath: the parts of the gateway that are neither a caller nor a service. One tile per
-  // remaining screen, so between the three rails every tab is one click from the picture that
-  // explains what it is for.
-  const bottom: string = [
-    tile({ icon: "token", label: "Tokens", short: "Tokens", sub: `${live} live`, goto: "upstream", focus: "tokens", delay: 0 }),
-    tile({
-      icon: "script",
-      label: "Scripts & tools",
-      short: "Scripts",
-      sub: `${snap.tools.length} exposed${local ? `, ${local} local` : ""}`,
-      goto: "actions",
-      focus: "scripts",
-      delay: STAGGER_MS,
-    }),
-    tile({ icon: "globe", label: "Reach", short: "Reach", sub: snap.auth, goto: "network", delay: STAGGER_MS * 2 }),
-    tile({ icon: "log", label: "Live log", short: "Live log", sub: "every call, kept", goto: "log", delay: STAGGER_MS * 3 }),
-  ].join("");
+  // Inside the chip rather than on a rail of their own: these are not things the gateway talks
+  // to, they are parts of it. Drawing them as four more nodes with four more traces said the
+  // gateway called out to its own live log.
+  //
+  // Icon only, because four labelled buttons is wider than the chip and the icons are the same
+  // four every time — you learn them once. The name appears under the row on hover, in a slot
+  // that is always there, so nothing moves when it does.
+  const inside = [
+    { icon: "token", label: "Tokens", goto: "upstream", focus: "tokens" },
+    { icon: "script", label: "Scripts & tools", goto: "actions", focus: "scripts" },
+    { icon: "globe", label: "Reach", goto: "network" },
+    { icon: "log", label: "Live log", goto: "log" },
+  ]
+    .map(
+      (a) => `<button class="chip-act" data-goto="${esc(a.goto)}"
+        ${a.focus ? `data-focus="${esc(a.focus)}"` : ""} aria-label="Open ${esc(a.label)}">
+        ${ICONS[a.icon] ?? ""}
+        <span class="chip-act-name">${esc(a.label)}</span>
+      </button>`,
+    )
+    .join("");
 
   const gateAt =
     Math.max(0, Math.max(callers.length, snap.upstreams.length) - 1) * STAGGER_MS + 150;
@@ -451,6 +452,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
             </div>
             <div class="chip-meta">${esc(snap.listen_addr)}</div>
             ${snap.pending ? `<span class="pill hot">${snap.pending} waiting</span>` : ""}
+            <div class="chip-actions">${inside}</div>
           </div>
         </div>
       </div>
@@ -458,7 +460,6 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
         <div class="rail-head">Downstream tools</div>
         <div class="rail-cols">${columns(right)}</div>
       </div>
-      <div class="rail bottom">${bottom}</div>
     </div>
   </div>`;
 }
@@ -730,14 +731,6 @@ function drawBoard(): void {
       });
     });
   }
-
-  const bottom = Array.from(board.querySelectorAll<HTMLElement>(".rail.bottom .tile-slot"));
-  const busY = chipBox.bo + BREAKOUT;
-  bottom.forEach((el, i) => {
-    const t = rel(el.getBoundingClientRect());
-    const pinX = chipBox.l + ((i + 1) * (chipBox.r - chipBox.l)) / (bottom.length + 1);
-    legs.push({ d: bus([pinX, chipBox.bo], busY, [t.cx, t.t], "v", false), attr: "", delay: i * STAGGER_MS });
-  });
 
   // Rebuilt only when the *set* of traces changes. When it is the same traces at new
   // coordinates — which is every resize — the existing paths are re-pointed in place, so a

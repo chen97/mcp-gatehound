@@ -452,6 +452,44 @@ pre {
 }
 .chip-core .pill { display: inline-block; margin-top: var(--s2); }
 
+/* The gateway's own parts, inside the gateway. Icon only: four labels is wider than the chip,
+   and it is the same four every time — you learn them once. */
+.chip-actions {
+  display: flex; justify-content: center; gap: var(--s1);
+  margin-top: var(--s3); padding-top: var(--s3);
+  border-top: 1px solid color-mix(in srgb, var(--am) 14%, var(--line));
+  /* Room for the name that appears on hover, always reserved, so nothing moves when it does. */
+  padding-bottom: 16px;
+}
+.chip-act {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 28px; padding: 0;
+  background: none; border: 1px solid transparent; border-radius: var(--r);
+  color: var(--mut); cursor: pointer;
+  transition: color 160ms var(--ease-out), background 160ms var(--ease-out),
+              border-color 160ms var(--ease-out);
+}
+.chip-act svg {
+  width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+@media (hover: hover) and (pointer: fine) {
+  .chip-act:hover { color: var(--am); background: color-mix(in srgb, var(--am) 10%, transparent);
+                    border-color: color-mix(in srgb, var(--am) 30%, transparent); }
+}
+.chip-act:focus-visible { outline: 2px solid var(--am); outline-offset: 2px; }
+.chip-act:active { transform: scale(.94); }
+
+/* Every name sits in the same slot under the row, so only the one being pointed at is visible
+   and the chip never changes size. */
+.chip-act-name {
+  position: absolute; top: calc(100% + 3px); left: 50%; transform: translateX(-50%);
+  display: none; white-space: nowrap;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .03em; color: var(--am);
+}
+.chip-act:hover .chip-act-name, .chip-act:focus-visible .chip-act-name { display: block; }
+
 /* A halo leaving the status dot, once every three seconds. The only ambient motion besides the
    drift, and it answers the only question a glance at this page is really asking: is it up. */
 .chip .dot.green { position: relative; }
