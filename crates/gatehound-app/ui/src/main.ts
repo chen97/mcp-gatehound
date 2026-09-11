@@ -591,14 +591,18 @@ function wireBoard(): void {
   for (const b of Array.from(document.querySelectorAll<HTMLElement>(".board [data-goto]"))) {
     b.addEventListener("click", () => {
       const focus = b.dataset.focus ?? null;
-      // Expand before navigating, not after. Opening the row from inside the render that was
-      // meant to show it means asking for another render from within one — which the refresh
-      // guard queues, so the mark landed on an element the queued repaint then threw away.
+      // Arrive closed. You clicked a node to find out where it lives, not to read everything
+      // inside it — so the row is scrolled to and marked, and opening it is the next thing you
+      // choose rather than something already done for you.
+      //
+      // Set before navigating, not after: changing it from inside the render that was meant to
+      // show it means asking for another render from within one, which the refresh guard
+      // queues, and the mark lands on an element the queued repaint then throws away.
       if (focus) {
         const [kind, ...rest] = focus.split(":");
         const key = rest.join(":");
-        if (kind === "client") expandedClients.add(key);
-        if (kind === "service") expanded.add(key);
+        if (kind === "client") expandedClients.delete(key);
+        if (kind === "service") expanded.delete(key);
       }
       pendingFocus = focus;
       void show(b.dataset.goto!);
