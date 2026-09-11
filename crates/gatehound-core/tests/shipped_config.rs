@@ -17,7 +17,25 @@ fn parse(rel: &str) -> Config {
     let path = repo_root().join(rel);
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    toml::from_str(&raw).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
+    let mut cfg: Config =
+        toml::from_str(&raw).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
+
+    // Both shipped configs demonstrate a local command with `/bin/df`, which is a real command
+    // on the machines they are written for and not a path Windows has. Validation resolves
+    // commands, so on Windows point those at something that is here.
+    //
+    // Done once, here, rather than in each test that validates: the same substitution was
+    // written into one test and then needed in a second and a third, which is how a fix gets
+    // applied to the instance in front of you and missed everywhere else.
+    if cfg!(windows) {
+        let here = std::env::current_exe().unwrap().display().to_string();
+        for t in &mut cfg.tools {
+            if let Action::Exec(spec) = &mut t.action {
+                spec.cmd = here.clone();
+            }
+        }
+    }
+    cfg
 }
 
 #[test]
@@ -27,18 +45,6 @@ fn the_example_config_parses_and_validates() {
     // The example deliberately keeps credentials out of the file; supply what the environment
     // would have provided.
     cfg.auth.bearer_token = Some("0123456789abcdef0123".into());
-
-    // Its local-command example names `/bin/df`, which is a real command on the machines the
-    // example is written for and not a path Windows has. Validation resolves commands, so point
-    // that one at something that is here — everything else the example demonstrates is checked
-    // as shipped.
-    if cfg!(windows) {
-        for t in &mut cfg.tools {
-            if let Action::Exec(spec) = &mut t.action {
-                spec.cmd = std::env::current_exe().unwrap().display().to_string();
-            }
-        }
-    }
     cfg.validate().expect("the shipped example must be valid");
 
     assert!(
