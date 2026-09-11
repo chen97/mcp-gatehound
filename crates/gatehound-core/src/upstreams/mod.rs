@@ -10,6 +10,17 @@ use http::HttpUpstream;
 use mcp::McpUpstream;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::Duration;
+
+/// How long a health probe may take before it counts as not answering.
+///
+/// Deliberately far shorter than a call's own timeout. The sweep runs every thirty seconds
+/// against every upstream in turn, and an MCP upstream's client allows sixty seconds — so one
+/// that accepted a connection and then went quiet held up every upstream behind it, and with a
+/// few of those the status dot would be reporting minutes-old news on a thirty-second loop.
+/// Three seconds to answer a ping is already generous; an upstream that cannot is not
+/// answering, which is exactly what the sweep is asking.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub enum Upstream {
     Http(HttpUpstream),
@@ -107,7 +118,10 @@ impl Upstreams {
         let mut down = Vec::new();
         for name in self.names() {
             if let Some(u) = self.map.get(name) {
-                if !u.healthy().await {
+                let answered = tokio::time::timeout(PROBE_TIMEOUT, u.healthy())
+                    .await
+                    .unwrap_or(false);
+                if !answered {
                     down.push(name.to_string());
                 }
             }
@@ -121,6 +135,46 @@ mod tests {
     use super::*;
     use crate::upstreams::http::{HttpAuth, HttpOp};
     use std::collections::BTreeMap;
+
+    /// An upstream that accepts the connection and then says nothing must not hold up the
+    /// sweep behind it. Before the probe had a timeout of its own it inherited the call
+    /// timeout — sixty seconds for MCP — on a loop that runs every thirty.
+    #[tokio::test]
+    async fn a_silent_upstream_does_not_hold_up_the_sweep() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept, then hold the connection open and never reply.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+
+        let mut cfg = http_cfg("silent");
+        if let UpstreamKind::Http {
+            base_url,
+            health_path,
+            timeout_secs,
+            ..
+        } = &mut cfg.kind
+        {
+            *base_url = format!("http://{addr}");
+            *health_path = Some("/healthz".into());
+            *timeout_secs = 60;
+        }
+
+        let ups = Upstreams::from_config(&[cfg]).unwrap();
+        let started = std::time::Instant::now();
+        let down = ups.unhealthy().await;
+        let took = started.elapsed();
+
+        assert_eq!(down, vec!["silent".to_string()], "silence is not answering");
+        assert!(
+            took < PROBE_TIMEOUT * 2,
+            "the probe gave up after {took:?}, not the {PROBE_TIMEOUT:?} it is allowed"
+        );
+    }
 
     fn http_cfg(name: &str) -> UpstreamConfig {
         UpstreamConfig {
