@@ -79,9 +79,35 @@ cargo run --release -p gatehound-app
 `cargo run -p gatehound-app` on its own opens a blank window — nothing is serving
 `localhost:5173`. A release build embeds `ui/dist` instead and needs nothing else running.
 
-Prerequisites: macOS needs the Xcode command line tools; Windows needs the WebView2 runtime;
-Linux needs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev` and `libayatana-appindicator3-dev` (GNOME
-also needs an AppIndicator extension for the tray to appear at all).
+Prerequisites: macOS needs the Xcode command line tools; Windows needs the WebView2 runtime
+(present on Windows 11 and on any up-to-date Windows 10); Linux needs `libwebkit2gtk-4.1-dev`,
+`libgtk-3-dev` and `libayatana-appindicator3-dev` (GNOME also needs an AppIndicator extension
+for the tray to appear at all).
+
+### Platforms
+
+macOS, Windows and Linux, and CI builds and tests all three on every push — the core and the
+headless binary, and the desktop shell. That matters more than it sounds: the places these
+differ are the places nobody thinks about, and building on one platform proves nothing about
+the others.
+
+Three differences worth knowing, rather than finding:
+
+- **A command is spelled differently.** A tool naming a bare command is resolved against
+  `PATHEXT` on Windows, so `cmd = "node"` finds `node.exe`. Resolution happens at startup, so a
+  tool naming a binary this machine does not have is refused then rather than at its first call.
+- **Which Python is Python.** A script registered as `python3` runs under `py -3` on Windows,
+  falling back to `python` — a python.org install ships no `python3.exe`, and Windows reserves
+  that name for a Microsoft Store stub that opens the Store instead of running anything. Those
+  stubs are skipped by name.
+- **Script files are protected by where they are, not by their mode.** On Unix a saved script is
+  written `0600`. Windows has no equivalent here, so the file inherits the ACL of its directory
+  — which is under `%APPDATA%`, already this user's. The half that matters holds on both:
+  nothing marks a script executable, so finding it is not enough to run it.
+
+Two things remain Unix-only, deliberately: the end-to-end CI rig (a shell and curl script), and
+the tests that stand a shell script in for `cloudflared` to make a daemon fail on cue. The
+supervision they exercise is platform-independent Rust; the stand-in is not.
 
 Publishing is optional and pluggable: `publish.via` chooses between a Cloudflare Tunnel,
 `tailscale serve`, or nothing. The default is `auto`, which uses whatever the machine is

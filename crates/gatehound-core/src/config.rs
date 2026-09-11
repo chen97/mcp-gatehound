@@ -342,28 +342,64 @@ impl Default for Config {
 pub fn resolve_command(cmd: &str) -> Result<std::path::PathBuf> {
     let cmd = cmd.trim();
     if cmd.contains('/') || cmd.contains('\\') {
-        let p = std::path::PathBuf::from(cmd);
-        let meta =
-            std::fs::metadata(&p).with_context(|| format!("'{cmd}' is not on this machine"))?;
-        if !meta.is_file() {
-            bail!("'{cmd}' is not a file");
+        for name in spellings(cmd) {
+            let p = std::path::PathBuf::from(&name);
+            match std::fs::metadata(&p) {
+                Ok(m) if m.is_file() => return Ok(p),
+                // A directory at the exact name the operator wrote is a mistake worth naming;
+                // one behind an appended extension is just a miss, so keep looking.
+                Ok(_) if name == cmd => bail!("'{cmd}' is not a file"),
+                _ => {}
+            }
         }
-        return Ok(p);
+        bail!("'{cmd}' is not on this machine");
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
     for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(cmd);
-        if std::fs::metadata(&candidate)
-            .map(|m| m.is_file())
-            .unwrap_or(false)
-        {
-            return Ok(candidate);
+        for name in spellings(cmd) {
+            let candidate = dir.join(&name);
+            if std::fs::metadata(&candidate)
+                .map(|m| m.is_file())
+                .unwrap_or(false)
+            {
+                return Ok(candidate);
+            }
         }
     }
     bail!(
         "'{cmd}' was not found on PATH. Gatehound's PATH is not your shell's — give an absolute \
          path to the binary."
     )
+}
+
+/// Every filename a command might actually have on this platform, most literal first.
+///
+/// On Unix the name is the name. On Windows the file is `node.exe`, not `node`, and which
+/// suffixes count as executable is the user's `PATHEXT` — so a bare name has to be tried against
+/// each of them. Without this, `resolve_command` found nothing for any bare command and, because
+/// it runs at validation time, the gateway refused to start over binaries that were installed.
+#[cfg(windows)]
+fn spellings(cmd: &str) -> Vec<String> {
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let upper = cmd.to_ascii_uppercase();
+    let mut out = vec![cmd.to_string()];
+    // A name that already carries one of them is spelled out; appending a second would be
+    // looking for `node.exe.exe`.
+    if !exts
+        .split(';')
+        .map(str::trim)
+        .any(|e| !e.is_empty() && upper.ends_with(&e.to_ascii_uppercase()))
+    {
+        for e in exts.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+            out.push(format!("{cmd}{e}"));
+        }
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn spellings(cmd: &str) -> Vec<String> {
+    vec![cmd.to_string()]
 }
 
 fn env(key: &str) -> Option<String> {
@@ -674,9 +710,40 @@ mod tests {
 
         // And something that is here passes.
         if let Action::Exec(spec) = &mut cfg.tools[0].action {
-            spec.cmd = "/bin/sh".into();
+            spec.cmd = crate::testing::helper();
         }
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn a_command_resolves_however_this_platform_spells_it() {
+        // The running test binary is `…/deps/gatehound_core-<hash>` on Unix and the same with
+        // `.exe` on Windows, so it exercises the absolute-path branch on both.
+        let me = std::env::current_exe().unwrap();
+        assert!(resolve_command(&me.display().to_string()).is_ok());
+
+        // And the same file named without its extension. On Windows that is how an operator
+        // would naturally write it and what `resolve_command` used to reject; on Unix there is
+        // no extension to drop, so this is the same path again.
+        let stem = me.with_extension("");
+        assert!(
+            resolve_command(&stem.display().to_string()).is_ok(),
+            "{} did not resolve",
+            stem.display()
+        );
+
+        // A directory is not a program, whatever it is called.
+        let dir = me.parent().unwrap().display().to_string();
+        assert!(resolve_command(&dir).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_bare_command_resolves_on_windows() {
+        // `cmd` is `cmd.exe`. Before PATHEXT was honoured this failed, and because it fails at
+        // validation time the gateway refused to start over a program that was right there.
+        assert!(resolve_command("cmd").is_ok());
+        assert!(resolve_command("cmd.exe").is_ok());
     }
 
     #[test]

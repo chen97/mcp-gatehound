@@ -225,9 +225,11 @@ mod tests {
             .collect()
     }
 
+    /// A spec that runs the test helper. Its `cmd` is a real path on whatever this is, so the
+    /// same test exercises the same behaviour on Unix and Windows.
     fn spec(args: &[&str], stdin: Option<&str>) -> ExecSpec {
         ExecSpec {
-            cmd: "/bin/sh".into(),
+            cmd: crate::testing::helper(),
             args: args.iter().map(|s| s.to_string()).collect(),
             stdin: stdin.map(str::to_string),
             timeout_secs: 10,
@@ -276,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn runs_a_command_and_returns_stdout() {
-        let s = spec(&["-c", "printf %s \"$1\"", "sh", "{word}"], None);
+        let s = spec(&["print", "{word}"], None);
         let out = ExecRunner::new(s)
             .run(&vars(&[("word", "hi there")]))
             .await
@@ -287,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn content_reaches_the_child_on_stdin() {
-        let s = spec(&["-c", "cat"], Some("{prompt}"));
+        let s = spec(&["cat"], Some("{prompt}"));
         let out = ExecRunner::new(s)
             .run(&vars(&[("prompt", "line one\nline two")]))
             .await
@@ -297,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_over_the_cap_is_truncated() {
-        let mut s = spec(&["-c", "printf 'x%.0s' $(seq 1 5000)"], None);
+        let mut s = spec(&["bytes", "5000"], None);
         s.max_output_bytes = 100;
         let out = ExecRunner::new(s).run(&vars(&[])).await.unwrap();
         assert_eq!(out.stdout.len(), 100);
@@ -306,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_hanging_command_is_killed_at_the_timeout() {
-        let mut s = spec(&["-c", "sleep 30"], None);
+        let mut s = spec(&["sleep", "30"], None);
         s.timeout_secs = 1;
         let started = std::time::Instant::now();
         let err = ExecRunner::new(s).run(&vars(&[])).await.unwrap_err();
@@ -316,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_command_reports_its_stderr() {
-        let s = spec(&["-c", "echo boom >&2; exit 3"], None);
+        let s = spec(&["fail", "boom"], None);
         let err = ExecRunner::new(s).run(&vars(&[])).await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("boom"), "{msg}");
@@ -324,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrency_is_capped_by_the_semaphore() {
-        let mut s = spec(&["-c", "sleep 1"], None);
+        let mut s = spec(&["sleep", "1"], None);
         s.max_concurrency = 1;
         let runner = Arc::new(ExecRunner::new(s));
         let started = std::time::Instant::now();

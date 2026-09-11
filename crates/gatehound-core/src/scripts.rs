@@ -91,6 +91,18 @@ const SHELLS: &[&str] = &[
     "php",
 ];
 
+/// Whether a resolved path is one of Windows' Microsoft Store aliases rather than a program.
+///
+/// They live in a fixed directory, are zero-length reparse points, and exist whether or not the
+/// thing they stand for is installed — so a PATH lookup finds them and running one opens the
+/// Store. Nothing outside Windows has them.
+fn is_store_stub(path: &Path) -> bool {
+    cfg!(windows)
+        && path
+            .components()
+            .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+}
+
 impl Interpreter {
     pub const ALL: [Interpreter; 3] = [Interpreter::Python3, Interpreter::Node, Interpreter::Deno];
 
@@ -112,6 +124,39 @@ impl Interpreter {
         }
     }
 
+    /// The names this interpreter might go by on PATH, in the order to try them.
+    ///
+    /// One name everywhere except Windows, where a python.org install puts `python.exe` on PATH
+    /// and does not install `python3.exe` at all — while Windows itself reserves `python3.exe`
+    /// (and `python.exe`) under `WindowsApps` for a Microsoft Store stub that opens the Store
+    /// rather than running anything. `py`, the Python Launcher, is the one name that is always
+    /// a real program when it is present.
+    pub fn candidates(self) -> &'static [&'static str] {
+        match self {
+            Interpreter::Python3 if cfg!(windows) => &["py", "python", "python3"],
+            Interpreter::Python3 => &["python3"],
+            Interpreter::Node => &["node"],
+            Interpreter::Deno => &["deno"],
+        }
+    }
+
+    /// The command to spawn for this interpreter on this machine.
+    ///
+    /// Falls back to the canonical name when nothing resolves, so the error a caller sees names
+    /// the thing they expected rather than the last thing we happened to try.
+    pub fn command(self) -> String {
+        for name in self.candidates() {
+            match crate::config::resolve_command(name) {
+                // Skip the Store stubs. They exist as files, so a plain PATH lookup finds them,
+                // and running one opens a shopfront instead of an interpreter.
+                Ok(p) if is_store_stub(&p) => continue,
+                Ok(_) => return (*name).to_string(),
+                Err(_) => continue,
+            }
+        }
+        self.as_str().to_string()
+    }
+
     /// Arguments that precede the script path.
     ///
     /// Deno denies filesystem, network and environment access unless a flag grants it, and
@@ -125,6 +170,20 @@ impl Interpreter {
             Interpreter::Node => &[],
             Interpreter::Deno => &["run", "--no-prompt"],
         }
+    }
+
+    /// `leading_args`, plus whatever the resolved command needs to be the interpreter we meant.
+    ///
+    /// The Python Launcher runs whichever Python it likes unless told; `-3` is what makes
+    /// `Interpreter::Python3` mean Python 3 when the command that resolved was `py`.
+    fn leading_args_for(self, command: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if self == Interpreter::Python3 && Path::new(command).file_stem().is_some_and(|s| s == "py")
+        {
+            out.push("-3".to_string());
+        }
+        out.extend(self.leading_args().iter().map(|s| (*s).to_string()));
+        out
     }
 
     /// True when this interpreter confines a script by default, so the operator can be told
@@ -625,16 +684,12 @@ impl ScriptSpec {
     pub fn lower(&self, def: &ScriptDef, base_dir: &Path) -> Result<ExecSpec> {
         let path = contained(base_dir, &def.relative_path())
             .with_context(|| format!("locating script '{}'", def.name))?;
-        let mut args: Vec<String> = def
-            .interpreter
-            .leading_args()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let command = def.interpreter.command();
+        let mut args = def.interpreter.leading_args_for(&command);
         args.push(path.display().to_string());
         args.extend(self.args.iter().cloned());
         Ok(ExecSpec {
-            cmd: def.interpreter.as_str().to_string(),
+            cmd: command,
             args,
             stdin: self.stdin.clone(),
             timeout_secs: self.timeout_secs,
@@ -678,6 +733,11 @@ pub fn save(
         // an interpreter this config names.
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
+    // On Windows the file inherits the ACL of the directory it lands in, and we do not narrow
+    // it. In practice that directory is under `%APPDATA%`, which is already this user's and not
+    // another standard user's — so the protection is the location rather than the mode. The
+    // half that matters either way holds everywhere: nothing here marks the file executable, so
+    // finding it is not enough to run it.
     Ok(ScriptDef {
         name: name.to_string(),
         interpreter,
@@ -699,6 +759,47 @@ pub fn delete(base_dir: &Path, def: &ScriptDef) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_interpreter_is_looked_for_under_the_names_this_platform_uses() {
+        // Windows has no `python3.exe` from a python.org install, and reserves that name for a
+        // Microsoft Store stub. Looking only for `python3` meant scripts that never ran.
+        let names = Interpreter::Python3.candidates();
+        assert!(names.contains(&"python3"), "{names:?}");
+        assert_eq!(names.len() > 1, cfg!(windows), "{names:?}");
+        if cfg!(windows) {
+            assert_eq!(
+                names[0], "py",
+                "the launcher is the one that is never a stub"
+            );
+        }
+
+        // Node and Deno go by one name everywhere.
+        assert_eq!(Interpreter::Node.candidates(), &["node"]);
+        assert_eq!(Interpreter::Deno.candidates(), &["deno"]);
+
+        // Whatever resolves, the name a script is *filed* under never changes — the window and
+        // the config both read it.
+        assert_eq!(Interpreter::Python3.as_str(), "python3");
+        assert!(!Interpreter::Python3.command().is_empty());
+    }
+
+    #[test]
+    fn the_launcher_is_told_which_python_to_run() {
+        // `py` picks a version of its own unless asked; `-3` is what makes Python3 mean Python 3.
+        assert_eq!(
+            Interpreter::Python3.leading_args_for("py"),
+            vec!["-3".to_string(), "-I".to_string()]
+        );
+        assert_eq!(
+            Interpreter::Python3.leading_args_for("python3"),
+            vec!["-I".to_string()]
+        );
+        assert_eq!(
+            Interpreter::Node.leading_args_for("node"),
+            Vec::<String>::new()
+        );
+    }
 
     fn tmp() -> PathBuf {
         let d = std::env::temp_dir().join(format!("gh-scripts-{}", uuid::Uuid::new_v4()));

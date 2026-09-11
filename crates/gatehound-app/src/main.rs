@@ -210,7 +210,11 @@ async fn set_paused(app: AppHandle, paused: bool) -> Result<(), String> {
     }
     tray::refresh(&app);
     let _ = state.gateway.store.log_admin(
-        if paused { "gateway.pause" } else { "gateway.resume" },
+        if paused {
+            "gateway.pause"
+        } else {
+            "gateway.resume"
+        },
         None,
         if paused {
             "stopped the listener; the gateway answers nothing until it is resumed"
@@ -1126,9 +1130,17 @@ fn save_script(
     // A script is code the gateway will run. Writing one and editing one are different enough
     // to name differently: the second means a body that was reviewed is not the body any more.
     let _ = state.gateway.store.log_admin(
-        if existed { "script.update" } else { "script.create" },
+        if existed {
+            "script.update"
+        } else {
+            "script.create"
+        },
         None,
-        &format!("{} '{name}' ({})", if existed { "rewrote" } else { "wrote" }, interp.as_str()),
+        &format!(
+            "{} '{name}' ({})",
+            if existed { "rewrote" } else { "wrote" },
+            interp.as_str()
+        ),
     );
 
     script_views(&cfg)
@@ -1169,10 +1181,11 @@ fn delete_script(state: tauri::State<'_, AppState>, name: String) -> Result<(), 
         .unwrap_or_else(|| PathBuf::from("."));
     gatehound_core::scripts::delete(&base, &def).map_err(err)?;
     write_config(&state, &cfg)?;
-    let _ = state
-        .gateway
-        .store
-        .log_admin("script.delete", None, &format!("removed '{name}' and its body"));
+    let _ = state.gateway.store.log_admin(
+        "script.delete",
+        None,
+        &format!("removed '{name}' and its body"),
+    );
     Ok(())
 }
 

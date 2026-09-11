@@ -192,13 +192,14 @@ mod tests {
     use super::*;
     use crate::config::{ExecSpec, RateLimit, UpstreamConfig, UpstreamKind};
 
+    /// A tool that runs the test helper, so the same fixtures run on Unix and Windows.
     fn exec_tool(name: &str, args: &[&str]) -> ToolConfig {
         ToolConfig {
             name: name.into(),
             description: String::new(),
             input_schema: None,
             action: Action::Exec(ExecSpec {
-                cmd: "/bin/sh".into(),
+                cmd: crate::testing::helper(),
                 args: args.iter().map(|s| s.to_string()).collect(),
                 stdin: None,
                 timeout_secs: 10,
@@ -251,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn exec_actions_fill_only_declared_placeholders() {
-        let tool = exec_tool("echo", &["-c", "printf %s \"$1\"", "sh", "{word}"]);
+        let tool = exec_tool("echo", &["print", "{word}"]);
         let (e, _) = engine(vec![tool.clone()]);
         let out = e
             .dispatch(&tool, &json!({ "word": "hello" }))
@@ -265,7 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn structured_arguments_are_refused_for_exec_actions() {
-        let tool = exec_tool("echo", &["-c", "true"]);
+        let tool = exec_tool("echo", &["print"]);
         let (e, _) = engine(vec![tool.clone()]);
         let err = e
             .dispatch(&tool, &json!({ "obj": { "a": 1 } }))
@@ -276,7 +277,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_idempotent_tool_needs_a_key() {
-        let mut tool = exec_tool("send", &["-c", "printf '{{\"message_id\":\"m1\"}}'"]);
+        let mut tool = exec_tool("send", &["print", "{{\"message_id\":\"m1\"}}"]);
         tool.idempotent = true;
         let (e, _) = engine(vec![tool.clone()]);
         let err = e
@@ -290,13 +291,7 @@ mod tests {
     async fn a_repeated_idempotency_key_does_not_act_twice() {
         // The "upstream" appends to a file, so a second execution would be visible.
         let marker = std::env::temp_dir().join(format!("gh-idem-{}", uuid::Uuid::new_v4()));
-        let mut tool = exec_tool(
-            "send",
-            &[
-                "-c",
-                &format!("echo x >> {} ; printf '{{{{}}}}'", marker.display()),
-            ],
-        );
+        let mut tool = exec_tool("send", &["append", &marker.display().to_string()]);
         tool.idempotent = true;
         let (e, _) = engine(vec![tool.clone()]);
 
@@ -314,14 +309,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_action_does_not_burn_the_idempotency_key() {
-        let mut tool = exec_tool("send", &["-c", "exit 1"]);
+        let mut tool = exec_tool("send", &["fail", "the upstream is down"]);
         tool.idempotent = true;
         let (e, _) = engine(vec![tool.clone()]);
         let args = json!({ "chat_id": "c", "text": "hi", "idempotency_key": "key-2" });
         assert!(e.dispatch(&tool, &args).await.is_err());
 
         // The same key still works once the upstream recovers.
-        let mut ok_tool = exec_tool("send", &["-c", "printf '{{}}'"]);
+        let mut ok_tool = exec_tool("send", &["print", "{{}}"]);
         ok_tool.idempotent = true;
         let (e2, store) = engine(vec![ok_tool.clone()]);
         assert!(store.find_call("key-2").unwrap().is_none());
@@ -330,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limited_tools_refuse_once_the_cap_is_spent() {
-        let mut tool = exec_tool("ping", &["-c", "true"]);
+        let mut tool = exec_tool("ping", &["print"]);
         tool.rate_limit = Some(RateLimit {
             per_hour: 1,
             min_spacing_secs: 0,
@@ -458,7 +453,7 @@ mod tests {
         // The check used to read `chat_id` and `text`, so a tool with neither hashed the empty
         // string every time and two different calls under one key compared equal. A note write
         // is exactly that tool.
-        let mut tool = exec_tool("brain_append", &["-c", "printf '{{}}'"]);
+        let mut tool = exec_tool("brain_append", &["print", "{{}}"]);
         tool.idempotent = true;
         let (e, _) = engine(vec![tool.clone()]);
 
@@ -480,9 +475,9 @@ mod tests {
 
     #[tokio::test]
     async fn one_key_used_by_two_different_tools_is_refused() {
-        let mut a = exec_tool("brain_append", &["-c", "printf '{{}}'"]);
+        let mut a = exec_tool("brain_append", &["print", "{{}}"]);
         a.idempotent = true;
-        let mut b = exec_tool("brain_create", &["-c", "printf '{{}}'"]);
+        let mut b = exec_tool("brain_create", &["print", "{{}}"]);
         b.idempotent = true;
         let (e, _) = engine(vec![a.clone(), b.clone()]);
 
@@ -497,8 +492,8 @@ mod tests {
         let mut tool = exec_tool(
             "brain_append",
             &[
-                "-c",
-                "printf '{{\"path\":\"Planning/Note.md\",\"commit\":\"a1b2c3d\"}}'",
+                "print",
+                "{{\"path\":\"Planning/Note.md\",\"commit\":\"a1b2c3d\"}}",
             ],
         );
         tool.idempotent = true;

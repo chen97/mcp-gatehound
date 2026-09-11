@@ -55,6 +55,40 @@ pub fn default_db_path() -> PathBuf {
 }
 
 /// Everything the gateway owns. Shells hold an `Arc<Gateway>` and nothing else.
+/// Fixtures shared by this crate's own tests and its integration tests.
+///
+/// Only the exec paths need this, and only because they spawn something real. Everything here
+/// resolves to the same behaviour on Unix and Windows, which is what lets one suite cover both.
+#[doc(hidden)]
+pub mod testing {
+    /// The helper program, by absolute path.
+    ///
+    /// `CARGO_BIN_EXE_*` is set for integration tests and not for unit tests, so resolve it from
+    /// the running test binary instead: `target/<profile>/deps/<test>` sits one level below
+    /// `target/<profile>/examples/`, where cargo puts a built example.
+    pub fn helper() -> String {
+        let mut p = std::env::current_exe().expect("the running test binary has a path");
+        p.pop();
+        if p.file_name().is_some_and(|n| n == "deps") {
+            p.pop();
+        }
+        p.push("examples");
+        p.push(format!("testproc{}", std::env::consts::EXE_SUFFIX));
+        assert!(
+            p.exists(),
+            "the testproc example is missing at {} — `cargo test` builds it; a bare \
+             `cargo test --lib` does not",
+            p.display()
+        );
+        p.display().to_string()
+    }
+
+    /// Arguments for the helper, as owned strings.
+    pub fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+}
+
 pub struct Gateway {
     pub cfg: Arc<Config>,
     pub store: Arc<Store>,

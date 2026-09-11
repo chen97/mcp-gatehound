@@ -12,8 +12,16 @@ env:
 
 jobs:
   rust:
-    name: Rust
-    runs-on: ubuntu-latest
+    # The core and the headless binary are meant to run wherever Rust does, and the places they
+    # differ are exactly the places nobody thinks about: how a command is spelled on PATH, which
+    # Python is called Python, what a path separator is. Building on one platform proves none of
+    # that, so all three build and test.
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -24,6 +32,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Formatting
+        if: runner.os == 'Linux'
         run: cargo fmt --all --check
 
       # The default workspace members are gatehound-core and gatehound-headless, which build
@@ -226,7 +235,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -250,7 +259,10 @@ jobs:
       # holding tauri.conf.json. Running the exact string out of the config, from that
       # directory, is what catches a hook that is only wrong at bundle time — which is a
       # failure nobody sees until they try to produce an installable app.
+      # `sh -c` and the heredoc-ish quoting below are POSIX; the build itself is covered on
+      # Windows by the frontend's own `npm run build` in the step after it.
       - name: The frontend builds the way Tauri builds it
+        if: runner.os != 'Windows'
         working-directory: crates/gatehound-app
         run: |
           hook=$(python3 -c "import json; print(json.load(open('tauri.conf.json'))['build']['beforeBuildCommand'])")
@@ -261,7 +273,13 @@ jobs:
       # and click handlers can only go on one built in code. Declaring it in both places puts
       # two icons in the menubar: one that looks right and does nothing, and one that works
       # but is invisible. Only the code may declare it.
+      - name: The frontend builds
+        if: runner.os == 'Windows'
+        working-directory: crates/gatehound-app/ui
+        run: npm run build
+
       - name: Exactly one tray icon is declared
+        if: runner.os != 'Windows'
         working-directory: crates/gatehound-app
         run: |
           set -eu

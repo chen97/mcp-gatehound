@@ -27,6 +27,18 @@ fn the_example_config_parses_and_validates() {
     // The example deliberately keeps credentials out of the file; supply what the environment
     // would have provided.
     cfg.auth.bearer_token = Some("0123456789abcdef0123".into());
+
+    // Its local-command example names `/bin/df`, which is a real command on the machines the
+    // example is written for and not a path Windows has. Validation resolves commands, so point
+    // that one at something that is here — everything else the example demonstrates is checked
+    // as shipped.
+    if cfg!(windows) {
+        for t in &mut cfg.tools {
+            if let Action::Exec(spec) = &mut t.action {
+                spec.cmd = std::env::current_exe().unwrap().display().to_string();
+            }
+        }
+    }
     cfg.validate().expect("the shipped example must be valid");
 
     assert!(

@@ -158,7 +158,10 @@ rate_limit = { per_hour = 60, min_spacing_secs = 2 }
 idempotent = true
 input_schema = { type = "object", properties = { id = { type = "string" }, text = { type = "string" }, idempotency_key = { type = "string" } }, required = ["id", "text", "idempotency_key"] }
 
-# A local command. cmd and args come from this file; caller input only ever fills declared
+# A local command. On Windows name a program that is actually there — `cmd = "where.exe"`,
+# say — and give a full path when it is not on PATH; a tool naming a binary this machine does
+# not have is refused at startup rather than at its first call.
+# cmd and args come from this file; caller input only ever fills declared
 # {placeholders}, and it fills them as separate argv elements — there is no shell. Long or
 # untrusted content belongs in `stdin`, never in argv.
 [[tool]]

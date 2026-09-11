@@ -1134,6 +1134,11 @@ fi
         }
     }
 
+    // Unix only: these stand a shell script in for `cloudflared`, which is how you get a
+    // daemon that exits on cue, floods stderr, or dies after a delay without installing one.
+    // Windows has no shebang, so the technique does not travel — the supervision they exercise
+    // is platform-independent Rust, and is covered on the platforms that can run the stand-in.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_daemon_that_exits_at_once_is_not_reported_as_published() {
         // The failure that matters: `spawn` succeeds because the binary is there, then
@@ -1246,6 +1251,11 @@ fi
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // Unix only: these stand a shell script in for `cloudflared`, which is how you get a
+    // daemon that exits on cue, floods stderr, or dies after a delay without installing one.
+    // Windows has no shebang, so the technique does not travel — the supervision they exercise
+    // is platform-independent Rust, and is covered on the platforms that can run the stand-in.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_chatty_daemon_is_not_left_blocked_on_a_pipe_nobody_reads() {
         // The failure this guards against is invisible: a backend whose stderr is piped and
@@ -1313,6 +1323,11 @@ fi
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // Unix only: these stand a shell script in for `cloudflared`, which is how you get a
+    // daemon that exits on cue, floods stderr, or dies after a delay without installing one.
+    // Windows has no shebang, so the technique does not travel — the supervision they exercise
+    // is platform-independent Rust, and is covered on the platforms that can run the stand-in.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_daemon_that_gives_up_later_stops_being_reported_as_published() {
         // Surviving the grace window is not a promise to keep running. Without noticing the

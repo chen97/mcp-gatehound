@@ -809,15 +809,21 @@ action = { type = "exec", cmd = "/nowhere/bin/claude", args = ["-p", "--system-p
             .any(|m| m.declared == "-p" || m.declared == "1"));
     }
 
+    /// A path, spelled the way TOML wants it. Windows separators need escaping, and a test
+    /// that hardcodes `/bin/sh` is a test that only runs on one kind of machine.
+    fn toml_path(p: &str) -> String {
+        format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
     #[test]
     fn a_command_that_exists_here_is_not_reported_missing() {
+        let cmd = toml_path(&crate::testing::helper());
         let with_exec = format!(
-            "{SAMPLE}\n{}",
-            r#"
+            r#"{SAMPLE}
 [[tool]]
 name = "disk"
 description = "Free space."
-action = { type = "exec", cmd = "/bin/sh", args = ["-c", "df -h"] }
+action = {{ type = "exec", cmd = {cmd}, args = ["--version"] }}
 "#
         );
         let pack: Pack = toml::from_str(&with_exec).unwrap();
@@ -838,17 +844,17 @@ action = { type = "exec", cmd = "/nowhere/bin/claude", args = ["-p", "--system-p
         let mut pack: Pack = toml::from_str(&with_exec).unwrap();
         let missing = missing_files(&pack);
 
-        resolve_file(&mut pack, &missing[0], "/bin/sh").unwrap();
-        resolve_file(&mut pack, &missing[1], "/etc/hostname").unwrap();
+        // Two paths that exist on whatever this is running on.
+        let here = crate::testing::helper();
+        let also_here = std::env::current_exe().unwrap().display().to_string();
+        resolve_file(&mut pack, &missing[0], &here).unwrap();
+        resolve_file(&mut pack, &missing[1], &also_here).unwrap();
 
         let Action::Exec(spec) = &pack.tools.last().unwrap().action else {
             panic!("action changed shape")
         };
-        assert_eq!(spec.cmd, "/bin/sh");
-        assert_eq!(
-            spec.args,
-            vec!["-p", "--system-prompt-file", "/etc/hostname"]
-        );
+        assert_eq!(spec.cmd, here);
+        assert_eq!(spec.args, vec!["-p", "--system-prompt-file", &also_here]);
         assert!(
             missing_files(&pack).is_empty(),
             "nothing should still be missing"

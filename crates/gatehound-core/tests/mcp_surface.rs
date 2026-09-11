@@ -64,13 +64,8 @@ fn echo_tool() -> ToolConfig {
             "required": ["word"]
         })),
         action: Action::Exec(ExecSpec {
-            cmd: "/bin/sh".into(),
-            args: vec![
-                "-c".into(),
-                "printf %s \"$1\"".into(),
-                "sh".into(),
-                "{word}".into(),
-            ],
+            cmd: gatehound_core::testing::helper(),
+            args: vec!["print".into(), "{word}".into()],
             stdin: None,
             timeout_secs: 10,
             max_output_bytes: 4096,
@@ -89,8 +84,8 @@ fn secret_tool() -> ToolConfig {
         description: "A tool most identities may not see".into(),
         input_schema: None,
         action: Action::Exec(ExecSpec {
-            cmd: "/bin/sh".into(),
-            args: vec!["-c".into(), "printf ok".into()],
+            cmd: gatehound_core::testing::helper(),
+            args: vec!["print".into(), "ok".into()],
             stdin: None,
             timeout_secs: 10,
             max_output_bytes: 4096,
@@ -110,9 +105,8 @@ fn once_tool() -> ToolConfig {
         description: "Acts at most once per idempotency key".into(),
         input_schema: None,
         action: Action::Exec(ExecSpec {
-            cmd: "/bin/sh".into(),
-            // No braces: `{...}` in an exec argument is a template placeholder, not text.
-            args: vec!["-c".into(), "printf sent".into()],
+            cmd: gatehound_core::testing::helper(),
+            args: vec!["print".into(), "sent".into()],
             stdin: None,
             timeout_secs: 10,
             max_output_bytes: 4096,
@@ -846,7 +840,11 @@ async fn a_replay_is_logged_as_a_replay() {
         .collect();
     assert_eq!(rows.len(), 2, "both attempts are logged");
     // `recent_requests` is newest first.
-    assert_eq!(rows[0].replayed, Some(true), "the second one acted on nothing");
+    assert_eq!(
+        rows[0].replayed,
+        Some(true),
+        "the second one acted on nothing"
+    );
     assert_eq!(rows[1].replayed, Some(false), "the first one acted");
 
     // A tool that is not idempotent has no such question to answer.
