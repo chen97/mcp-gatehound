@@ -756,3 +756,77 @@ pre {
 @media (prefers-reduced-motion: reduce) {
   .arrived { animation: none; }
 }
+
+/* ---- Modals -------------------------------------------------------------------------
+   Everything that used to be a window dialog. Three sizes off one panel: a confirmation is a
+   sentence and two buttons, a form is a column of fields, and the middle one exists for the
+   messages that are a paragraph rather than a line.
+
+   Occasional, and it is the moment the screen is asking you something — which is the tier the
+   frequency rule allows an entrance, so it gets one: 200ms, eased for arrival, scaling from
+   0.97 rather than from nothing, because nothing in the world appears from zero size. */
+
+.modal-back {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--s5);
+  background: color-mix(in srgb, #000 52%, transparent);
+  backdrop-filter: blur(2px);
+  animation: modal-back-in 160ms var(--ease-out) both;
+}
+.modal-back.leaving { animation: modal-back-in 140ms var(--ease-out) reverse forwards; }
+@keyframes modal-back-in { from { opacity: 0; } to { opacity: 1; } }
+
+.modal {
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  box-shadow: 0 24px 64px -24px rgba(0,0,0,.6), var(--shadow);
+  padding: var(--s5);
+  width: 100%; max-height: calc(100vh - var(--s6) * 2);
+  display: flex; flex-direction: column; gap: var(--s3);
+  animation: modal-in 220ms var(--ease-out) both;
+}
+.modal-back.leaving .modal { animation: modal-in 140ms var(--ease-out) reverse forwards; }
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(.97) translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* A confirmation, a paragraph, a form. */
+.modal-sm { max-width: 420px; }
+.modal-md { max-width: 560px; }
+.modal-lg { max-width: 660px; }
+
+.modal h3 { margin: 0; font-size: 15px; line-height: 1.4; }
+.modal-p { margin: 0; color: var(--mut); line-height: 1.55; white-space: pre-wrap; }
+.modal-p + .modal-p { margin-top: calc(var(--s2) * -1); }
+
+/* The only part that scrolls, so the title and the buttons stay put however long the form is —
+   a dialog whose confirm button is below the fold is a dialog you cannot answer. */
+.modal-form {
+  display: flex; flex-direction: column; gap: var(--s4);
+  overflow-y: auto; margin: var(--s1) 0;
+  padding-right: var(--s2);
+}
+.modal-field { display: flex; flex-direction: column; gap: var(--s2); }
+.modal-label { font-weight: 600; font-size: 12.5px; }
+.modal-label .req {
+  color: var(--mut); font-weight: 500; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .05em; margin-left: var(--s1);
+}
+.modal-hint { color: var(--mut); font-size: 11.5px; line-height: 1.5; }
+.modal-field input, .modal-field textarea { width: 100%; }
+.modal-field textarea {
+  resize: vertical; min-height: 68px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+}
+
+.modal-foot {
+  display: flex; justify-content: flex-end; gap: var(--s2);
+  margin-top: var(--s2); padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal-back, .modal { animation-name: modal-back-in; animation-duration: 120ms; }
+  .modal-back.leaving, .modal-back.leaving .modal { animation-duration: 100ms; }
+}

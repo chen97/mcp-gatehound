@@ -60,7 +60,15 @@ lines.forEach((line, i) => {
   const at = `src/main.ts:${i + 1}`;
   // Writing innerHTML directly skips the "has anything actually changed?" check, so the
   // screen rebuilds on every read whether or not it needed to.
-  if (/\.innerHTML\s*=/.test(line) && !/^\s*el\.innerHTML = html;/.test(line)) {
+  // One exemption, and it has to say so on the line: an element built once and thrown away —
+  // a modal, say — is not a screen, has nothing to diff against, and cannot redraw on a timer
+  // because nothing re-renders it. Requiring the marker keeps every such case visible here
+  // rather than letting the rule quietly rot.
+  if (
+    /\.innerHTML\s*=/.test(line) &&
+    !/^\s*el\.innerHTML = html;/.test(line) &&
+    !/built once, never repainted/.test(`${lines[i - 1] ?? ""}\n${line}`)
+  ) {
     problems.push(`${at}  writes innerHTML directly — go through paint(el, html)`);
   }
   // A relative time inside markup changes the markup, so any list holding one repaints on a

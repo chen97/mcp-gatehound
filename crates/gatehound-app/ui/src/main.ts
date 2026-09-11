@@ -1275,39 +1275,225 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
 
 /// Whether rebuilding this screen would throw away something half-typed. Same rule as the
 /// Network screen: a URL or a token being entered outranks a five-second refresh.
-/// Ask a yes/no question, natively.
+// ---- modals -----------------------------------------------------------------------------
+//
+// Everything that used to be a window dialog happens here instead. The platform ones were
+// unreliable — whether a webview draws `confirm()` is its business, and a confirmation that
+// silently does not appear is worse than none — and once they were going through the native
+// plugin they were reliable but foreign: a system sheet in the middle of a dark window, placed
+// by the OS, styled by the OS, and incapable of holding a form.
+//
+// One dialog at a time, by construction: a second call while one is open waits for it.
+
+type ModalSize = "sm" | "md" | "lg";
+
+interface Field {
+  name: string;
+  label: string;
+  value?: string;
+  hint?: string;
+  placeholder?: string;
+  multiline?: boolean;
+  required?: boolean;
+}
+
+let openModal: (() => void) | null = null;
+
+/// Split a message written for a one-line dialog into a lead and the rest.
 ///
-/// The window's own `confirm()` is not dependable in a webview: whether it draws anything is
-/// the platform's business, and a confirmation that silently does not appear is worse than
-/// none — the caller reads a return value nobody was asked for, and something irreversible
-/// goes ahead as though it had been approved. The file picker already goes through the native
-/// dialog; so should every question that gates a destructive action.
+/// The existing calls are all "what is happening?\n\nwhat that means", which is exactly a title
+/// and a body — so they keep reading correctly without every call site being rewritten.
+function splitMessage(message: string): { lead: string; rest: string[] } {
+  const parts = message.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  return { lead: parts[0] ?? "", rest: parts.slice(1) };
+}
+
+function fieldHtml(f: Field): string {
+  const input = f.multiline
+    ? `<textarea id="mf-${esc(f.name)}" rows="3" placeholder="${esc(f.placeholder ?? "")}">${esc(f.value ?? "")}</textarea>`
+    : `<input id="mf-${esc(f.name)}" type="text" value="${esc(f.value ?? "")}" placeholder="${esc(f.placeholder ?? "")}" />`;
+  return `<label class="modal-field">
+    <span class="modal-label">${esc(f.label)}${f.required ? ` <span class="req">required</span>` : ""}</span>
+    ${input}
+    ${f.hint ? `<span class="modal-hint">${esc(f.hint)}</span>` : ""}
+  </label>`;
+}
+
+/// Put a dialog on screen and resolve with what the operator chose.
 ///
-/// Falls back to the built-in when the bridge is absent, so the UI still runs in a plain
-/// browser for development.
+/// `fields` turns it into a form; without them it is a confirmation. `cancel: null` makes it a
+/// message with nothing to decline.
+function showModal<T>(o: {
+  title: string;
+  body?: string[];
+  fields?: Field[];
+  confirm: string;
+  cancel: string | null;
+  danger?: boolean;
+  size?: ModalSize;
+  read: (panel: HTMLElement) => T;
+}): Promise<T | null> {
+  const root = document.querySelector<HTMLElement>("#modal-root");
+  if (!root) return Promise.resolve(null);
+
+  // Queue rather than stack. Two dialogs at once is a question nobody can answer in order, and
+  // the second would land on top of the first's focus trap.
+  const previous = openModal;
+  return new Promise<T | null>((resolve) => {
+    const start = (): void => {
+      const size = o.size ?? (o.fields ? "lg" : (o.body?.join("").length ?? 0) > 260 ? "md" : "sm");
+      const returnFocus = document.activeElement as HTMLElement | null;
+      const wrap = document.createElement("div");
+      wrap.className = "modal-back";
+      // built once, never repainted — a fresh node with nothing to diff against.
+      wrap.innerHTML = `
+        <div class="modal modal-${size}" role="${o.fields ? "dialog" : "alertdialog"}"
+             aria-modal="true" aria-labelledby="modal-title">
+          <h3 id="modal-title">${esc(o.title)}</h3>
+          ${(o.body ?? []).map((p) => `<p class="modal-p">${esc(p)}</p>`).join("")}
+          ${o.fields ? `<div class="modal-form">${o.fields.map(fieldHtml).join("")}</div>` : ""}
+          <div class="modal-foot">
+            ${o.cancel ? `<button class="ghost" data-act="cancel">${esc(o.cancel)}</button>` : ""}
+            <button class="${o.danger ? "danger" : "primary"}" data-act="ok">${esc(o.confirm)}</button>
+          </div>
+        </div>`;
+      root.appendChild(wrap);
+      const panel = wrap.querySelector<HTMLElement>(".modal")!;
+
+      let closed = false;
+      const close = (value: T | null): void => {
+        if (closed) return;
+        closed = true;
+        document.removeEventListener("keydown", onKey, true);
+        wrap.classList.add("leaving");
+        // Removed when the exit finishes, so it is not yanked out from under its own animation.
+        window.setTimeout(() => wrap.remove(), 160);
+        openModal = null;
+        returnFocus?.focus?.();
+        resolve(value);
+      };
+
+      const onKey = (e: KeyboardEvent): void => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          close(null);
+          return;
+        }
+        // Enter submits, except inside a textarea where it is a newline somebody meant.
+        if (e.key === "Enter" && !(e.target instanceof HTMLTextAreaElement) && !e.shiftKey) {
+          e.preventDefault();
+          close(o.read(panel));
+          return;
+        }
+        if (e.key !== "Tab") return;
+        // Focus stays inside: tabbing out of a modal and typing into the page behind it is the
+        // classic way to answer a question you cannot see.
+        const stops = Array.from(
+          panel.querySelectorAll<HTMLElement>("button, input, textarea, select, [href]"),
+        ).filter((el) => !el.hasAttribute("disabled"));
+        if (stops.length === 0) return;
+        const first = stops[0];
+        const last = stops[stops.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      };
+
+      document.addEventListener("keydown", onKey, true);
+      panel.querySelector<HTMLElement>('[data-act="ok"]')?.addEventListener("click", () =>
+        close(o.read(panel)),
+      );
+      panel.querySelector<HTMLElement>('[data-act="cancel"]')?.addEventListener("click", () =>
+        close(null),
+      );
+      // The backdrop dismisses, but only when the click began on it: a drag that started inside
+      // a text field and ended outside is a selection, not a decision.
+      wrap.addEventListener("mousedown", (e) => {
+        if (e.target === wrap) wrap.dataset.fromBackdrop = "1";
+      });
+      wrap.addEventListener("click", (e) => {
+        if (e.target === wrap && wrap.dataset.fromBackdrop === "1") close(null);
+        delete wrap.dataset.fromBackdrop;
+      });
+
+      // A form wants the first field; a question wants its answer button.
+      const focusFirst =
+        panel.querySelector<HTMLElement>(".modal-form input, .modal-form textarea") ??
+        panel.querySelector<HTMLElement>('[data-act="ok"]');
+      requestAnimationFrame(() => focusFirst?.focus());
+      openModal = () => close(null);
+    };
+
+    if (previous) {
+      previous();
+      window.setTimeout(start, 170);
+    } else {
+      start();
+    }
+  });
+}
+
+/// Ask a yes/no question.
 async function ask(message: string, title?: string): Promise<boolean> {
-  try {
-    const answer = await invoke<unknown>("ask", { message, title: title ?? null });
-    // Only a real yes or no counts. A bridge that resolves with something else has not asked
-    // anybody anything, and reading that as "no" would be the same silent failure in a new
-    // costume — an operator clicking Revoke and watching nothing happen.
-    if (typeof answer === "boolean") return answer;
-  } catch {
-    // Falls through to the built-in.
-  }
-  return window.confirm(message);
+  const { lead, rest } = splitMessage(message);
+  const answer = await showModal<boolean>({
+    title: title ?? lead,
+    body: title ? [lead, ...rest] : rest,
+    confirm: "Yes",
+    cancel: "Cancel",
+    danger: /remove|delete|revoke|discard|never/i.test(lead),
+    read: () => true,
+  });
+  return answer === true;
 }
 
 /// Say something and wait until it has been dismissed.
 async function say(message: string, title?: string): Promise<void> {
-  try {
-    await invoke("say", { message, title: title ?? null });
-  } catch {
-    window.alert(message);
-  }
+  const { lead, rest } = splitMessage(message);
+  await showModal<boolean>({
+    title: title ?? lead,
+    body: title ? [lead, ...rest] : rest,
+    confirm: "OK",
+    cancel: null,
+    read: () => true,
+  });
 }
 
-/// Whether this element holds something half-entered that a repaint would discard.
+/// Ask for several values at once.
+///
+/// The alternative was a chain of one-line prompts, which asks for a shape nobody can see: you
+/// answer the second question without being able to check the first, and cancelling halfway
+/// leaves the earlier answers nowhere.
+async function form(
+  title: string,
+  fields: Field[],
+  o?: { body?: string[]; confirm?: string; size?: ModalSize },
+): Promise<Record<string, string> | null> {
+  return showModal<Record<string, string>>({
+    title,
+    body: o?.body,
+    fields,
+    confirm: o?.confirm ?? "Save",
+    cancel: "Cancel",
+    size: o?.size,
+    read: (panel) => {
+      const out: Record<string, string> = {};
+      for (const f of fields) {
+        const el = panel.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+          `#mf-${CSS.escape(f.name)}`,
+        );
+        out[f.name] = el?.value ?? "";
+      }
+      return out;
+    },
+  });
+}
+
+/// Whether this element holds something half-entered that a repaint would discard./// Whether this element holds something half-entered that a repaint would discard.
 ///
 /// A text field does; a checkbox does not. A tick is a finished decision, and the screen has to
 /// redraw to act on it — treating the box as "still being edited" left the pack consent boxes
@@ -2175,35 +2361,55 @@ function wireScripts(list: ScriptView[]): void {
 /// Deliberately separate from writing the script: one script can back several tools with
 /// different arguments, and policy attaches to the tool a caller names, not to the file.
 async function exposeScript(script: string): Promise<void> {
-  const tool = prompt(
-    `Tool name for ${script} — this is what a client calls.\n\n` +
-      `Arguments are declared next, as a comma-separated argv template.`,
-    `${script.replace(/-/g, "_")}`,
+  const answers = await form(
+    `Expose ${script} as a tool`,
+    [
+      {
+        name: "tool",
+        label: "Tool name",
+        value: script.replace(/-/g, "_"),
+        hint: "What a client calls. Policy attaches to this, not to the script.",
+        required: true,
+      },
+      {
+        name: "description",
+        label: "Description",
+        placeholder: "what a caller should understand this does",
+        hint: "One line, shown in the client's tool list.",
+      },
+      {
+        name: "args",
+        label: "Arguments",
+        placeholder: "append,--uid,{uid},--heading,{heading}",
+        hint: "Comma separated, one argv element each. A {name} is filled from the caller's argument of that name.",
+      },
+      {
+        name: "stdin",
+        label: "Standard input",
+        value: "{text}",
+        hint: "Long content belongs here rather than in an argument. Leave blank for nothing.",
+      },
+    ],
+    { confirm: "Expose it" },
   );
-  if (!tool) return;
-  const argLine = prompt(
-    `Arguments for ${tool}, comma-separated.\n\n` +
-      `A {name} is filled from the caller's argument of that name. Long content belongs on ` +
-      `standard input, not here.\n\nExample:  append,--uid,{uid},--heading,{heading}`,
-    "",
-  );
-  if (argLine === null) return;
-  const stdin = prompt(
-    `What goes on standard input? A template like {text}, or blank for nothing.`,
-    "{text}",
-  );
-  if (stdin === null) return;
+  if (!answers) return;
+
+  const tool = answers.tool.trim();
+  if (!tool) {
+    await say("A tool needs a name — that is what a client calls and what policy attaches to.");
+    return;
+  }
 
   try {
     const result = await invoke<ApplyResult>("add_script_tool", {
       tool,
       script,
-      description: prompt(`One line describing ${tool}, for the client's tool list.`, "") ?? "",
-      args: argLine
+      description: answers.description,
+      args: answers.args
         .split(",")
         .map((a) => a.trim())
         .filter((a) => a.length > 0),
-      stdin: stdin.trim() === "" ? null : stdin,
+      stdin: answers.stdin.trim() === "" ? null : answers.stdin,
       inputSchema: null,
       onFirstCall: "ask" as Decision,
     });
@@ -2216,7 +2422,7 @@ async function exposeScript(script: string): Promise<void> {
       await invoke("restart_app");
     }
   } catch (e) {
-    void say(String(e));
+    await say(String(e));
     return;
   }
   void refresh();

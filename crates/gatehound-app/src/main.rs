@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+use tauri_plugin_dialog::DialogExt;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -1173,54 +1173,6 @@ fn write_config(state: &tauri::State<'_, AppState>, cfg: &Config) -> Result<(), 
         .map_err(err)
 }
 
-// ---- dialogs -------------------------------------------------------------------------
-//
-// The window's own `confirm()` and `alert()` are not dependable here. Whether the webview
-// draws them is the platform's business, not ours, and a confirmation that silently does not
-// appear is worse than none: the caller reads a return value that nobody was asked for, and a
-// destructive action proceeds as though it had been approved. The file picker and the startup
-// error already go through the dialog plugin; so should every question that gates something
-// irreversible.
-
-/// Start a dialog already parented to the window, when there is one.
-///
-/// Without a parent the dialog is modal to the application rather than to the window, and the
-/// platform puts it wherever it likes — on a Mac with two displays, that is the screen with the
-/// menu bar, which need not be the screen the window is on. A question can then appear behind
-/// you while the window you were looking at sits there waiting on an answer nobody can see.
-///
-/// With a parent it is window-modal: a sheet on macOS, and on every platform it opens on the
-/// display its window occupies. The parent is looked up each time rather than cached, because
-/// the window is hidden on close and rebuilt from the tray.
-fn dialog_on_window(
-    app: &AppHandle,
-    message: String,
-) -> tauri_plugin_dialog::MessageDialogBuilder<tauri::Wry> {
-    let builder = app.dialog().message(message);
-    match app.get_webview_window("main") {
-        Some(w) => builder.parent(&w),
-        None => builder,
-    }
-}
-
-/// Ask a yes/no question. Returns what the operator chose.
-#[tauri::command]
-async fn ask(app: AppHandle, message: String, title: Option<String>) -> bool {
-    dialog_on_window(&app, message)
-        .title(title.unwrap_or_else(|| "MCP Gatehound".into()))
-        .buttons(MessageDialogButtons::OkCancel)
-        .blocking_show()
-}
-
-/// Tell the operator something. Returns once it has been dismissed, so a caller can rely on it
-/// having been read before it carries on.
-#[tauri::command]
-async fn say(app: AppHandle, message: String, title: Option<String>) {
-    dialog_on_window(&app, message)
-        .title(title.unwrap_or_else(|| "MCP Gatehound".into()))
-        .blocking_show();
-}
-
 #[tauri::command]
 fn inspect_pack(state: tauri::State<'_, AppState>, path: String) -> Result<PackPlan, String> {
     let loaded = Pack::load(Path::new(&path)).map_err(err)?;
@@ -1515,8 +1467,6 @@ fn main() {
             save_script,
             delete_script,
             add_script_tool,
-            ask,
-            say,
         ])
         .setup(|app| {
             // An accessory app that dies in setup leaves no Dock icon, no window and no
