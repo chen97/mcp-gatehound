@@ -798,10 +798,19 @@ fn config_path(state: tauri::State<'_, AppState>) -> String {
     state.config_path.display().to_string()
 }
 
+/// A file picker parented to the window, for the same reason as `dialog_on_window`: it should
+/// open on the display the window is on, not on whichever one the platform considers active.
+fn file_dialog_on_window(app: &AppHandle) -> tauri_plugin_dialog::FileDialogBuilder<tauri::Wry> {
+    let builder = app.dialog().file();
+    match app.get_webview_window("main") {
+        Some(w) => builder.set_parent(&w),
+        None => builder,
+    }
+}
+
 #[tauri::command]
 async fn choose_pack(app: AppHandle) -> Option<String> {
-    app.dialog()
-        .file()
+    file_dialog_on_window(&app)
         .set_title("Choose a pack")
         .add_filter("Pack", &["toml"])
         .blocking_pick_file()
@@ -812,8 +821,7 @@ async fn choose_pack(app: AppHandle) -> Option<String> {
 /// Pick a local file to stand in for one a pack names but this machine does not have.
 #[tauri::command]
 async fn choose_file(app: AppHandle, purpose: String) -> Option<String> {
-    app.dialog()
-        .file()
+    file_dialog_on_window(&app)
         .set_title(format!("Choose {purpose}"))
         .blocking_pick_file()
         .and_then(|p| p.into_path().ok())
@@ -1099,11 +1107,31 @@ fn write_config(state: &tauri::State<'_, AppState>, cfg: &Config) -> Result<(), 
 // error already go through the dialog plugin; so should every question that gates something
 // irreversible.
 
+/// Start a dialog already parented to the window, when there is one.
+///
+/// Without a parent the dialog is modal to the application rather than to the window, and the
+/// platform puts it wherever it likes — on a Mac with two displays, that is the screen with the
+/// menu bar, which need not be the screen the window is on. A question can then appear behind
+/// you while the window you were looking at sits there waiting on an answer nobody can see.
+///
+/// With a parent it is window-modal: a sheet on macOS, and on every platform it opens on the
+/// display its window occupies. The parent is looked up each time rather than cached, because
+/// the window is hidden on close and rebuilt from the tray.
+fn dialog_on_window(
+    app: &AppHandle,
+    message: String,
+) -> tauri_plugin_dialog::MessageDialogBuilder<tauri::Wry> {
+    let builder = app.dialog().message(message);
+    match app.get_webview_window("main") {
+        Some(w) => builder.parent(&w),
+        None => builder,
+    }
+}
+
 /// Ask a yes/no question. Returns what the operator chose.
 #[tauri::command]
 async fn ask(app: AppHandle, message: String, title: Option<String>) -> bool {
-    app.dialog()
-        .message(message)
+    dialog_on_window(&app, message)
         .title(title.unwrap_or_else(|| "MCP Gatehound".into()))
         .buttons(MessageDialogButtons::OkCancel)
         .blocking_show()
@@ -1113,8 +1141,7 @@ async fn ask(app: AppHandle, message: String, title: Option<String>) -> bool {
 /// having been read before it carries on.
 #[tauri::command]
 async fn say(app: AppHandle, message: String, title: Option<String>) {
-    app.dialog()
-        .message(message)
+    dialog_on_window(&app, message)
         .title(title.unwrap_or_else(|| "MCP Gatehound".into()))
         .blocking_show();
 }
@@ -1424,7 +1451,8 @@ fn main() {
                 tracing::error!(error = %message, "startup failed");
                 let handle = app.handle().clone();
                 // The dialog must not block the main thread before the event loop runs, so it
-                // gets its own; the process ends when the operator dismisses it.
+                // gets its own; the process ends when the operator dismisses it. Unparented on
+                // purpose — startup failed, so there is no window for it to belong to.
                 std::thread::spawn(move || {
                     handle
                         .dialog()
