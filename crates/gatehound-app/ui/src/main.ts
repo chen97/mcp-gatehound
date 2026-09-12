@@ -3763,7 +3763,11 @@ function toolRow(t: ToolInfo): string {
       .map((x) => `<span class="pill">${esc(x)}</span>`)
       .join(" ")}</td>
     <td class="meta">${esc(t.description)}</td>
-    <td><button class="ghost tf-edit" data-name="${esc(t.name)}">Edit</button></td>
+    <td class="tool-acts">
+      <button class="ghost tf-edit" data-name="${esc(t.name)}">Edit</button>
+      <button class="ghost tf-export" data-name="${esc(t.name)}">Export</button>
+      <button class="danger tf-delete" data-name="${esc(t.name)}">Delete</button>
+    </td>
   </tr>`;
 }
 
@@ -3783,6 +3787,57 @@ async function renderUpstream(snap: Snapshot): Promise<void> {
   wireClients();
 }
 
+/// Show one tool as a pack, to copy or to keep.
+///
+/// A pack rather than just its `[[tool]]` block, because a tool alone will not import: it names
+/// an upstream or a script that has to travel with it. Shown rather than saved straight away —
+/// most of the time this is wanted on a clipboard, and being able to read it before it lands
+/// anywhere is the difference between exporting and hoping.
+async function exportTool(name: string): Promise<void> {
+  let toml: string;
+  try {
+    toml = await invoke<string>("export_tool", { tool: name });
+  } catch (e) {
+    void say(String(e));
+    return;
+  }
+  await stepModal(
+    `${name} as a pack`,
+    "xl",
+    () => `<div class="meta">
+        Importable as it stands, here or on another machine: it carries the upstream this tool
+        proxies to or the script it runs, and the standing decisions that name it. A credential
+        never travels — the pack names the environment variable to read it from instead.
+      </div>
+      <pre class="script-body">${esc(toml)}</pre>
+      <div class="row modal-foot">
+        <button id="ex-copy" class="primary">Copy</button>
+        <button id="ex-file" class="ghost">Save to a file\u2026</button>
+        <button id="ex-done" class="ghost">Done</button>
+      </div>`,
+    () => {
+      $("#ex-copy")?.addEventListener("click", (e) =>
+        void copy(toml, e.currentTarget as HTMLElement),
+      );
+      $("#ex-file")?.addEventListener("click", async () => {
+        try {
+          const where = await invoke<string | null>("save_text", {
+            suggestedName: `${name}.toml`,
+            contents: toml,
+          });
+          if (where) {
+            endStep();
+            await say(`Written to ${where}.`, "Exported");
+          }
+        } catch (e) {
+          void say(String(e));
+        }
+      });
+      $("#ex-done")?.addEventListener("click", () => endStep());
+    },
+  );
+}
+
 function wireToolFace(): void {
   for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>(".tf-edit"))) {
     b.addEventListener("click", () => {
@@ -3796,6 +3851,42 @@ function wireToolFace(): void {
       redrawActions();
     });
   }
+  for (const b of Array.from(document.querySelectorAll<HTMLElement>(".tf-delete"))) {
+    b.addEventListener("click", async () => {
+      const name = b.dataset.name!;
+      if (
+        !(await ask(
+          `Delete ${name}?\n\n` +
+            `Clients stop seeing it. Any standing allow or deny for it goes too, so a tool ` +
+            `added under this name later starts with no access rather than inheriting what ` +
+            `this one had.`,
+        ))
+      ) {
+        return;
+      }
+      let dropped: string[];
+      try {
+        dropped = await invoke<string[]>("delete_tool", { tool: name });
+      } catch (e) {
+        void say(String(e));
+        return;
+      }
+      void refresh();
+      if (dropped.length) {
+        await say(
+          // Joined on one line: the dialog renders a blank line as a paragraph break and a
+          // single newline as nothing at all, so a list separated by those would run together.
+          `${name} is gone, and so are the decisions that named it: ${dropped.join(", ")}.`,
+          "Deleted",
+        );
+      }
+    });
+  }
+
+  for (const b of Array.from(document.querySelectorAll<HTMLElement>(".tf-export"))) {
+    b.addEventListener("click", () => void exportTool(b.dataset.name!));
+  }
+
   $("#tf-cancel")?.addEventListener("click", () => {
     editingTool = null;
     redrawActions();

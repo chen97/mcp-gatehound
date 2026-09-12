@@ -631,6 +631,28 @@ impl Store {
         Ok(gone)
     }
 
+    /// Drop every rule naming one tool, reporting what went.
+    ///
+    /// Deleting a tool has to take its standing decisions with it. A rule is keyed by
+    /// `(identity, tool)` and nothing else, so one left behind would apply again in full the
+    /// moment a tool of that name existed again — a client silently re-granted access that
+    /// nobody chose to give it a second time.
+    pub fn forget_tool(&self, tool: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let gone: Vec<String> = conn
+            .prepare("SELECT identity, decision FROM identities WHERE tool = ?1")?
+            .query_map(params![tool], |r| {
+                Ok(format!(
+                    "{} \u{2192} {}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        conn.execute("DELETE FROM identities WHERE tool = ?1", params![tool])?;
+        Ok(gone)
+    }
+
     pub fn forget_decision(&self, identity: &str, tool: &str) -> Result<usize> {
         let conn = self.lock();
         Ok(conn.execute(
@@ -860,6 +882,37 @@ mod tests {
         assert_eq!(s.identities_with_rules().unwrap(), vec!["claude"]);
         s.forget_identity("claude").unwrap();
         assert!(s.identities_with_rules().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_tool_takes_its_standing_decisions_with_it() {
+        // The same question as the one above, from the tool's side. A rule is keyed by
+        // (identity, tool) and nothing else, so one left behind would apply in full the moment
+        // a tool of that name existed again — access re-granted that nobody chose to give
+        // twice, to whoever added it.
+        let s = Store::open_memory().unwrap();
+        s.set_decision("claude", "brain_append", Decision::Allow)
+            .unwrap();
+        s.set_decision("ci", "brain_append", Decision::Deny)
+            .unwrap();
+        s.set_decision("claude", "brain_read", Decision::Allow)
+            .unwrap();
+
+        let mut gone = s.forget_tool("brain_append").unwrap();
+        gone.sort();
+        assert_eq!(gone, vec!["ci \u{2192} deny", "claude \u{2192} allow"]);
+
+        // And only that tool's rules went.
+        let left: Vec<String> = s
+            .list_identities()
+            .unwrap()
+            .into_iter()
+            .map(|r| format!("{}/{}", r.identity, r.tool))
+            .collect();
+        assert_eq!(left, vec!["claude/brain_read"]);
+
+        // A tool nobody had a rule for is not an error, it is simply nothing to report.
+        assert!(s.forget_tool("brain_append").unwrap().is_empty());
     }
 
     #[test]

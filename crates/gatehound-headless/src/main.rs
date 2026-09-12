@@ -11,6 +11,7 @@
 //!   gatehound-headless deny  <id> [tool]  persist a deny rule
 //!   gatehound-headless import <pack.toml> merge a pack of upstreams and tools into the config
 //!   gatehound-headless export <name>      write the current setup out as a pack
+//!                                         (--tool <name> exports only that one)
 //!   gatehound-headless token <sub>        issue, list or revoke an access token
 //!   gatehound-headless publish            show how the gateway is published
 //!
@@ -46,6 +47,8 @@ struct Args {
     allow_scripts: bool,
     allow_dangerous_scripts: bool,
     out: Option<PathBuf>,
+    /// Tools to export, when only some of them should travel.
+    tools: Vec<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -57,6 +60,7 @@ fn parse_args() -> Result<Args> {
     let mut replace = false;
     let mut allow_scripts = false;
     let mut allow_dangerous_scripts = false;
+    let mut tools: Vec<String> = Vec::new();
     let mut out = None;
 
     let mut it = std::env::args().skip(1);
@@ -74,6 +78,7 @@ fn parse_args() -> Result<Args> {
                 allow_dangerous_scripts = true;
             }
             "-o" | "--out" => out = Some(PathBuf::from(it.next().context("-o needs a path")?)),
+            "--tool" => tools.push(it.next().context("--tool needs a tool name")?),
             "-h" | "--help" | "help" => {
                 print_help();
                 std::process::exit(0);
@@ -96,6 +101,7 @@ fn parse_args() -> Result<Args> {
         allow_scripts,
         allow_dangerous_scripts,
         out,
+        tools,
     })
 }
 
@@ -111,7 +117,8 @@ fn print_help() {
          import <pack.toml>        merge a pack of upstreams and tools into the config\n  \
          scripts                   list registered scripts and what the scan found\n  \
          review <pack.toml>        read a pack's scripts without importing anything\n  \
-         export <name>             write the current setup out as a pack\n  \
+         export <name>             write the current setup out as a pack\n    \
+           --tool <name>           on export, only this tool and what it needs (repeatable)\n  \
          token issue <name> [tools]  mint a token; tools it may call, or none\n  \
          token list                list issued tokens\n  \
          token revoke <id>         remove a token; its next request is refused\n  \
@@ -726,7 +733,16 @@ fn export_pack(cfg: Config, args: &Args) -> Result<()> {
         .first()
         .cloned()
         .unwrap_or_else(|| "gatehound".to_string());
-    let body = pack::to_toml(&pack::export(&cfg, &name, "")?)?;
+    // With `--tool`, only those tools and what they need: the upstream each proxies to, the
+    // script each runs, and the decisions naming them. Without it, the whole configuration,
+    // including an upstream nothing proxies to yet and a script no tool runs — that is a
+    // backup, and half of one is not.
+    let exported = if args.tools.is_empty() {
+        pack::export(&cfg, &name, "")?
+    } else {
+        pack::export_tools(&cfg, &name, "", &args.tools)?
+    };
+    let body = pack::to_toml(&exported)?;
     match &args.out {
         Some(path) => {
             std::fs::write(path, &body).with_context(|| format!("writing {}", path.display()))?;

@@ -24,6 +24,7 @@ use crate::config::{Action, Config, IdentitySeed, ToolConfig, UpstreamConfig, Up
 use crate::scripts::{self, Interpreter, Origin, Review, ScriptDef};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -503,10 +504,57 @@ pub fn merge(cfg: &mut Config, pack: &Pack, opts: &ImportOptions) -> Result<Appl
 /// that carries everything its tools need. Reading can fail — a script registered but deleted,
 /// say — and that is reported rather than silently exporting a pack whose tools cannot run.
 pub fn export(cfg: &Config, name: &str, description: &str) -> Result<Pack> {
+    // Everything, including an upstream nothing proxies to yet and a script no tool runs.
+    // Exporting a whole configuration is how it is backed up and moved, and half of one is
+    // not a backup — so the reachability filter below belongs to `export_tools` alone.
+    build(cfg, name, description, None)
+}
+
+/// Export only the named tools, and everything they need to work somewhere else.
+///
+/// A tool on its own is not importable: it names an upstream or a script that has to travel
+/// with it. So the pack carries the upstreams those tools proxy to, the scripts they run — body
+/// and digest — and the standing decisions that name them, and nothing else. Anything the
+/// chosen tools do not reach is left behind, which is the point: this is how one tool gets
+/// shared or version-controlled without the rest of a configuration going with it.
+///
+/// Access rules granted against `*` are deliberately not carried. A pack of one tool that
+/// silently re-granted a client everything would be a strange way to share a tool.
+pub fn export_tools(cfg: &Config, name: &str, description: &str, tools: &[String]) -> Result<Pack> {
+    let mut chosen = Vec::with_capacity(tools.len());
+    for want in tools {
+        let t = cfg
+            .tools
+            .iter()
+            .find(|t| &t.name == want)
+            .ok_or_else(|| anyhow!("no tool named '{want}'"))?;
+        chosen.push(t.clone());
+    }
+    build(cfg, name, description, Some(chosen))
+}
+
+/// The body of both exports. `only` is the tools to keep, or `None` for the whole thing.
+fn build(
+    cfg: &Config,
+    name: &str,
+    description: &str,
+    only: Option<Vec<ToolConfig>>,
+) -> Result<Pack> {
+    let chosen = only.unwrap_or_else(|| cfg.tools.clone());
+    // What a scoped export must not leave behind. `None` keeps everything, so these are only
+    // consulted when a selection was actually made.
+    let scoped = tools_were_chosen(&chosen, cfg);
+    let wanted_upstreams: BTreeSet<&str> =
+        chosen.iter().filter_map(|t| t.action.upstream()).collect();
+    let wanted_scripts: BTreeSet<&str> = chosen.iter().filter_map(|t| t.action.script()).collect();
+    // Owned, because the tools themselves move into the pack at the end.
+    let names: BTreeSet<String> = chosen.iter().map(|t| t.name.clone()).collect();
+
     let mut requires_env = Vec::new();
     let upstreams = cfg
         .upstreams
         .iter()
+        .filter(|u| !scoped || wanted_upstreams.contains(u.name.as_str()))
         .map(|u| {
             let mut u = u.clone();
             let name = u.name.clone();
@@ -547,7 +595,11 @@ pub fn export(cfg: &Config, name: &str, description: &str) -> Result<Pack> {
 
     let base = cfg.script_dir();
     let mut packed_scripts = Vec::with_capacity(cfg.scripts.len());
-    for def in &cfg.scripts {
+    for def in cfg
+        .scripts
+        .iter()
+        .filter(|d| !scoped || wanted_scripts.contains(d.name.as_str()))
+    {
         let source = scripts::read_body(&base, def)
             .with_context(|| format!("packing script '{}'", def.name))?;
         packed_scripts.push(PackScript {
@@ -567,10 +619,23 @@ pub fn export(cfg: &Config, name: &str, description: &str) -> Result<Pack> {
             requires_env,
         },
         upstreams,
-        tools: cfg.tools.clone(),
-        identities: cfg.identities.clone(),
+        tools: chosen,
+        identities: cfg
+            .identities
+            .iter()
+            .filter(|i| !scoped || names.contains(&i.tool))
+            .cloned()
+            .collect(),
         scripts: packed_scripts,
     })
+}
+
+/// Whether this export is a selection rather than the whole configuration.
+///
+/// Compared by name rather than by a flag passed down, so the two exports cannot drift: a list
+/// that is every tool this config has behaves exactly like no list at all.
+fn tools_were_chosen(chosen: &[ToolConfig], cfg: &Config) -> bool {
+    chosen.len() != cfg.tools.len() || chosen.iter().zip(&cfg.tools).any(|(a, b)| a.name != b.name)
 }
 
 /// The variable an exported upstream should read its credential from, when the config it came
@@ -1168,5 +1233,104 @@ action = { type = "script", script = "absent", args = [] }
         std::env::set_var("NOTES_TOKEN", "x");
         assert!(p.missing_env().is_empty());
         std::env::remove_var("NOTES_TOKEN");
+    }
+    /// One tool, plus exactly what it needs to work somewhere else — and nothing it does not.
+    #[test]
+    fn exporting_one_tool_carries_its_upstream_and_leaves_the_rest() {
+        let dir = tmpdir();
+        let mut cfg = Config::default();
+        cfg.upstreams.push(UpstreamConfig {
+            name: "tracker".into(),
+            kind: UpstreamKind::Http {
+                base_url: "https://api.example.com".into(),
+                auth: Default::default(),
+                token: "secret-token".into(),
+                token_env: None,
+                ops: Default::default(),
+                timeout_secs: 30,
+                health_path: None,
+            },
+        });
+        cfg.upstreams.push(UpstreamConfig {
+            name: "other".into(),
+            kind: UpstreamKind::Mcp {
+                url: "https://elsewhere.example/mcp".into(),
+                bearer_token: None,
+                token_env: None,
+            },
+        });
+        cfg.tools.push(ToolConfig {
+            name: "get_issue".into(),
+            description: "Read one issue.".into(),
+            arguments: Vec::new(),
+            input_schema: None,
+            action: Action::Proxy {
+                upstream: "tracker".into(),
+                op: "get_issue".into(),
+            },
+            rate_limit: None,
+            idempotent: false,
+        });
+        cfg.tools.push(ToolConfig {
+            name: "search".into(),
+            description: "Somebody else's tool.".into(),
+            arguments: Vec::new(),
+            input_schema: None,
+            action: Action::Proxy {
+                upstream: "other".into(),
+                op: "search".into(),
+            },
+            rate_limit: None,
+            idempotent: false,
+        });
+        cfg.identities.push(IdentitySeed {
+            identity: "laptop".into(),
+            tool: "get_issue".into(),
+            decision: Decision::Allow,
+        });
+        cfg.identities.push(IdentitySeed {
+            identity: "laptop".into(),
+            tool: "search".into(),
+            decision: Decision::Allow,
+        });
+        // A grant against everything belongs to the configuration, not to one tool.
+        cfg.identities.push(IdentitySeed {
+            identity: "laptop".into(),
+            tool: "*".into(),
+            decision: Decision::Deny,
+        });
+        cfg.base_dir = Some(dir.clone());
+
+        let pack = export_tools(&cfg, "one", "just the one", &["get_issue".into()]).unwrap();
+        assert_eq!(
+            pack.tools.iter().map(|t| &t.name).collect::<Vec<_>>(),
+            vec!["get_issue"]
+        );
+        assert_eq!(
+            pack.upstreams.iter().map(|u| &u.name).collect::<Vec<_>>(),
+            vec!["tracker"],
+            "the upstream the other tool used should not travel with this one"
+        );
+        assert_eq!(
+            pack.identities
+                .iter()
+                .map(|i| i.tool.clone())
+                .collect::<Vec<_>>(),
+            vec!["get_issue"]
+        );
+        // And the credential is still stripped, with the variable to read it from named.
+        match &pack.upstreams[0].kind {
+            UpstreamKind::Http {
+                token, token_env, ..
+            } => {
+                assert!(token.is_empty());
+                assert_eq!(token_env.as_deref(), Some("GATEHOUND_TRACKER_TOKEN"));
+            }
+            _ => panic!("wrong kind"),
+        }
+
+        // Naming a tool that is not there is an error rather than an empty pack.
+        assert!(export_tools(&cfg, "one", "", &["nope".into()]).is_err());
+        std::fs::remove_dir_all(dir).ok();
     }
 }

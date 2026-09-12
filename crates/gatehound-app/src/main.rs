@@ -1189,6 +1189,79 @@ fn delete_script(state: tauri::State<'_, AppState>, name: String) -> Result<(), 
     Ok(())
 }
 
+/// Remove a tool, and every standing decision that named it.
+///
+/// The rules go with it deliberately. A rule is keyed by `(identity, tool)` and nothing else,
+/// so one left behind would apply again in full the moment a tool of that name existed again —
+/// a client silently re-granted access nobody chose to give it a second time. What went is
+/// returned rather than logged quietly, because "and it dropped two grants" is the part worth
+/// reading.
+#[tauri::command]
+fn delete_tool(state: tauri::State<'_, AppState>, tool: String) -> Result<Vec<String>, String> {
+    let mut cfg = (*state.gateway.cfg).clone();
+    let Some(i) = cfg.tools.iter().position(|t| t.name == tool) else {
+        return Err(format!("no tool named '{tool}'"));
+    };
+    cfg.tools.remove(i);
+    let seeded = cfg.identities.len();
+    cfg.identities.retain(|r| r.tool != tool);
+    let seeds_dropped = seeded - cfg.identities.len();
+    write_config(&state, &cfg)?;
+
+    // Only after the file is written: a rule dropped from the database for a tool that is
+    // still in the config would be access quietly withdrawn from a tool that still works.
+    let gone = state.gateway.store.forget_tool(&tool).map_err(err)?;
+    let _ = state.gateway.store.log_admin(
+        "tool.delete",
+        None,
+        &format!(
+            "removed '{tool}'{}",
+            match gone.len() + seeds_dropped {
+                0 => String::new(),
+                n => format!(" and {n} access rule{}", if n == 1 { "" } else { "s" }),
+            }
+        ),
+    );
+    Ok(gone)
+}
+
+/// One tool as a pack, ready to paste into a config or keep in version control.
+///
+/// A pack rather than a bare `[[tool]]` block: a tool alone is not importable, because it names
+/// an upstream or a script that has to travel with it. What comes back is the same format
+/// `import` reads, so it can go straight back into this or any other gateway.
+#[tauri::command]
+fn export_tool(state: tauri::State<'_, AppState>, tool: String) -> Result<String, String> {
+    let pack = gatehound_core::pack::export_tools(
+        &state.gateway.cfg,
+        &tool,
+        &format!("The {tool} tool, exported from this gateway."),
+        std::slice::from_ref(&tool),
+    )
+    .map_err(err)?;
+    gatehound_core::pack::to_toml(&pack).map_err(err)
+}
+
+/// Write text the operator chose to keep to a file they choose.
+#[tauri::command]
+async fn save_text(
+    app: AppHandle,
+    suggested_name: String,
+    contents: String,
+) -> Result<Option<String>, String> {
+    let Some(path) = file_dialog_on_window(&app)
+        .set_title("Save")
+        .set_file_name(&suggested_name)
+        .add_filter("TOML", &["toml"])
+        .blocking_save_file()
+        .and_then(|p| p.into_path().ok())
+    else {
+        return Ok(None);
+    };
+    std::fs::write(&path, contents).map_err(err)?;
+    Ok(Some(path.display().to_string()))
+}
+
 /// Expose a script as a tool an upstream client can call.
 ///
 /// The tool is what a caller names; the script is what runs. Keeping them separate is what
@@ -1603,6 +1676,9 @@ fn main() {
             save_script,
             delete_script,
             add_script_tool,
+            delete_tool,
+            export_tool,
+            save_text,
         ])
         .setup(|app| {
             // An accessory app that dies in setup leaves no Dock icon, no window and no

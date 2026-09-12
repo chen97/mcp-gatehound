@@ -92,6 +92,11 @@ table.args input { width: 100%; }
 .ta-req { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--mut); }
 .ta-req input { width: auto; }
 
+/* The actions on a tool row. Nowrap so three buttons stay on one line and the column keeps a
+   straight right edge down the table; the column itself takes only what it needs. */
+td.tool-acts { white-space: nowrap; width: 1%; }
+td.tool-acts button + button { margin-left: 6px; }
+
 nav { display: flex; gap: var(--s1); padding: 0 var(--s5); position: relative; }
 nav button {
   background: none; border: none; color: var(--mut); cursor: pointer;
