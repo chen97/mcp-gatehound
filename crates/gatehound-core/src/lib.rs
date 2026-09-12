@@ -346,6 +346,10 @@ impl Gateway {
                     "description": t.description,
                     "action": t.action.kind(),
                     "upstream": t.action.upstream(),
+                    // Which script backs it, so the screen can file a tool under the file it
+                    // runs rather than under a catch-all "local" group that says nothing about
+                    // where it goes.
+                    "script": t.action.script(),
                     "rate_limit": t.rate_limit,
                     "idempotent": t.idempotent,
                 })

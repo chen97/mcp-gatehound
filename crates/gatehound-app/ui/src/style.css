@@ -78,6 +78,10 @@ header .ghost { margin-left: auto; }
 .dot.grey  { background: var(--mut); }
 .dot.red   { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent); }
 .dot.amber { background: var(--am); box-shadow: 0 0 0 3px color-mix(in srgb, var(--am) 18%, transparent); }
+/* Only a service has a health probe, and the rows that do not have one sit in the same list.
+   A spacer the width of the dot keeps every name on the same left edge — without it a script
+   row's name starts where a service's dot does, and the list reads as two lists again. */
+.dot-gap { width: 8px; flex: none; }
 
 nav { display: flex; gap: var(--s1); padding: 0 var(--s5); position: relative; }
 nav button {

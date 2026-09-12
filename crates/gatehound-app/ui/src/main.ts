@@ -35,6 +35,8 @@ interface ToolInfo {
   description: string;
   action: string;
   upstream: string | null;
+  /// The script this tool runs, for a script action. Null for every other kind.
+  script: string | null;
   rate_limit: { per_hour: number; min_spacing_secs: number } | null;
   idempotent: boolean;
 }
@@ -273,11 +275,14 @@ async function renderHeader(): Promise<Snapshot> {
   const down = s.upstreams.filter((u) => !u.healthy).length;
   $("#dot").className = `dot ${s.colour}`;
   $("#subtitle").textContent =
-    // "downstream", not "upstream" — these are the services the gateway calls out to, which is
+    // "downstream", not "upstream" — these are the things the gateway calls out to, which is
     // what every other screen calls them. The count of the ones not answering rather than a
-    // bare "one of them": with six services, which is the useful half of the sentence.
-    `${s.listen_addr} · ${s.auth} · ${plural(s.upstreams.length, "downstream", "downstreams")} ` +
-    `with ${plural(s.tools.length, "tool", "tools")}` +
+    // bare "one of them": with six of them, which is the useful half of the sentence.
+    //
+    // Tools are counted on their own rather than as "N downstreams with M tools": a downstream
+    // is a script or a local command as readily as a service now, and only a service has a
+    // health probe, so that phrasing put every tool behind a number that counted two of them.
+    `${s.listen_addr} · ${s.auth} · ${plural(s.tools.length, "tool", "tools")}` +
     (down > 0 ? ` · ${plural(down, "downstream is", "downstreams are")} not answering` : "");
   const badge = $("#badge");
   badge.textContent = String(s.pending);
@@ -429,7 +434,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
   // that is always there, so nothing moves when it does.
   const inside = [
     { icon: "token", label: "Tokens", goto: "upstream", focus: "tokens" },
-    { icon: "script", label: "Scripts & tools", goto: "actions", focus: "scripts" },
+    { icon: "script", label: "What it calls", goto: "actions", focus: "downstream" },
     { icon: "globe", label: "Reach", goto: "network" },
     { icon: "log", label: "Live log", goto: "log" },
   ]
@@ -657,12 +662,8 @@ function applyPendingFocus(): void {
     case "tokens":
       markArrival(document.querySelector("#identities .card"));
       break;
-    case "scripts":
-      markArrival(
-        Array.from(document.querySelectorAll<HTMLElement>("#actions .card")).find((c) =>
-          c.querySelector("h3")?.textContent?.trim().startsWith("Scripts"),
-        ) ?? null,
-      );
+    case "downstream":
+      markArrival(document.querySelector("#downstream-list"));
       break;
   }
 }
@@ -1230,48 +1231,120 @@ async function renderLog(): Promise<void> {
 /// repaint, and so opening one is not undone by the next five-second read.
 const expanded = new Set<string>();
 
-/// Each service, with its tools folded away underneath it.
+/// Everything this gateway calls, with the tools bound to each folded away underneath it.
+///
+/// One list, on purpose. Scripts used to have a card of their own below the services, which
+/// made a file on disk look like a different kind of thing from an MCP server — when from a
+/// caller's side they are the same thing exactly: something out there that the gateway calls,
+/// with tools on it. The split also filed a script's tools under "Local commands", nowhere
+/// near the file they run, so the one screen that should answer "what does this tool do?"
+/// answered it in two places that did not mention each other.
 ///
 /// Grouped rather than listed flat because a tool only means anything next to the thing it
-/// calls — and a flat table of every tool across every service is the part that got long
-/// first.
+/// calls — and a flat table of every tool across everything is the part that got long first.
+
 /// The key standing for "not from any downstream service" — a tool that runs a local command.
 ///
-/// It becomes a `data-key` attribute and is read back out to decide which service is expanded,
-/// so it is a prefixed name rather than a sentinel: a NUL does not survive that round trip
+/// It becomes a `data-key` attribute and is read back out to decide which row is expanded, so
+/// it is a prefixed name rather than a sentinel: a NUL does not survive that round trip
 /// intact, and an upstream genuinely called `local` should not collide with it either.
 const LOCAL_KEY = "local:commands";
 
-function servicesHtml(snap: Snapshot, configFile: string): string {
-  const LOCAL = LOCAL_KEY;
+/// The same shape for a script's row. Prefixed for the same reason, and so an upstream and a
+/// script may share a name without sharing a row.
+function scriptKey(name: string): string {
+  return `script:${name}`;
+}
+
+/// One row: a thing the gateway calls, and what it exposes.
+interface DownstreamRow {
+  key: string;
+  title: string;
+  sub: string;
+  tools: ToolInfo[];
+  /// Set only for an upstream, which is the only kind with a health probe.
+  healthy?: boolean;
+  /// Set only for a script, which has a file to show as well as tools.
+  script?: ScriptView;
+  /// Rendered after the title in the head.
+  pills?: string;
+}
+
+function downstreamHtml(snap: Snapshot, configFile: string, scripts: ScriptView[]): string {
   const groups = new Map<string, ToolInfo[]>();
   for (const t of snap.tools) {
-    const key = t.upstream ?? LOCAL;
+    // A script-backed tool belongs to its file, not to the local catch-all.
+    const key = t.upstream ?? (t.script ? scriptKey(t.script) : LOCAL_KEY);
     (groups.get(key) ?? groups.set(key, []).get(key)!).push(t);
   }
+  /// Claim a group for a row, so what is left at the end is what no row accounted for.
+  const take = (key: string): ToolInfo[] => {
+    const g = groups.get(key) ?? [];
+    groups.delete(key);
+    return g;
+  };
 
-  const health = new Map(snap.upstreams.map((u) => [u.name, u.healthy]));
-  const rows = snap.upstreams.map((u) => ({
+  const rows: DownstreamRow[] = snap.upstreams.map((u) => ({
     key: u.name,
     title: u.target,
     sub: `${u.kind} · stored as ${u.name}`,
-    tools: groups.get(u.name) ?? [],
+    tools: take(u.name),
+    healthy: u.healthy,
   }));
-  // Local commands front no service, so they get a group of their own rather than vanishing.
-  if (groups.has(LOCAL)) {
+
+  for (const sc of scripts) {
+    const worst = worstOf(sc.findings);
     rows.push({
-      key: LOCAL,
-      title: "Local commands",
-      sub: "run on this machine, argv only",
-      tools: groups.get(LOCAL)!,
+      key: scriptKey(sc.name),
+      title: sc.name,
+      // `origin` already reads as a phrase — "written here", "from pack 'x'" — so it is not
+      // dressed up any further here.
+      sub: `script · ${sc.origin}`,
+      tools: take(scriptKey(sc.name)),
+      script: sc,
+      pills:
+        `<span class="pill">${esc(sc.interpreter)}</span>` +
+        (sc.sandboxed ? `<span class="pill good">sandboxed</span>` : "") +
+        (worst ? `<span class="sev sev-${worst}">${SEVERITY_LABEL[worst]}</span>` : "") +
+        (sc.problem ? `<span class="sev sev-danger">changed on disk</span>` : ""),
     });
   }
 
-  if (rows.length === 0) {
-    return `<div class="card">
-      <h3>Downstream services</h3>
-      <div class="meta">Nothing yet. Add one above, or import a pack.</div>
+  // Local commands front no service and no file of ours, so they get a row of their own rather
+  // than vanishing. Last, because it is the catch-all rather than a thing you added.
+  if (groups.has(LOCAL_KEY)) {
+    rows.push({
+      key: LOCAL_KEY,
+      title: "Local commands",
+      sub: "run on this machine, argv only",
+      tools: take(LOCAL_KEY),
+    });
+  }
+  // Whatever is still unclaimed names an upstream or a script this screen does not have. The
+  // config and the scripts on disk are read separately, so a save can land between the two.
+  // Show it rather than drop it: a tool missing from this list is how you stop trusting it.
+  for (const [key, tools] of groups) {
+    rows.push({ key, title: key, sub: "not in the config that was last read", tools });
+  }
+
+  const intro = `<div class="card" id="downstream-list">
+      <h3>What this gateway calls</h3>
+      <div class="meta">
+        One list: another MCP server, a REST API, a script you wrote, a local command — and the
+        tools bound to each. Written to the config file under <code>[[upstream]]</code> and
+        <code>[[tool]]</code> — proxies call a backend an upstream, so that is the word in the
+        file; it means the same thing as this screen.
+      </div>
+      <div class="meta" style="margin-top:6px;opacity:.75"><code>${esc(configFile)}</code></div>
     </div>`;
+
+  if (rows.length === 0) {
+    return (
+      intro +
+      `<div class="card">
+        <div class="meta">Nothing yet. Add one above, or import a pack.</div>
+      </div>`
+    );
   }
 
   const body = rows
@@ -1287,38 +1360,40 @@ function servicesHtml(snap: Snapshot, configFile: string): string {
              both are yours to change. A caller names a tool and never an action, so
              re-labelling one changes nothing about what it does or where it goes.
            </div>`
-        : `<div class="meta">No tools exposed from this one yet.</div>`;
+        : `<div class="meta">${
+            r.script
+              ? `Nothing calls this script yet. <b>Expose as a tool</b>, below, is what makes it
+                 callable.`
+              : "No tools exposed from this one yet."
+          }</div>`;
 
       return `<div class="card">
         <div class="row svc-head" data-key="${esc(r.key)}" role="button" tabindex="0"
              aria-expanded="${open}" style="margin-top:0;cursor:pointer">
           <span class="twist">${open ? "▾" : "▸"}</span>
           ${
-            health.has(r.key)
-              ? `<span class="dot ${health.get(r.key) ? "green" : "red"}"
-                       title="${health.get(r.key) ? "Answering" : "Not answering its health probe"}"></span>`
-              : ""
+            r.healthy === undefined
+              ? `<span class="dot-gap"></span>`
+              : `<span class="dot ${r.healthy ? "green" : "red"}"
+                       title="${r.healthy ? "Answering" : "Not answering its health probe"}"></span>`
           }
           <code>${esc(r.title)}</code>
+          ${r.pills ?? ""}
           <span class="pill">${r.tools.length} tool${r.tools.length === 1 ? "" : "s"}</span>
           <span class="meta" style="margin-left:auto">${
-            health.get(r.key) === false ? "not answering · " : ""
+            r.healthy === false ? "not answering · " : ""
           }${esc(r.sub)}</span>
         </div>
-        <div class="${open ? "" : "hidden"}">${tools}</div>
+        <div class="${open ? "" : "hidden"}">
+          ${r.script ? scriptProblemHtml(r.script) : ""}${tools}${
+            r.script ? scriptFileHtml(r.script) : ""
+          }
+        </div>
       </div>`;
     })
     .join("");
 
-  return `<div class="card">
-      <h3>Downstream services</h3>
-      <div class="meta">
-        What this gateway calls out to, and the tools bound to each. Written to the config file
-        under <code>[[upstream]]</code> — proxies call a backend an upstream, so that is the
-        word in the file; it means the same thing as this screen.
-      </div>
-      <div class="meta" style="margin-top:6px;opacity:.75"><code>${esc(configFile)}</code></div>
-    </div>${body}`;
+  return intro + body;
 }
 
 /// What the Downstream screen last read from the core, so a local edit can redraw without
@@ -1385,11 +1460,7 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
            </div>
          </div>` +
     renderPackPlanIfAny() +
-    servicesHtml(snap, configFile) +
-    // Last, and deliberately: this is the library of files, not a second way to add a
-    // downstream. Sitting directly under "Add a downstream" it read as a competing entry
-    // point — two buttons, side by side, for what is one decision made in the chooser.
-    scriptsHtml(scriptList);
+    downstreamHtml(snap, configFile, scriptList);
   if (!paint($("#actions"), html)) return;
 
   $("#c-open")?.addEventListener("click", () => void chooseKind());
@@ -2425,7 +2496,6 @@ let scriptDraft: {
 let scriptReview: ScriptReview | null = null;
 let scriptDirty = false;
 let interpreterList: InterpreterView[] = [];
-const expandedScripts = new Set<string>();
 
 const SEVERITY_LABEL: Record<Severity, string> = {
   danger: "danger",
@@ -2480,80 +2550,46 @@ function worstOf(findings: Finding[]): Severity | null {
   return findings.length ? "note" : null;
 }
 
-function scriptsHtml(list: ScriptView[]): string {
-  const body =
-    list.length === 0
-      ? `<div class="meta">
-           No scripts yet. A script is your own code — forty lines of Python, JavaScript or
-           TypeScript — exposed as a tool. It runs through an allowlisted interpreter with the
-           same limits as any other action: one argument array, long content on stdin, a
-           timeout, an output cap. Never a shell.
-         </div>`
-      : list
-          .map((sc) => {
-            const open = expandedScripts.has(sc.name);
-            const worst = worstOf(sc.findings);
-            return `<div class="card">
-              <div class="row svc-head script-head" data-name="${esc(sc.name)}" role="button"
-                   tabindex="0" aria-expanded="${open}" style="margin-top:0;cursor:pointer">
-                <span class="twist">${open ? "\u25be" : "\u25b8"}</span>
-                <code>${esc(sc.name)}</code>
-                <span class="pill">${esc(sc.interpreter)}</span>
-                ${sc.sandboxed ? `<span class="pill good">sandboxed</span>` : ""}
-                ${sc.local ? "" : `<span class="pill">${esc(sc.origin)}</span>`}
-                ${worst ? `<span class="sev sev-${worst}">${SEVERITY_LABEL[worst]}</span>` : ""}
-                ${sc.problem ? `<span class="sev sev-danger">changed on disk</span>` : ""}
-                <span class="meta" style="margin-left:auto">${
-                  sc.used_by.length
-                    ? `run by ${sc.used_by.map((t) => esc(t)).join(", ")}`
-                    : "no tool runs it"
-                }</span>
-              </div>
-              ${
-                open
-                  ? `<div>
-                       ${
-                         sc.problem
-                           ? `<div class="notice warn">
-                                <strong>This file no longer matches what was registered.</strong>
-                                <div class="meta">${esc(sc.problem)}</div>
-                                <div class="meta">
-                                  The gateway will not start until it agrees again. If you
-                                  edited it outside the app, open it here and save; if you did
-                                  not, do not run it.
-                                </div>
-                              </div>`
-                           : ""
-                       }
-                       <table class="kv"><tbody>
-                         ${sc.description ? `<tr><td class="meta">What it does</td><td>${esc(sc.description)}</td></tr>` : ""}
-                         <tr><td class="meta">Where it came from</td><td>${esc(sc.origin)}</td></tr>
-                         <tr><td class="meta">Digest</td><td><code>${esc(sc.sha256.slice(0, 16))}\u2026</code></td></tr>
-                       </tbody></table>
-                       <h4>What the read found</h4>
-                       ${findingsHtml(sc.findings)}
-                       <pre class="script-body">${esc(sc.body)}</pre>
-                       <div class="row">
-                         <button class="ghost script-edit" data-name="${esc(sc.name)}">Edit\u2026</button>
-                         <button class="ghost script-expose" data-name="${esc(sc.name)}">Expose as a tool\u2026</button>
-                         <button class="danger script-delete" data-name="${esc(sc.name)}">Delete</button>
-                       </div>
-                     </div>`
-                  : ""
-              }
-            </div>`;
-          })
-          .join("");
-
-  return `<div class="card">
-    <h3>Scripts</h3>
+/// A script whose file no longer matches what was registered.
+///
+/// Rendered above everything else in its row, including its tools, because it stops the
+/// gateway starting: what a caller could do with it is not the question yet.
+function scriptProblemHtml(sc: ScriptView): string {
+  if (!sc.problem) return "";
+  return `<div class="notice warn">
+    <strong>This file no longer matches what was registered.</strong>
+    <div class="meta">${esc(sc.problem)}</div>
     <div class="meta">
-      Your own code, callable as a tool. Written here or carried in a pack \u2014 a pack's is
-      somebody else's code, so it is read and consented to before it lands.
+      The gateway will not start until it agrees again. If you edited it outside the app, open
+      it here and save; if you did not, do not run it.
     </div>
-    ${body}
-    <div class="row"><button id="script-new" class="ghost">Write a script\u2026</button></div>
   </div>`;
+}
+
+/// The file behind a script's row: where it came from, what the static read found, and the
+/// code itself.
+///
+/// Below the tools rather than above them, so every row on this screen opens with the same
+/// thing — what a client can call. The code is what makes this row different from an upstream,
+/// not what the row is for.
+function scriptFileHtml(sc: ScriptView): string {
+  return `<h4>The script</h4>
+    <table class="kv"><tbody>
+      ${sc.description ? `<tr><td class="meta">What it does</td><td>${esc(sc.description)}</td></tr>` : ""}
+      <tr><td class="meta">Interpreter</td><td><code>${esc(sc.interpreter)}</code>${
+        sc.sandboxed ? ` <span class="meta">sandboxed by default</span>` : ""
+      }</td></tr>
+      <tr><td class="meta">Where it came from</td><td>${esc(sc.origin)}</td></tr>
+      <tr><td class="meta">Digest</td><td><code>${esc(sc.sha256.slice(0, 16))}…</code></td></tr>
+    </tbody></table>
+    <h4>What the read found</h4>
+    ${findingsHtml(sc.findings)}
+    <pre class="script-body">${esc(sc.body)}</pre>
+    <div class="row">
+      <button class="ghost script-edit" data-name="${esc(sc.name)}">Edit…</button>
+      <button class="ghost script-expose" data-name="${esc(sc.name)}">Expose as a tool…</button>
+      <button class="danger script-delete" data-name="${esc(sc.name)}">Delete</button>
+    </div>`;
 }
 
 function scriptBody(): string {
@@ -2659,20 +2695,9 @@ async function scriptStep(): Promise<void> {
   redrawActions();
 }
 
+/// The buttons inside an expanded script's row. Opening and closing the row is not here any
+/// more: a script is a row in the one downstream list now, and that list toggles its own rows.
 function wireScripts(list: ScriptView[]): void {
-  for (const h of Array.from(document.querySelectorAll<HTMLElement>(".script-head"))) {
-    onToggle(h, () => {
-      const name = h.dataset.name!;
-      if (!expandedScripts.delete(name)) {
-        expandedScripts.add(name);
-        pendingReveal = `.script-head[data-name="${CSS.escape(name)}"]`;
-      }
-      redrawActions();
-    });
-  }
-
-  $("#script-new")?.addEventListener("click", () => void openScriptEditor());
-
   for (const b of Array.from(document.querySelectorAll<HTMLElement>(".script-edit"))) {
     b.addEventListener("click", async () => {
       const sc = list.find((x) => x.name === b.dataset.name);
@@ -2706,7 +2731,7 @@ function wireScripts(list: ScriptView[]): void {
         void say(String(e));
         return;
       }
-      expandedScripts.delete(name);
+      expanded.delete(scriptKey(name));
       scriptsAreStale();
       void refresh();
     });
@@ -2874,7 +2899,10 @@ function wireScriptEditor(): void {
     const thenExpose = d.thenExpose;
     scriptDirty = false;
     endStep();
-    expandedScripts.add(saved);
+    expanded.add(scriptKey(saved));
+    // Its row is now one among however many downstreams there are, so say where it went rather
+    // than leaving it to be found.
+    pendingReveal = `.svc-head[data-key="${CSS.escape(scriptKey(saved))}"]`;
     scriptsAreStale();
     void refresh();
 
@@ -2885,8 +2913,8 @@ function wireScriptEditor(): void {
       if (!(await exposeScript(saved, describedAs))) {
         await say(
           `${saved} is saved but nothing calls it yet.\n\n` +
-            `Expose it as a tool whenever you like — it is in the Scripts list at the bottom ` +
-            `of this screen.`,
+            `Expose it as a tool whenever you like — it is in the list on this screen, ` +
+            `under its own name.`,
           "Saved, not yet callable",
         );
       }
@@ -2897,7 +2925,7 @@ function wireScriptEditor(): void {
       await ask(
         `Saved ${saved}.\n\n` +
           (wasNew
-            ? `Nothing calls it yet — expose it as a tool from the Scripts list.\n\n`
+            ? `Nothing calls it yet — expose it as a tool from its row on this screen.\n\n`
             : ``) +
           `The gateway is still serving the configuration it started with. Restart now to apply?\n\n${RESTART_WARNS}`,
       )
