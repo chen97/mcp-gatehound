@@ -1155,7 +1155,14 @@ fn save_script(
 /// next call, and the config would no longer load at all. Say which tools, so the operator can
 /// deal with them first.
 #[tauri::command]
-fn delete_script(state: tauri::State<'_, AppState>, name: String) -> Result<(), String> {
+fn delete_script(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    // Take the tools that run it as well. Without this a script backing anything is a dead
+    // end: the refusal names the tools, and the operator has to go and delete each one before
+    // coming back — for what is one decision.
+    with_tools: bool,
+) -> Result<(), String> {
     let mut cfg = (*state.gateway.cfg).clone();
     let users: Vec<String> = cfg
         .tools
@@ -1163,15 +1170,28 @@ fn delete_script(state: tauri::State<'_, AppState>, name: String) -> Result<(), 
         .filter(|t| t.action.script() == Some(name.as_str()))
         .map(|t| t.name.clone())
         .collect();
-    if !users.is_empty() {
+    if !users.is_empty() && !with_tools {
         return Err(format!(
-            "{name} is still run by {}. Remove or repoint those tools first.",
-            users.join(", ")
+            // "the tool" and "the script" spelled out: a script and the tool exposing it often
+            // share a name, and "brain_resolve is still run by brain_resolve" reads as
+            // nonsense rather than as the two different things it is talking about.
+            "the script {name} is still run by {}. Delete {} first, or delete them together.",
+            users
+                .iter()
+                .map(|t| format!("the tool {t}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if users.len() == 1 { "it" } else { "them" },
         ));
     }
     let Some(i) = cfg.scripts.iter().position(|s| s.name == name) else {
         return Err(format!("no script named '{name}'"));
     };
+    // The tools go first, and with them every standing decision that named them — a rule left
+    // behind would apply again in full to anything later given the same name.
+    cfg.tools
+        .retain(|t| t.action.script() != Some(name.as_str()));
+    cfg.identities.retain(|r| !users.contains(&r.tool));
     let def = cfg.scripts.remove(i);
     let base = state
         .config_path
@@ -1181,10 +1201,25 @@ fn delete_script(state: tauri::State<'_, AppState>, name: String) -> Result<(), 
         .unwrap_or_else(|| PathBuf::from("."));
     gatehound_core::scripts::delete(&base, &def).map_err(err)?;
     write_config(&state, &cfg)?;
+    // After the file is written, for the same reason as deleting a tool on its own: a rule
+    // dropped for a tool still in the config is access quietly withdrawn from one that works.
+    for tool in &users {
+        let _ = state.gateway.store.forget_tool(tool);
+    }
     let _ = state.gateway.store.log_admin(
         "script.delete",
         None,
-        &format!("removed '{name}' and its body"),
+        &format!(
+            "removed '{name}' and its body{}",
+            match users.len() {
+                0 => String::new(),
+                n => format!(
+                    ", and {n} tool{} that ran it: {}",
+                    if n == 1 { "" } else { "s" },
+                    users.join(", ")
+                ),
+            }
+        ),
     );
     Ok(())
 }

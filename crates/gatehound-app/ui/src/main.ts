@@ -2558,7 +2558,7 @@ function scriptFileHtml(sc: ScriptView): string {
     <div class="row">
       <button class="ghost script-edit" data-name="${esc(sc.name)}">Edit…</button>
       <button class="ghost script-expose" data-name="${esc(sc.name)}">Expose as a tool…</button>
-      <button class="danger script-delete" data-name="${esc(sc.name)}">Delete</button>
+      <button class="danger script-delete" data-name="${esc(sc.name)}">Delete the script</button>
     </div>`;
 }
 
@@ -2694,9 +2694,19 @@ function wireScripts(list: ScriptView[]): void {
   for (const b of Array.from(document.querySelectorAll<HTMLElement>(".script-delete"))) {
     b.addEventListener("click", async () => {
       const name = b.dataset.name!;
-      if (!(await ask(`Delete ${name}? Its file is removed from disk.`))) return;
+      // What runs it is already known here, so the question is asked once with the answer in
+      // it. Asking first and refusing afterwards made a script that backs anything a dead end:
+      // you were told to go and delete some tools, with no way through from where you stood.
+      const used = list.find((x) => x.name === name)?.used_by ?? [];
+      const question = used.length
+        ? `Delete ${name}, and the ${used.length === 1 ? "tool" : `${used.length} tools`} that ` +
+          `run it?\n\n${used.join(", ")}\n\n` +
+          `The file goes from disk, those tools stop being offered to any client, and their ` +
+          `standing allow and deny rules go with them.`
+        : `Delete ${name}? Its file is removed from disk. No tool runs it.`;
+      if (!(await ask(question))) return;
       try {
-        await invoke("delete_script", { name });
+        await invoke("delete_script", { name, withTools: used.length > 0 });
       } catch (e) {
         void say(String(e));
         return;
