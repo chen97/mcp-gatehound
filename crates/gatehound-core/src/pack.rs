@@ -54,6 +54,13 @@ pub struct PackScript {
     /// The program text. Verified against `sha256` on load, so a body edited without updating
     /// the digest is refused rather than quietly accepted.
     pub source: String,
+    /// Optional. An exported pack records it, and then a body edited in transit, in a fork or
+    /// in a paste no longer passes as the reviewed one. A hand-written pack may leave it out:
+    /// the source is in the same file, so a digest beside it proves nothing about the pack —
+    /// it is the installed copy on disk that a digest is worth having for, and that one is
+    /// recorded from the source either way. Making it mandatory only meant re-running
+    /// sha256sum over a fragment you cannot easily get at.
+    #[serde(default)]
     pub sha256: String,
     #[serde(default)]
     pub description: String,
@@ -151,9 +158,10 @@ impl Pack {
                 bail!("pack declares script '{}' twice", sc.name);
             }
             // The digest travels with the source so a body edited after the fact — in transit,
-            // in a fork, in a paste — does not pass as the reviewed one.
+            // in a fork, in a paste — does not pass as the reviewed one. Absent, there is
+            // nothing to contradict: the source is the only claim the pack makes.
             let actual = scripts::digest(sc.source.as_bytes());
-            if !actual.eq_ignore_ascii_case(sc.sha256.trim()) {
+            if !sc.sha256.trim().is_empty() && !actual.eq_ignore_ascii_case(sc.sha256.trim()) {
                 bail!(
                     "script '{}' does not match the sha256 this pack records; it was edited \
                      after it was packed.\n  recorded {}\n  actual   {actual}",
@@ -428,7 +436,9 @@ pub fn merge(cfg: &mut Config, pack: &Pack, opts: &ImportOptions) -> Result<Appl
             None => ScriptDef {
                 name: sc.name.clone(),
                 interpreter: sc.interpreter,
-                sha256: sc.sha256.clone(),
+                // Of the source as read, not of what the pack claimed: the two agree by the
+                // check above when a claim was made, and when none was there is only one.
+                sha256: scripts::digest(sc.source.as_bytes()),
                 description: sc.description.clone(),
                 origin: Origin::Pack(pack.pack.name.clone()),
             },
@@ -1332,5 +1342,46 @@ action = { type = "script", script = "absent", args = [] }
         // Naming a tool that is not there is an error rather than an empty pack.
         assert!(export_tools(&cfg, "one", "", &["nope".into()]).is_err());
         std::fs::remove_dir_all(dir).ok();
+    }
+    /// A pack written by hand, with the script inline and no digest beside it.
+    #[test]
+    fn a_hand_written_pack_need_not_repeat_the_digest_of_a_script_it_contains() {
+        let source = "print('hi')\n";
+        let toml = format!(
+            r#"
+[pack]
+name = "brain"
+description = "one file"
+version = "1"
+
+[[script]]
+name = "vault-write"
+interpreter = "python3"
+source = """
+{source}"""
+
+[[tool]]
+name = "brain_append"
+description = "Add to a note."
+action = {{ type = "script", script = "vault-write", args = ["append"] }}
+"#
+        );
+        let pack: Pack = toml::from_str(&toml).unwrap();
+        pack.check().unwrap();
+        // The config records the digest of what it actually read, so the file on disk is still
+        // protected from being edited later behind the gateway's back.
+        assert_eq!(scripts::digest(pack.scripts[0].source.as_bytes()).len(), 64);
+
+        // And a digest that IS given still has to be right.
+        let lying = toml.replace(
+            "interpreter = \"python3\"",
+            "interpreter = \"python3\"\nsha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"",
+        );
+        let err = toml::from_str::<Pack>(&lying)
+            .unwrap()
+            .check()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not match the sha256"), "{err}");
     }
 }
