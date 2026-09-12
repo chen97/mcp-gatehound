@@ -68,6 +68,7 @@ mod tests {
             .map(|name| ToolConfig {
                 name: name.into(),
                 description: name.into(),
+                arguments: Vec::new(),
                 input_schema: None,
                 action: Action::Proxy {
                     upstream: "tracker".into(),

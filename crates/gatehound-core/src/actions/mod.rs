@@ -35,7 +35,10 @@ impl ActionEngine {
         for tool in &cfg.tools {
             match &tool.action {
                 Action::Exec(spec) => {
-                    execs.insert(tool.name.clone(), ExecRunner::new(spec.clone()));
+                    execs.insert(
+                        tool.name.clone(),
+                        ExecRunner::with_arguments(spec.clone(), tool.arguments.clone()),
+                    );
                 }
                 // A script action becomes an exec here, once, at build time — so it inherits
                 // every guard the runner already enforces instead of growing a parallel set,
@@ -50,7 +53,10 @@ impl ActionEngine {
                         )
                     })?;
                     let lowered = spec.lower(def, &base_dir)?;
-                    execs.insert(tool.name.clone(), ExecRunner::new(lowered));
+                    execs.insert(
+                        tool.name.clone(),
+                        ExecRunner::with_arguments(lowered, tool.arguments.clone()),
+                    );
                 }
                 Action::Proxy { .. } => {}
             }
@@ -197,6 +203,7 @@ mod tests {
         ToolConfig {
             name: name.into(),
             description: String::new(),
+            arguments: Vec::new(),
             input_schema: None,
             action: Action::Exec(ExecSpec {
                 cmd: crate::testing::helper(),
@@ -354,6 +361,7 @@ mod tests {
         let tool = ToolConfig {
             name: "echo_note".into(),
             description: String::new(),
+            arguments: Vec::new(),
             input_schema: None,
             action: Action::Script(ScriptSpec {
                 script: "echoer".into(),
@@ -407,6 +415,7 @@ mod tests {
         let tool = ToolConfig {
             name: "t".into(),
             description: String::new(),
+            arguments: Vec::new(),
             input_schema: None,
             action: Action::Script(ScriptSpec {
                 script: "guarded".into(),
@@ -515,6 +524,7 @@ mod tests {
         let tool = ToolConfig {
             name: "read_note".into(),
             description: String::new(),
+            arguments: Vec::new(),
             input_schema: None,
             action: Action::Proxy {
                 upstream: "notes".into(),

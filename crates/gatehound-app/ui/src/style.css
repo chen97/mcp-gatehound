@@ -83,6 +83,15 @@ header .ghost { margin-left: auto; }
    row's name starts where a service's dot does, and the list reads as two lists again. */
 .dot-gap { width: 8px; flex: none; }
 
+/* The arguments a tool takes, one row each. Name narrow, description wide: the description is
+   the half that is actually read, by a model that has never seen this screen. */
+table.args td { vertical-align: top; }
+table.args td:first-child { width: 150px; }
+table.args td:last-child { width: 1%; white-space: nowrap; }
+table.args input { width: 100%; }
+.ta-req { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--mut); }
+.ta-req input { width: auto; }
+
 nav { display: flex; gap: var(--s1); padding: 0 var(--s5); position: relative; }
 nav button {
   background: none; border: none; color: var(--mut); cursor: pointer;

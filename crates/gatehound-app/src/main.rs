@@ -1203,7 +1203,9 @@ fn add_script_tool(
     description: String,
     args: Vec<String>,
     stdin: Option<String>,
-    input_schema: Option<serde_json::Value>,
+    // What a caller may pass. These build the schema, the description and the command line,
+    // so the tool cannot advertise one thing and run another.
+    arguments: Vec<gatehound_core::config::ArgumentDef>,
     on_first_call: Decision,
 ) -> Result<ApplyResult, String> {
     let mut cfg = (*state.gateway.cfg).clone();
@@ -1216,7 +1218,10 @@ fn add_script_tool(
     cfg.tools.push(gatehound_core::config::ToolConfig {
         name: tool.clone(),
         description,
-        input_schema,
+        arguments,
+        // Never both: the declared arguments are what builds the command line, so a schema
+        // beside them could only disagree with it.
+        input_schema: None,
         action: gatehound_core::config::Action::Script(gatehound_core::scripts::ScriptSpec {
             script: script.clone(),
             args,

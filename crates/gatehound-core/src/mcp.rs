@@ -271,7 +271,10 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
                 .map(|t| {
                     json!({
                         "name": t.name,
-                        "description": t.description,
+                        // The declared arguments are folded in: a client that shows only the
+                        // description would otherwise show one with no explanation of what to
+                        // pass.
+                        "description": t.client_description(),
                         "inputSchema": t.schema()
                     })
                 })

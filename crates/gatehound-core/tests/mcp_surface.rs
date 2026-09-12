@@ -58,6 +58,7 @@ fn echo_tool() -> ToolConfig {
     ToolConfig {
         name: "echo".into(),
         description: "Echo a word back".into(),
+        arguments: Vec::new(),
         input_schema: Some(json!({
             "type": "object",
             "properties": { "word": { "type": "string" } },
@@ -82,6 +83,7 @@ fn secret_tool() -> ToolConfig {
     ToolConfig {
         name: "secret".into(),
         description: "A tool most identities may not see".into(),
+        arguments: Vec::new(),
         input_schema: None,
         action: Action::Exec(ExecSpec {
             cmd: gatehound_core::testing::helper(),
@@ -103,6 +105,7 @@ fn once_tool() -> ToolConfig {
     ToolConfig {
         name: "once".into(),
         description: "Acts at most once per idempotency key".into(),
+        arguments: Vec::new(),
         input_schema: None,
         action: Action::Exec(ExecSpec {
             cmd: gatehound_core::testing::helper(),

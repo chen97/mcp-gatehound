@@ -74,36 +74,117 @@ pub fn render(template: &str, vars: &BTreeMap<String, String>) -> Result<String>
     Ok(out)
 }
 
+/// Every `{name}` a template refers to, ignoring doubled braces.
+///
+/// Used to tell a declared argument the config already places by hand from one the gateway
+/// should append itself, and to catch a placeholder naming an argument that does not exist
+/// while the config is being read rather than on the call that needed it.
+pub fn placeholders(template: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '{' {
+            continue;
+        }
+        if chars.peek() == Some(&'{') {
+            chars.next();
+            continue;
+        }
+        let mut name = String::new();
+        for c2 in chars.by_ref() {
+            if c2 == '}' {
+                out.push(name);
+                break;
+            }
+            name.push(c2);
+        }
+    }
+    out
+}
+
+/// One argv element, checked against the limits that make argv safe to use at all.
+fn push_checked(argv: &mut Vec<String>, value: String) -> Result<()> {
+    if value.len() > MAX_ARGV_VALUE_BYTES {
+        bail!(
+            "argument rendered to {} bytes, over the {MAX_ARGV_VALUE_BYTES}-byte argv limit — \
+             pass long content on stdin instead",
+            value.len()
+        );
+    }
+    if value.contains('\0') {
+        bail!("argument contains a NUL byte");
+    }
+    argv.push(value);
+    Ok(())
+}
+
 /// Build the argv for a run. Returns the rendered arguments only — `cmd` is never templated,
 /// so a caller can never choose the binary.
-pub fn build_argv(spec: &ExecSpec, vars: &BTreeMap<String, String>) -> Result<Vec<String>> {
-    let mut argv = Vec::with_capacity(spec.args.len());
+///
+/// `declared` are the tool's own arguments. One the config already places itself, by naming it
+/// in a `{placeholder}`, is left where it was put; every other one is appended as a
+/// `--name value` pair, and an absent optional one is dropped pair and all. That last part is
+/// why this exists: an optional argument written as a bare placeholder could only ever be a
+/// hard error, because a placeholder with no value has to be one.
+pub fn build_argv(
+    spec: &ExecSpec,
+    declared: &[crate::config::ArgumentDef],
+    vars: &BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    // Before anything is rendered: a required argument that was not sent should be reported as
+    // the missing argument it is, whether or not a template happens to mention it. Rendering
+    // first meant one placed by hand came back as "template placeholder {note} has no value",
+    // which describes the config rather than the call.
+    for a in declared {
+        if a.required && !vars.contains_key(&a.name) {
+            bail!("argument '{}' is required", a.name);
+        }
+    }
+
+    let mut argv = Vec::with_capacity(spec.args.len() + declared.len() * 2);
     for arg in &spec.args {
-        let rendered = render(arg, vars)?;
-        if rendered.len() > MAX_ARGV_VALUE_BYTES {
-            bail!(
-                "argument rendered to {} bytes, over the {MAX_ARGV_VALUE_BYTES}-byte argv limit — \
-                 pass long content on stdin instead",
-                rendered.len()
-            );
+        push_checked(&mut argv, render(arg, vars)?)?;
+    }
+
+    let placed: Vec<String> = spec
+        .args
+        .iter()
+        .chain(spec.stdin.iter())
+        .flat_map(|t| placeholders(t))
+        .collect();
+    for a in declared {
+        if placed.iter().any(|p| p == &a.name) {
+            continue;
         }
-        if rendered.contains('\0') {
-            bail!("argument contains a NUL byte");
+        // Absent is simply left out — an absent required one already bailed above.
+        if let Some(value) = vars.get(&a.name) {
+            push_checked(&mut argv, format!("--{}", a.name))?;
+            push_checked(&mut argv, value.clone())?;
         }
-        argv.push(rendered);
     }
     Ok(argv)
 }
 
 pub struct ExecRunner {
     spec: ExecSpec,
+    /// The tool's declared arguments, if it has any. Held here rather than on `ExecSpec`
+    /// because they belong to the tool a caller names, not to the command it happens to run.
+    declared: Vec<crate::config::ArgumentDef>,
     permits: Arc<Semaphore>,
 }
 
 impl ExecRunner {
     pub fn new(spec: ExecSpec) -> Self {
+        Self::with_arguments(spec, Vec::new())
+    }
+
+    pub fn with_arguments(spec: ExecSpec, declared: Vec<crate::config::ArgumentDef>) -> Self {
         let permits = Arc::new(Semaphore::new(spec.max_concurrency.max(1)));
-        Self { spec, permits }
+        Self {
+            spec,
+            declared,
+            permits,
+        }
     }
 
     pub fn spec(&self) -> &ExecSpec {
@@ -112,7 +193,7 @@ impl ExecRunner {
 
     /// Spawn the command with the placeholders filled, enforcing every limit in the spec.
     pub async fn run(&self, vars: &BTreeMap<String, String>) -> Result<ExecOutput> {
-        let argv = build_argv(&self.spec, vars)?;
+        let argv = build_argv(&self.spec, &self.declared, vars)?;
         let stdin_data = match &self.spec.stdin {
             Some(t) => Some(render(t, vars)?),
             None => None,
@@ -218,6 +299,15 @@ impl ExecRunner {
 mod tests {
     use super::*;
 
+    fn arg(name: &str, required: bool) -> crate::config::ArgumentDef {
+        crate::config::ArgumentDef {
+            name: name.into(),
+            description: String::new(),
+            required,
+            kind: crate::config::ArgKind::String,
+        }
+    }
+
     fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()
@@ -264,16 +354,86 @@ mod tests {
     fn caller_input_stays_a_single_argv_element() {
         // A value that would be several words in a shell is still exactly one argument.
         let s = spec(&["-c", "{payload}"], None);
-        let argv = build_argv(&s, &vars(&[("payload", "a; rm -rf /  $(id)")])).unwrap();
+        let argv = build_argv(&s, &[], &vars(&[("payload", "a; rm -rf /  $(id)")])).unwrap();
         assert_eq!(argv, vec!["-c", "a; rm -rf /  $(id)"]);
+    }
+
+    /// A declared argument the config does not place itself becomes a `--name value` pair.
+    #[test]
+    fn declared_arguments_become_flags_without_anyone_writing_a_template() {
+        let s = spec(&["search"], None);
+        let argv = build_argv(
+            &s,
+            &[arg("query", true), arg("folder", false)],
+            &vars(&[("query", "gatehound"), ("folder", "Projects")]),
+        )
+        .unwrap();
+        assert_eq!(
+            argv,
+            vec!["search", "--query", "gatehound", "--folder", "Projects"]
+        );
+    }
+
+    /// The point of declaring one optional: absent, it takes its flag with it rather than
+    /// becoming an empty string or a hard error.
+    #[test]
+    fn an_absent_optional_argument_drops_its_flag_too() {
+        let s = spec(&["search"], None);
+        let argv = build_argv(
+            &s,
+            &[arg("query", true), arg("folder", false)],
+            &vars(&[("query", "gatehound")]),
+        )
+        .unwrap();
+        assert_eq!(argv, vec!["search", "--query", "gatehound"]);
+    }
+
+    /// Named as the argument it is, whether the config appends it or places it by hand. Placed
+    /// by hand it used to surface as "template placeholder {note} has no value", which tells a
+    /// caller about a command line they did not write and cannot see.
+    #[test]
+    fn an_absent_required_argument_is_refused_by_name() {
+        let appended = spec(&["search"], None);
+        let err = build_argv(&appended, &[arg("query", true)], &vars(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("argument 'query' is required"), "{err}");
+
+        let placed = spec(&["read", "{note}"], None);
+        let err = build_argv(&placed, &[arg("note", true)], &vars(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("argument 'note' is required"), "{err}");
+    }
+
+    /// Placed by hand, it stays where it was put — and is not also appended, which would pass
+    /// the same value twice and make the second one win.
+    #[test]
+    fn an_argument_the_template_already_places_is_not_appended_again() {
+        let s = spec(&["read", "{note}"], None);
+        let argv = build_argv(&s, &[arg("note", true)], &vars(&[("note", "Brain")])).unwrap();
+        assert_eq!(argv, vec!["read", "Brain"]);
+    }
+
+    /// Same when it is placed on stdin rather than in argv.
+    #[test]
+    fn an_argument_placed_on_stdin_is_not_appended_to_argv() {
+        let s = spec(&["append"], Some("{text}"));
+        let argv = build_argv(&s, &[arg("text", true)], &vars(&[("text", "hello")])).unwrap();
+        assert_eq!(argv, vec!["append"]);
+    }
+
+    #[test]
+    fn placeholders_ignores_a_doubled_brace() {
+        assert_eq!(placeholders("printf '{{}}' {uid}"), vec!["uid".to_string()]);
     }
 
     #[test]
     fn oversized_and_nul_bearing_arguments_are_refused() {
         let s = spec(&["{payload}"], None);
         let big = "x".repeat(MAX_ARGV_VALUE_BYTES + 1);
-        assert!(build_argv(&s, &vars(&[("payload", &big)])).is_err());
-        assert!(build_argv(&s, &vars(&[("payload", "a\0b")])).is_err());
+        assert!(build_argv(&s, &[], &vars(&[("payload", &big)])).is_err());
+        assert!(build_argv(&s, &[], &vars(&[("payload", "a\0b")])).is_err());
     }
 
     #[tokio::test]

@@ -1764,36 +1764,6 @@ async function say(message: string, title?: string): Promise<void> {
   });
 }
 
-/// Ask for several values at once.
-///
-/// The alternative was a chain of one-line prompts, which asks for a shape nobody can see: you
-/// answer the second question without being able to check the first, and cancelling halfway
-/// leaves the earlier answers nowhere.
-async function form(
-  title: string,
-  fields: Field[],
-  o?: { body?: string[]; confirm?: string; size?: ModalSize },
-): Promise<Record<string, string> | null> {
-  return showModal<Record<string, string>>({
-    title,
-    body: o?.body,
-    fields,
-    confirm: o?.confirm ?? "Save",
-    cancel: "Cancel",
-    size: o?.size,
-    read: (panel) => {
-      const out: Record<string, string> = {};
-      for (const f of fields) {
-        const el = panel.querySelector<HTMLInputElement | HTMLTextAreaElement>(
-          `#mf-${CSS.escape(f.name)}`,
-        );
-        out[f.name] = el?.value ?? "";
-      }
-      return out;
-    },
-  });
-}
-
 /// Whether this element holds something half-entered that a repaint would discard./// Whether this element holds something half-entered that a repaint would discard.
 ///
 /// A text field does; a checkbox does not. A tick is a finished decision, and the screen has to
@@ -2749,65 +2719,243 @@ function wireScripts(list: ScriptView[]): void {
 /// script list, and reached automatically as step two of adding a script as a downstream.
 ///
 /// Returns whether a tool was actually added, so the caller can say what happened if it was not.
-async function exposeScript(script: string, description?: string): Promise<boolean> {
-  const answers = await form(
-    `Name the tool that runs ${script}`,
-    [
-      {
-        name: "tool",
-        label: "Tool name",
-        value: script.replace(/-/g, "_"),
-        hint: "What a client calls. Policy attaches to this, not to the script.",
-        required: true,
-      },
-      {
-        name: "description",
-        label: "Description",
-        value: description ?? "",
-        placeholder: "what a caller should understand this does",
-        hint: "One line, shown in the client's tool list.",
-      },
-      {
-        name: "args",
-        label: "Arguments",
-        placeholder: "append,--uid,{uid},--heading,{heading}",
-        hint: "Comma separated, one argv element each. A {name} is filled from the caller's argument of that name.",
-      },
-      {
-        name: "stdin",
-        label: "Standard input",
-        value: "{text}",
-        hint: "Long content belongs here rather than in an argument. Leave blank for nothing.",
-      },
-    ],
-    {
-      body: [
-        `The script is saved. This is what a client sees and asks for; the script is what runs.`,
-      ],
-      confirm: "Add the tool",
-    },
-  );
-  if (!answers) return false;
+/// One argument the tool takes. The same shape the core reads from `[[tool.argument]]`.
+interface ToolArgument {
+  name: string;
+  description: string;
+  required: boolean;
+}
 
-  const tool = answers.tool.trim();
+/// A tool being defined over a script.
+///
+/// Everything a tool is, in one place: its name, what it does, and what a caller may pass.
+/// There used to be a comma-separated argv template here instead — `append,--uid,{uid}` — and
+/// separately a JSON Schema that nobody filled in, so a tool would advertise nothing and run
+/// on placeholders the operator had to keep in their head. Now the arguments are declared once
+/// and the command line is shown back.
+let exposeDraft: {
+  script: string;
+  tool: string;
+  description: string;
+  args: ToolArgument[];
+  /// Fixed words the script expects before its options — a subcommand, usually.
+  lead: string;
+  /// The argument whose value goes in on standard input rather than in the command line.
+  /// Empty for none.
+  stdin: string;
+} | null = null;
+
+/// The command line the gateway will run, as it will run it.
+///
+/// The whole point of showing it: a tool is a name and some arguments, and the step from that
+/// to "what actually happens" was the part people were holding in their heads.
+function argvPreview(d: { script: string; args: ToolArgument[]; lead: string; stdin: string }): string {
+  const lead = d.lead.trim().split(/\s+/).filter(Boolean);
+  const flags = d.args
+    .filter((a) => a.name.trim() && a.name !== d.stdin)
+    .flatMap((a) => [`--${a.name.trim()}`, `<${a.name.trim()}>`]);
+  return [`scripts/${d.script}`, ...lead, ...flags].join(" ");
+}
+
+function exposeBody(): string {
+  const d = exposeDraft!;
+  const rows = d.args
+    .map(
+      (a, i) => `<tr>
+        <td><input class="ta-name" data-i="${i}" value="${esc(a.name)}" placeholder="query" /></td>
+        <td><input class="ta-desc" data-i="${i}" value="${esc(a.description)}"
+                   placeholder="what a caller should pass, and when" /></td>
+        <td><label class="ta-req"><input type="checkbox" class="ta-required" data-i="${i}"${
+          a.required ? " checked" : ""
+        } /> required</label></td>
+        <td><button class="ghost ta-drop" data-i="${i}" aria-label="Remove ${esc(a.name || "argument")}">Remove</button></td>
+      </tr>`,
+    )
+    .join("");
+
+  const stdinOptions = [`<option value=""${d.stdin === "" ? " selected" : ""}>nothing</option>`]
+    .concat(
+      d.args
+        .filter((a) => a.name.trim())
+        .map(
+          (a) =>
+            `<option value="${esc(a.name)}"${a.name === d.stdin ? " selected" : ""}>${esc(a.name)}</option>`,
+        ),
+    )
+    .join("");
+
+  return `<div class="meta">
+      A tool is what a client sees: a name, a sentence, and the arguments it may pass. The
+      script is what runs. Declare the arguments here and the gateway builds the command line,
+      the schema and the description from them — there is nothing to keep in step by hand.
+    </div>
+
+    <table class="kv"><tbody>
+      <tr><td class="meta">Tool name</td><td>
+        <input id="ex-tool" value="${esc(d.tool)}" placeholder="brain_search" />
+        <div class="meta">What a client calls. Policy attaches to this, not to the script.</div>
+      </td></tr>
+      <tr><td class="meta">What it does</td><td>
+        <input id="ex-desc" value="${esc(d.description)}"
+               placeholder="Find notes in the vault containing a phrase." />
+        <div class="meta">One line. A caller reads this to decide whether to call it at all.</div>
+      </td></tr>
+    </tbody></table>
+
+    <h4>Arguments</h4>
+    ${
+      d.args.length
+        ? `<table class="args">
+             <thead><tr><th>Name</th><th>Description</th><th></th><th></th></tr></thead>
+             <tbody>${rows}</tbody>
+           </table>`
+        : `<div class="meta">None yet. A tool with no arguments is fine — it just takes nothing.</div>`
+    }
+    <div class="row">
+      <button id="ex-add" class="ghost">Add an argument</button>
+    </div>
+
+    <h4>What will run</h4>
+    <pre class="script-body">${esc(argvPreview(d))}</pre>
+    <div class="meta">
+      Each argument is passed as <code>--name value</code>, one argv element each and never
+      through a shell. An optional one that a caller leaves out is dropped, flag and all.
+    </div>
+
+    <table class="kv"><tbody>
+      <tr><td class="meta">Send on stdin</td><td>
+        <select id="ex-stdin">${stdinOptions}</select>
+        <div class="meta">
+          Long content belongs here rather than on the command line. The argument you pick is
+          piped in instead of being passed as a flag.
+        </div>
+      </td></tr>
+      <tr><td class="meta">Before the options</td><td>
+        <input id="ex-lead" value="${esc(d.lead)}" placeholder="search" />
+        <div class="meta">
+          Fixed words your script expects first, space separated — a subcommand, usually.
+          Leave blank if it has none.
+        </div>
+      </td></tr>
+    </tbody></table>
+
+    <div class="row modal-foot">
+      <button id="ex-save" class="primary">Add the tool</button>
+      <button id="ex-cancel" class="ghost">Cancel</button>
+    </div>`;
+}
+
+function wireExpose(): void {
+  const d = exposeDraft!;
+  const bind = (sel: string, set: (v: string) => void): void => {
+    const el = $(sel) as HTMLInputElement | HTMLSelectElement | null;
+    el?.addEventListener("input", () => set(el.value));
+    el?.addEventListener("change", () => set(el.value));
+  };
+  bind("#ex-tool", (v) => (d.tool = v));
+  bind("#ex-desc", (v) => (d.description = v));
+  bind("#ex-lead", (v) => {
+    d.lead = v;
+    paintPreview();
+  });
+  bind("#ex-stdin", (v) => {
+    d.stdin = v;
+    paintPreview();
+  });
+
+  for (const el of Array.from(document.querySelectorAll<HTMLInputElement>(".ta-name"))) {
+    el.addEventListener("input", () => {
+      d.args[Number(el.dataset.i)].name = el.value;
+      // Both in place. Nothing here redraws the step: this fires on a keystroke, and on the
+      // blur that follows clicking into the next field — a rebuild there detaches the element
+      // the pointer is already heading for, and what gets typed next lands on nothing.
+      paintStdinOptions();
+      paintPreview();
+    });
+  }
+  for (const el of Array.from(document.querySelectorAll<HTMLInputElement>(".ta-desc"))) {
+    el.addEventListener("input", () => (d.args[Number(el.dataset.i)].description = el.value));
+  }
+  for (const el of Array.from(document.querySelectorAll<HTMLInputElement>(".ta-required"))) {
+    el.addEventListener("change", () => (d.args[Number(el.dataset.i)].required = el.checked));
+  }
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>(".ta-drop"))) {
+    el.addEventListener("click", () => {
+      const gone = d.args.splice(Number(el.dataset.i), 1)[0];
+      if (gone && d.stdin === gone.name) d.stdin = "";
+      redrawStep();
+    });
+  }
+
+  $("#ex-add")?.addEventListener("click", () => {
+    d.args.push({ name: "", description: "", required: true });
+    redrawStep();
+    // Land on the field that just appeared, not on the button that made it.
+    const fields = Array.from(document.querySelectorAll<HTMLInputElement>(".ta-name"));
+    fields[fields.length - 1]?.focus();
+  });
+
+  $("#ex-cancel")?.addEventListener("click", () => endStep());
+  $("#ex-save")?.addEventListener("click", () => void saveExposed());
+}
+
+/// Repaint only the command line. Redrawing the whole step on every keystroke would take the
+/// cursor out of the field being typed in.
+function paintPreview(): void {
+  const pre = document.querySelector<HTMLElement>(".modal-step pre.script-body");
+  if (pre && exposeDraft) pre.textContent = argvPreview(exposeDraft);
+}
+
+/// Keep the "send on stdin" list matching the arguments that exist, in place.
+///
+/// Renaming an argument can pull the selected one out from under the selection, so that is
+/// checked here rather than discovered at save time.
+function paintStdinOptions(): void {
+  const sel = $("#ex-stdin") as HTMLSelectElement | null;
+  const d = exposeDraft;
+  if (!sel || !d) return;
+  const named = d.args.map((a) => a.name.trim()).filter(Boolean);
+  const want = [`<option value="">nothing</option>`]
+    .concat(named.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`))
+    .join("");
+  if (sel.innerHTML === want) return;
+  if (!named.includes(d.stdin)) d.stdin = "";
+  sel.innerHTML = want;
+  sel.value = d.stdin;
+}
+
+async function saveExposed(): Promise<boolean> {
+  const d = exposeDraft!;
+  const tool = d.tool.trim();
   if (!tool) {
     await say("A tool needs a name — that is what a client calls and what policy attaches to.");
     return false;
+  }
+  const args = d.args
+    .map((a) => ({ ...a, name: a.name.trim(), description: a.description.trim() }))
+    .filter((a) => a.name);
+  const names = new Set<string>();
+  for (const a of args) {
+    if (names.has(a.name)) {
+      await say(`Two arguments are both called ${a.name}. A caller could only mean one of them.`);
+      return false;
+    }
+    names.add(a.name);
   }
 
   try {
     const result = await invoke<ApplyResult>("add_script_tool", {
       tool,
-      script,
-      description: answers.description,
-      args: answers.args
-        .split(",")
-        .map((a) => a.trim())
-        .filter((a) => a.length > 0),
-      stdin: answers.stdin.trim() === "" ? null : answers.stdin,
-      inputSchema: null,
+      script: d.script,
+      description: d.description,
+      args: d.lead.trim().split(/\s+/).filter(Boolean),
+      // An argument named here is piped in rather than passed as a flag; the core reads the
+      // placeholder and leaves it off the command line.
+      stdin: d.stdin ? `{${d.stdin}}` : null,
+      arguments: args,
       onFirstCall: "ask" as Decision,
     });
+    endStep();
     if (
       await ask(
         `Added ${tool} to ${result.config_path}.\n\n` +
@@ -2822,6 +2970,26 @@ async function exposeScript(script: string, description?: string): Promise<boole
   }
   void refresh();
   return true;
+}
+
+/// Turn a script into a tool an upstream client can call.
+///
+/// Still its own step, because one script can back several tools with different arguments and
+/// policy attaches to the tool a caller names rather than to the file.
+async function exposeScript(script: string, description?: string): Promise<boolean> {
+  exposeDraft = {
+    script,
+    tool: script.replace(/-/g, "_"),
+    description: description ?? "",
+    args: [],
+    lead: "",
+    stdin: "",
+  };
+  const before = lastSnapshot?.tools.length ?? 0;
+  await stepModal(`Expose ${script} as a tool`, "xl", exposeBody, () => wireExpose());
+  exposeDraft = null;
+  // Whether a tool was actually added, so the caller can say what happened if it was not.
+  return (lastSnapshot?.tools.length ?? 0) > before;
 }
 
 let reviewTimer: number | undefined;

@@ -199,6 +199,9 @@ impl NewConnection {
             tools.push(ToolConfig {
                 name: tool_name.to_string(),
                 description: t.description.trim().to_string(),
+                // A discovered tool arrives with the upstream's own schema, which is richer
+                // than `[[tool.argument]]` can express and is not ours to re-describe.
+                arguments: Vec::new(),
                 input_schema: t.input_schema.clone(),
                 action,
                 rate_limit: None,

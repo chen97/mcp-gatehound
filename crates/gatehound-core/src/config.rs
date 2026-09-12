@@ -141,12 +141,70 @@ fn default_min_spacing() -> u64 {
     2
 }
 
+/// What kind of value an argument carries. Only scalars: an object or an array would have to
+/// be serialized into one argv element, which is the shape of problem argv arrays exist to
+/// avoid.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArgKind {
+    #[default]
+    String,
+    Integer,
+    Number,
+    Boolean,
+}
+
+impl ArgKind {
+    fn json_name(self) -> &'static str {
+        match self {
+            ArgKind::String => "string",
+            ArgKind::Integer => "integer",
+            ArgKind::Number => "number",
+            ArgKind::Boolean => "boolean",
+        }
+    }
+}
+
+/// The argument an idempotent tool requires, added to a derived schema so that requirement is
+/// visible rather than discovered by a rejected call.
+const IDEMPOTENCY_KEY: &str = "idempotency_key";
+
+/// One argument a tool takes.
+///
+/// Declared once, in one place, and used for three things that used to be written separately
+/// and drift apart: the JSON Schema a client reads, the sentence a client reads next to it,
+/// and the argv the script is actually run with. Writing those by hand meant a tool could
+/// advertise an argument it never passed on, or pass one it never advertised, and neither
+/// mistake showed up until a call failed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ArgumentDef {
+    pub name: String,
+    /// What a caller should understand this argument to be. Shown in the schema and in the
+    /// tool's description, because plenty of clients render only the latter.
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "yes")]
+    pub required: bool,
+    #[serde(default, rename = "type")]
+    pub kind: ArgKind,
+}
+
+fn yes() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolConfig {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    /// JSON Schema for the tool's arguments. Written as a TOML table in `gatehound.toml`.
+    /// The arguments this tool takes, as `[[tool.argument]]` tables. Prefer these to
+    /// `input_schema`: they also build the argv, so the two cannot disagree.
+    #[serde(default, rename = "argument", skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<ArgumentDef>,
+    /// JSON Schema for the tool's arguments, written out by hand as a TOML table. The escape
+    /// hatch for a shape `[[tool.argument]]` cannot express — enums, nested objects, a schema
+    /// copied from an upstream. Declaring both is refused rather than merged.
     #[serde(default)]
     pub input_schema: Option<Value>,
     pub action: Action,
@@ -158,11 +216,157 @@ pub struct ToolConfig {
 }
 
 impl ToolConfig {
+    /// The JSON Schema a client sees. Derived from the declared arguments unless a schema was
+    /// written out by hand.
     pub fn schema(&self) -> Value {
-        self.input_schema
-            .clone()
-            .unwrap_or_else(|| json!({ "type": "object", "properties": {} }))
+        if let Some(explicit) = &self.input_schema {
+            return explicit.clone();
+        }
+        if self.arguments.is_empty() {
+            return json!({ "type": "object", "properties": {} });
+        }
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+        for a in &self.arguments {
+            let mut prop = serde_json::Map::new();
+            prop.insert("type".into(), json!(a.kind.json_name()));
+            if !a.description.is_empty() {
+                prop.insert("description".into(), json!(a.description));
+            }
+            properties.insert(a.name.clone(), Value::Object(prop));
+            if a.required {
+                required.push(a.name.clone());
+            }
+        }
+        // An idempotent tool refuses a call without a key, so the schema had better say so.
+        // Left to the operator this was one more thing to keep in step by hand, and forgetting
+        // it produced a tool that rejected every call a client made in good faith.
+        if self.idempotent && !properties.contains_key(IDEMPOTENCY_KEY) {
+            properties.insert(
+                IDEMPOTENCY_KEY.into(),
+                json!({
+                    "type": "string",
+                    "description": "A key of the caller's choosing. Repeating one returns the \
+                                    first result instead of acting again.",
+                }),
+            );
+            required.push(IDEMPOTENCY_KEY.into());
+        }
+        json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            // Declared arguments are the whole surface: anything else would be dropped on the
+            // way to argv, so saying so beats accepting it silently.
+            "additionalProperties": false,
+        })
     }
+
+    /// The description a client sees in `tools/list`.
+    ///
+    /// The arguments are spelled out here as well as in the schema on purpose. A client that
+    /// renders only the description — and many do — would otherwise show a tool whose
+    /// arguments have no explanation at all, which is the whole reason to have written one.
+    pub fn client_description(&self) -> String {
+        if self.arguments.is_empty() {
+            return self.description.clone();
+        }
+        let extra: &[(&str, bool, &str)] =
+            if self.idempotent && !self.arguments.iter().any(|a| a.name == IDEMPOTENCY_KEY) {
+                &[(
+                IDEMPOTENCY_KEY,
+                true,
+                "A key of the caller's choosing. Repeating one returns the first result instead \
+                 of acting again.",
+            )]
+            } else {
+                &[]
+            };
+        let mut out = self.description.trim_end().to_string();
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("Arguments:");
+        for a in &self.arguments {
+            out.push_str(&format!(
+                "\n  {} ({}, {})",
+                a.name,
+                a.kind.json_name(),
+                if a.required { "required" } else { "optional" },
+            ));
+            if !a.description.is_empty() {
+                out.push_str(" \u{2014} ");
+                out.push_str(a.description.trim());
+            }
+        }
+        for (name, required, description) in extra {
+            out.push_str(&format!(
+                "\n  {name} (string, {}) \u{2014} {description}",
+                if *required { "required" } else { "optional" },
+            ));
+        }
+        out
+    }
+}
+
+/// Everything about a tool's arguments that should fail before the gateway starts.
+///
+/// All of it used to fail on a call instead, as either a confusing message about a template
+/// placeholder or, worse, silence: an argument advertised in the schema and never passed on,
+/// or passed on and never advertised, looks exactly like a working tool until someone reads
+/// the output and finds it ignored what they asked for.
+fn validate_arguments(t: &ToolConfig) -> Result<()> {
+    if t.arguments.is_empty() {
+        return Ok(());
+    }
+    if t.input_schema.is_some() {
+        bail!(
+            "tool '{}' declares both [[tool.argument]] and input_schema — use one or the other, \
+             since only the arguments also build the command line",
+            t.name
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for a in &t.arguments {
+        let name = a.name.trim();
+        if name.is_empty() {
+            bail!("tool '{}' has an argument with no name", t.name);
+        }
+        // The name becomes `--name` on a command line and a key in a JSON schema, so it is
+        // held to what is unambiguous in both.
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            || name.starts_with('-')
+        {
+            bail!(
+                "tool '{}' has argument '{name}': use letters, digits, '_' and '-', not starting \
+                 with '-'",
+                t.name
+            );
+        }
+        if !seen.insert(name) {
+            bail!("tool '{}' declares argument '{name}' twice", t.name);
+        }
+    }
+
+    // A placeholder naming an argument that was never declared.
+    let templates: Vec<&String> = match &t.action {
+        Action::Exec(spec) => spec.args.iter().chain(spec.stdin.iter()).collect(),
+        Action::Script(spec) => spec.args.iter().chain(spec.stdin.iter()).collect(),
+        Action::Proxy { .. } => Vec::new(),
+    };
+    for template in templates {
+        for p in crate::actions::exec::placeholders(template) {
+            if !seen.contains(p.as_str()) {
+                bail!(
+                    "tool '{}' uses {{{p}}} but declares no argument called '{p}'",
+                    t.name
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -574,6 +778,7 @@ impl Config {
             if !seen.insert(&t.name) {
                 bail!("duplicate tool name: {}", t.name);
             }
+            validate_arguments(t)?;
             if let Action::Proxy { upstream, op } = &t.action {
                 let Some(u) = self.upstream(upstream) else {
                     bail!(
@@ -687,6 +892,7 @@ mod tests {
             tools: vec![ToolConfig {
                 name: "brain_append".into(),
                 description: String::new(),
+                arguments: Vec::new(),
                 input_schema: None,
                 action: Action::Exec(ExecSpec {
                     cmd: "/nowhere/bin/vault-write".into(),
@@ -756,6 +962,7 @@ mod tests {
             tools: vec![ToolConfig {
                 name: "brain_append".into(),
                 description: String::new(),
+                arguments: Vec::new(),
                 input_schema: None,
                 action: Action::Script(crate::scripts::ScriptSpec {
                     script: "vault-write".into(),
@@ -790,6 +997,7 @@ mod tests {
             tools: vec![ToolConfig {
                 name: "brain_append".into(),
                 description: String::new(),
+                arguments: Vec::new(),
                 input_schema: None,
                 action: Action::Script(crate::scripts::ScriptSpec {
                     script: "vault-write".into(),
@@ -897,6 +1105,7 @@ decision = "allow"
         cfg.tools.push(ToolConfig {
             name: "orphan".into(),
             description: String::new(),
+            arguments: Vec::new(),
             input_schema: None,
             action: Action::Proxy {
                 upstream: "nowhere".into(),
@@ -1012,5 +1221,178 @@ decision = "allow"
             Some("team.cloudflareaccess.com")
         );
         back.validate().expect("and the result must be startable");
+    }
+    fn tool_with_arguments(args: Vec<ArgumentDef>) -> ToolConfig {
+        ToolConfig {
+            name: "brain_search".into(),
+            description: "Find notes containing a phrase.".into(),
+            arguments: args,
+            input_schema: None,
+            action: Action::Script(crate::scripts::ScriptSpec {
+                script: "vault-query".into(),
+                args: vec!["search".into()],
+                ..Default::default()
+            }),
+            rate_limit: None,
+            idempotent: false,
+        }
+    }
+
+    fn declared(name: &str, description: &str, required: bool) -> ArgumentDef {
+        ArgumentDef {
+            name: name.into(),
+            description: description.into(),
+            required,
+            kind: ArgKind::String,
+        }
+    }
+
+    /// The schema a client reads is derived, so it cannot disagree with what the command line
+    /// actually passes.
+    #[test]
+    fn declared_arguments_become_the_schema() {
+        let t = tool_with_arguments(vec![
+            declared("query", "Text to find.", true),
+            declared("folder", "Where to look.", false),
+        ]);
+        let schema = t.schema();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["query"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["query"]["description"],
+            "Text to find."
+        );
+        assert_eq!(schema["required"], serde_json::json!(["query"]));
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    /// And the same descriptions appear in the sentence, for the clients that render only that.
+    #[test]
+    fn the_description_a_client_sees_spells_out_every_argument() {
+        let t = tool_with_arguments(vec![
+            declared("query", "Text to find.", true),
+            declared("folder", "Where to look.", false),
+        ]);
+        let d = t.client_description();
+        assert!(d.starts_with("Find notes containing a phrase."), "{d}");
+        assert!(
+            d.contains("query (string, required) \u{2014} Text to find."),
+            "{d}"
+        );
+        assert!(
+            d.contains("folder (string, optional) \u{2014} Where to look."),
+            "{d}"
+        );
+    }
+
+    /// A tool with no declared arguments is untouched: its description is its own.
+    #[test]
+    fn a_tool_without_declared_arguments_keeps_its_description_exactly() {
+        let t = tool_with_arguments(Vec::new());
+        assert_eq!(t.client_description(), "Find notes containing a phrase.");
+        assert_eq!(
+            t.schema(),
+            serde_json::json!({"type": "object", "properties": {}})
+        );
+    }
+
+    /// An idempotent tool refuses a call with no key, so the key is in the schema and in the
+    /// sentence without anyone declaring it.
+    #[test]
+    fn an_idempotent_tool_advertises_the_key_it_will_insist_on() {
+        let mut t = tool_with_arguments(vec![declared("note", "Which note.", true)]);
+        t.idempotent = true;
+        let schema = t.schema();
+        assert_eq!(schema["properties"]["idempotency_key"]["type"], "string");
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["note", "idempotency_key"])
+        );
+        assert!(t
+            .client_description()
+            .contains("idempotency_key (string, required)"));
+
+        // Declared by hand, it is not added twice.
+        let mut byhand = tool_with_arguments(vec![declared("idempotency_key", "A key.", true)]);
+        byhand.idempotent = true;
+        assert_eq!(
+            byhand.schema()["required"],
+            serde_json::json!(["idempotency_key"])
+        );
+        assert_eq!(
+            byhand
+                .client_description()
+                .matches("idempotency_key")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn declaring_arguments_and_a_schema_at_once_is_refused() {
+        let mut t = tool_with_arguments(vec![declared("query", "", true)]);
+        t.input_schema = Some(serde_json::json!({"type": "object"}));
+        let err = validate_arguments(&t).unwrap_err().to_string();
+        assert!(err.contains("both"), "{err}");
+    }
+
+    #[test]
+    fn a_placeholder_naming_no_declared_argument_is_refused() {
+        let mut t = tool_with_arguments(vec![declared("query", "", true)]);
+        t.action = Action::Script(crate::scripts::ScriptSpec {
+            script: "vault-query".into(),
+            args: vec!["search".into(), "{qeury}".into()],
+            ..Default::default()
+        });
+        let err = validate_arguments(&t).unwrap_err().to_string();
+        assert!(err.contains("declares no argument called 'qeury'"), "{err}");
+    }
+
+    #[test]
+    fn an_argument_name_that_would_be_ambiguous_on_a_command_line_is_refused() {
+        let t = tool_with_arguments(vec![declared("--query", "", true)]);
+        assert!(validate_arguments(&t).is_err());
+        let t = tool_with_arguments(vec![
+            declared("query", "", true),
+            declared("query", "", false),
+        ]);
+        let err = validate_arguments(&t).unwrap_err().to_string();
+        assert!(err.contains("twice"), "{err}");
+    }
+
+    /// `[[tool.argument]]` in the file, and nothing else needed to make the tool work.
+    #[test]
+    fn a_tool_declares_its_arguments_in_the_file_and_needs_nothing_else() {
+        let cfg: Config = toml::from_str(
+            r#"
+listen_addr = "127.0.0.1:8790"
+[auth]
+mode = "bearer"
+token = "0123456789abcdef0123456789abcdef"
+
+[[tool]]
+name = "brain_search"
+description = "Find notes."
+action = { type = "exec", cmd = "/bin/echo", args = ["search"] }
+
+[[tool.argument]]
+name = "query"
+description = "Text to find."
+
+[[tool.argument]]
+name = "folder"
+description = "Where to look."
+required = false
+"#,
+        )
+        .unwrap();
+        let t = &cfg.tools[0];
+        assert_eq!(t.arguments.len(), 2);
+        assert!(
+            t.arguments[0].required,
+            "arguments are required unless said otherwise"
+        );
+        assert!(!t.arguments[1].required);
+        assert_eq!(t.schema()["required"], serde_json::json!(["query"]));
     }
 }

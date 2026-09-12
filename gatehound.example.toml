@@ -135,28 +135,56 @@ body = { body = "{text}" }
 # Tools — the surface a caller actually sees.
 # ---------------------------------------------------------------------------------------------
 
+# Declare what a tool takes as `[[tool.argument]]` tables. One declaration does three jobs: it
+# becomes the JSON Schema a client reads, it is spelled out in the description a client reads
+# next to it — plenty of clients render only that — and for exec and script tools it builds the
+# command line. Written separately, as a schema beside a hand-made argv template, the two could
+# disagree, and nothing said so until a call came back wrong.
+#
+# An argument is required unless it says otherwise.
+
 [[tool]]
 name = "list_issues"
 description = "List open issues in a project."
 action = { type = "proxy", upstream = "tracker", op = "list_issues" }
-input_schema = { type = "object", properties = { project = { type = "string" }, limit = { type = "integer" } }, required = ["project"] }
+
+[[tool.argument]]
+name = "project"
+description = "The project key, as it appears in the tracker."
+
+[[tool.argument]]
+name = "limit"
+type = "integer"
+description = "How many to return. Defaults to the tracker's own page size."
+required = false
 
 [[tool]]
 name = "get_issue"
 description = "Read one issue by id."
 action = { type = "proxy", upstream = "tracker", op = "get_issue" }
-input_schema = { type = "object", properties = { id = { type = "string" } }, required = ["id"] }
+
+[[tool.argument]]
+name = "id"
+description = "The issue id, as returned by list_issues."
 
 # A writing tool. `idempotent = true` makes idempotency_key mandatory: replaying a key returns
 # the first result instead of acting again, so a retried request cannot double-post. The rate
-# limit is a second, independent brake.
+# limit is a second, independent brake. The key is added to the schema and the description for
+# you — a tool that insists on one should say so rather than reject the first call that omits it.
 [[tool]]
 name = "comment_on_issue"
-description = "Post a comment on an issue. Requires an idempotency key; repeating one replays the first result."
+description = "Post a comment on an issue."
 action = { type = "proxy", upstream = "tracker", op = "comment" }
 rate_limit = { per_hour = 60, min_spacing_secs = 2 }
 idempotent = true
-input_schema = { type = "object", properties = { id = { type = "string" }, text = { type = "string" }, idempotency_key = { type = "string" } }, required = ["id", "text", "idempotency_key"] }
+
+[[tool.argument]]
+name = "id"
+description = "The issue to comment on."
+
+[[tool.argument]]
+name = "text"
+description = "The comment body, as markdown."
 
 # A local command. On Windows name a program that is actually there — `cmd = "where.exe"`,
 # say — and give a full path when it is not on PATH; a tool naming a binary this machine does
@@ -168,6 +196,36 @@ input_schema = { type = "object", properties = { id = { type = "string" }, text 
 name = "disk_free"
 description = "Free space on the machine running the gateway."
 action = { type = "exec", cmd = "/bin/df", args = ["-h", "/"], timeout_secs = 10, max_output_bytes = 8192 }
+
+# A script you write, exposed as a tool. Write it in the app — it saves the file under
+# `scripts/`, records its digest here, and refuses to start if the file changes behind its
+# back — or drop a file in `scripts/` and add the `[[script]]` block by hand:
+#
+#   [[script]]
+#   name = "vault-query"
+#   interpreter = "python3"
+#   description = "Read a note out of the vault."
+#   sha256 = "<sha256sum scripts/vault-query.py>"
+#
+#   [[tool]]
+#   name = "brain_read"
+#   description = "Return the text of a note, or of one section of it."
+#   action = { type = "script", script = "vault-query", args = ["read"] }
+#
+#   [[tool.argument]]
+#   name = "note"
+#   description = "Note name or path relative to the vault root."
+#
+#   [[tool.argument]]
+#   name = "section"
+#   description = "A heading's exact text. Omit for the whole note."
+#   required = false
+#
+# That runs `python3 scripts/vault-query.py read --note <note> [--section <section>]`: each
+# argument becomes a `--name value` pair, one argv element each and never through a shell, and
+# an optional one the caller leaves out is dropped along with its flag. To put an argument
+# somewhere else on the line, name it as a `{placeholder}` in `args` and it stays where you put
+# it; to pipe one in instead, name it in `stdin`, which is where long content belongs.
 
 # ---------------------------------------------------------------------------------------------
 # Policy — the standing decision for an (identity, tool) pair.
