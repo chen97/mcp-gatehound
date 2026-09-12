@@ -102,6 +102,8 @@ interface PackPlan {
   version: string;
   adds: Applied | null;
   collision: string | null;
+  /// Why it would be refused for any other reason. Replace does not help with these.
+  refusal: string | null;
   replaces: Applied | null;
   missing_env: string[];
   missing_files: MissingFile[];
@@ -3149,16 +3151,32 @@ function renderPackPanel(): string {
       ${
         p.adds
           ? `<h3 style="margin-top:12px">This would add</h3>${appliedList(p.adds)}`
-          : `<div class="notice warn">
-               <strong>A name in this pack already exists here.</strong>
-               <div class="meta">${esc(p.collision ?? "")}</div>
-               <div class="meta">
-                 Importing with replace overwrites it. A pack quietly redefining a tool you
-                 already approved is the "rug pull" this refusal exists to stop, so read the
-                 list below before choosing it.
+          : p.collision
+            ? `<div class="notice warn">
+                 <strong>A name in this pack already exists here.</strong>
+                 <div class="meta">${esc(p.collision)}</div>
+                 <div class="meta">
+                   Importing with replace overwrites it. A pack quietly redefining a tool you
+                   already approved is the "rug pull" this refusal exists to stop, so read the
+                   list below before choosing it.
+                 </div>
                </div>
-             </div>
-             ${p.replaces ? `<h3 style="margin-top:12px">Replacing would change</h3>${appliedList(p.replaces)}` : ""}`
+               ${p.replaces ? `<h3 style="margin-top:12px">Replacing would change</h3>${appliedList(p.replaces)}` : ""}`
+            : // Not a clash, so replace is not the remedy and is not offered. Anything this
+              // screen can actually help with — a command that is not on this machine —
+              // appears under "Files this pack expects" below, with a picker.
+              `<div class="notice warn">
+                 <strong>This pack will not import as it stands.</strong>
+                 <div class="meta">${esc(p.refusal ?? "")}</div>
+                 ${
+                   p.missing_files.length > 0
+                     ? `<div class="meta">
+                          Point the paths below at where they are on this machine and this
+                          should clear.
+                        </div>`
+                     : ""
+                 }
+               </div>`
       }
 
       ${p.scripts.length > 0 ? packScriptsHtml(p) : ""}

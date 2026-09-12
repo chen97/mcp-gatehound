@@ -887,8 +887,13 @@ struct PackPlan {
     version: String,
     /// What a plain import would add. Absent when it would be refused.
     adds: Option<Applied>,
-    /// Why a plain import would be refused — a name that already exists.
+    /// The names in this pack that already exist here. Empty when nothing clashes.
     collision: Option<String>,
+    /// Why a plain import would be refused for any reason other than a clash — a command this
+    /// machine does not have, a tool naming an op its upstream never declares. Importing with
+    /// replace does nothing for these, so they are reported apart from the clash rather than
+    /// under a heading that offers it.
+    refusal: Option<String>,
     /// What importing with replace would do. Absent when that too would fail.
     replaces: Option<Applied>,
     /// Environment variables the pack names that are not set here.
@@ -1398,9 +1403,17 @@ fn inspect_pack(state: tauri::State<'_, AppState>, path: String) -> Result<PackP
 
     // Both answers, because the operator is choosing between them: a plain import, and one
     // that overwrites what is already there.
-    let (adds, collision) = match pack::plan(cfg, &loaded, false) {
+    let clashes = pack::collisions(cfg, &loaded);
+    let (adds, why) = match pack::plan(cfg, &loaded, false) {
         Ok(a) => (Some(a.into()), None),
         Err(e) => (None, Some(e.to_string())),
+    };
+    // A refusal is a clash only when something actually clashes. Anything else keeps its own
+    // reason, because replace is the answer to one of those and not to the other.
+    let (collision, refusal) = match (&adds, clashes.is_empty()) {
+        (Some(_), _) => (None, None),
+        (None, false) => (Some(clashes.join(", ")), None),
+        (None, true) => (None, why),
     };
     let replaces = pack::plan(cfg, &loaded, true).ok().map(Into::into);
     let missing_files = pack::missing_files(&loaded);
@@ -1414,6 +1427,7 @@ fn inspect_pack(state: tauri::State<'_, AppState>, path: String) -> Result<PackP
         version: loaded.pack.version.clone(),
         adds,
         collision,
+        refusal,
         replaces,
         missing_env: loaded.missing_env(),
         missing_files,

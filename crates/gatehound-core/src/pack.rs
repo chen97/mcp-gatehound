@@ -254,6 +254,32 @@ pub fn plan(cfg: &Config, pack: &Pack, replace: bool) -> Result<Applied> {
     )
 }
 
+/// The names in this pack that something here already uses.
+///
+/// Asked separately from planning because a plain import is refused for several reasons, and
+/// only this one is fixed by importing with replace. Reporting every refusal as a name clash
+/// offered the operator a remedy that could not work — and hid the real reason underneath a
+/// heading that contradicted it.
+pub fn collisions(cfg: &Config, pack: &Pack) -> Vec<String> {
+    let mut out = Vec::new();
+    for u in &pack.upstreams {
+        if cfg.upstreams.iter().any(|e| e.name == u.name) {
+            out.push(format!("the upstream {}", u.name));
+        }
+    }
+    for t in &pack.tools {
+        if cfg.tools.iter().any(|e| e.name == t.name) {
+            out.push(format!("the tool {}", t.name));
+        }
+    }
+    for sc in &pack.scripts {
+        if cfg.scripts.iter().any(|e| e.name == sc.name) {
+            out.push(format!("the script {}", sc.name));
+        }
+    }
+    out
+}
+
 /// A local file a pack's `exec` tool names that is not present on this machine.
 ///
 /// A pack travels; absolute paths do not. Whoever wrote it had their own `claude` binary and
@@ -311,7 +337,16 @@ pub fn missing_files(pack: &Pack) -> Vec<MissingFile> {
         let Action::Exec(spec) = &tool.action else {
             continue;
         };
-        if looks_like_path(&spec.cmd) && !Path::new(&spec.cmd).exists() {
+        // A bare name counts too. `qmd` that is not on the gateway's PATH is exactly as
+        // missing as `/opt/qmd` that is not on disk, and the operator fixes both the same way:
+        // by pointing at the binary. Treating only the path-shaped one as missing meant a pack
+        // naming a command by name was refused with no remedy offered at all.
+        let absent = if looks_like_path(&spec.cmd) {
+            !Path::new(&spec.cmd).exists()
+        } else {
+            crate::config::resolve_command(&spec.cmd).is_err()
+        };
+        if absent {
             out.push(MissingFile {
                 tool: tool.name.clone(),
                 kind: MissingFileKind::Command,
@@ -1383,5 +1418,90 @@ action = {{ type = "script", script = "vault-write", args = ["append"] }}
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not match the sha256"), "{err}");
+    }
+    /// A pack naming a command by name, not by path, that this machine does not have.
+    #[test]
+    fn a_command_missing_from_path_is_reported_as_a_missing_file_not_as_nothing() {
+        let text = r#"
+[pack]
+name = "brain"
+description = ""
+version = "1"
+
+[[tool]]
+name = "brain_search"
+description = "Search."
+action = { type = "exec", cmd = "definitely-not-a-real-binary-xyz", args = ["query"] }
+"#;
+        let pack: Pack = toml::from_str(text).unwrap();
+        // Before, only a path-shaped command counted, so this came back empty and the operator
+        // was refused with no remedy offered anywhere on the screen.
+        let missing = missing_files(&pack);
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert_eq!(missing[0].tool, "brain_search");
+        assert_eq!(missing[0].kind, MissingFileKind::Command);
+
+        // And pointing it at a real binary clears it, which is what the picker does.
+        let mut pack = pack;
+        let real = std::env::current_exe().unwrap();
+        resolve_file(&mut pack, &missing[0], &real.display().to_string()).unwrap();
+        assert!(missing_files(&pack).is_empty());
+
+        // A command that IS on PATH is not reported.
+        let ok: Pack = toml::from_str(&text.replace(
+            "definitely-not-a-real-binary-xyz",
+            &real.display().to_string(),
+        ))
+        .unwrap();
+        assert!(missing_files(&ok).is_empty());
+    }
+
+    /// Only a real name clash is a name clash.
+    #[test]
+    fn a_refusal_is_only_called_a_clash_when_something_actually_clashes() {
+        let mut cfg = Config::default();
+        cfg.tools.push(ToolConfig {
+            name: "brain_search".into(),
+            description: String::new(),
+            arguments: Vec::new(),
+            input_schema: None,
+            action: Action::Exec(crate::config::ExecSpec {
+                cmd: "/bin/echo".into(),
+                ..Default::default()
+            }),
+            rate_limit: None,
+            idempotent: false,
+        });
+        let clashing: Pack = toml::from_str(
+            r#"
+[pack]
+name = "p"
+description = ""
+version = "1"
+[[tool]]
+name = "brain_search"
+description = "d"
+action = { type = "exec", cmd = "/bin/echo", args = [] }
+"#,
+        )
+        .unwrap();
+        assert_eq!(collisions(&cfg, &clashing), vec!["the tool brain_search"]);
+
+        // A pack that shares no name with this configuration clashes with nothing, whatever
+        // else might be wrong with it.
+        let separate: Pack = toml::from_str(
+            r#"
+[pack]
+name = "p"
+description = ""
+version = "1"
+[[tool]]
+name = "brain_grep"
+description = "d"
+action = { type = "exec", cmd = "definitely-not-a-real-binary-xyz", args = [] }
+"#,
+        )
+        .unwrap();
+        assert!(collisions(&cfg, &separate).is_empty());
     }
 }
