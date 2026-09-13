@@ -3306,7 +3306,7 @@ function wirePackPanel(): void {
       allowScripts = false;
       allowDangerousScripts = false;
       scriptsAreStale();
-      packPlan = await invoke<PackPlan>("inspect_pack", { path: chosen });
+      packPlan = await invoke<PackPlan>("inspect_pack", { path: chosen, resolutions: null });
       packPath = chosen;
       packChoices = packPlan.missing_files.map(() => "");
     } catch (e) {
@@ -3315,6 +3315,24 @@ function wirePackPanel(): void {
     }
     await refresh();
   });
+
+  /// Ask what importing would do now, with the paths chosen so far applied.
+  ///
+  /// Rather than repainting from the answer given before any of them were: a pack refused
+  /// because it named a command this machine does not have stayed refused after the command
+  /// was found, under a notice promising that pointing at it would clear the refusal.
+  const reinspect = async (): Promise<void> => {
+    if (!packPath) return;
+    try {
+      packPlan = await invoke<PackPlan>("inspect_pack", {
+        path: packPath,
+        resolutions: packChoices,
+      });
+    } catch (e) {
+      void say(String(e));
+    }
+    await refresh();
+  };
 
   document.querySelectorAll<HTMLButtonElement>(".pack-find").forEach((b) => {
     b.addEventListener("click", async () => {
@@ -3342,7 +3360,7 @@ function wirePackPanel(): void {
             );
       if (!chosen) return;
       packChoices[i] = chosen;
-      await refresh();
+      await reinspect();
     });
   });
 
@@ -3353,7 +3371,7 @@ function wirePackPanel(): void {
       const chosen = await invoke<string | null>("choose_file", { purpose });
       if (!chosen) return;
       packChoices[i] = chosen;
-      await refresh();
+      await reinspect();
     });
   });
 

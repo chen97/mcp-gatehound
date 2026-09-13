@@ -1411,8 +1411,31 @@ fn write_config(state: &tauri::State<'_, AppState>, cfg: &Config) -> Result<(), 
 }
 
 #[tauri::command]
-fn inspect_pack(state: tauri::State<'_, AppState>, path: String) -> Result<PackPlan, String> {
-    let loaded = Pack::load(Path::new(&path)).map_err(err)?;
+fn inspect_pack(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    // Paths the operator has chosen so far, parallel to the `missing_files` of the previous
+    // answer. Applied before planning, so the plan describes what importing would do NOW
+    // rather than what it would have done before they pointed at anything: a pack refused
+    // because it named a command this machine does not have stayed refused after the command
+    // was found, with no way to tell that the thing you just did had worked.
+    resolutions: Option<Vec<String>>,
+) -> Result<PackPlan, String> {
+    let mut loaded = Pack::load(Path::new(&path)).map_err(err)?;
+    let chosen = resolutions.unwrap_or_default();
+    if !chosen.is_empty() {
+        let missing = pack::missing_files(&loaded);
+        // Silently ignored when they do not line up: this runs on every repaint, and a pack
+        // edited on disk mid-inspection should redraw as it now is rather than fail.
+        if chosen.len() == missing.len() {
+            for (m, c) in missing.iter().zip(chosen.iter()) {
+                if !c.trim().is_empty() {
+                    pack::resolve_file(&mut loaded, m, c).map_err(err)?;
+                }
+            }
+        }
+    }
+    let loaded = loaded;
     let cfg = &state.gateway.cfg;
 
     // Both answers, because the operator is choosing between them: a plain import, and one

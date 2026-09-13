@@ -1504,4 +1504,44 @@ action = { type = "exec", cmd = "definitely-not-a-real-binary-xyz", args = [] }
         .unwrap();
         assert!(collisions(&cfg, &separate).is_empty());
     }
+    /// Pointing a missing command at a real one makes the pack importable.
+    ///
+    /// The screen promises exactly this — "point the paths below at where they are on this
+    /// machine and this should clear" — so the promise is worth a test.
+    #[test]
+    fn resolving_a_missing_command_turns_a_refusal_into_a_plan() {
+        let mut cfg = Config::default();
+        // `token` in the file is only read into this by `Config::load`, which consults the
+        // environment; a config built in memory sets it directly.
+        cfg.auth.bearer_token = Some("0123456789abcdef0123".into());
+        let mut pack: Pack = toml::from_str(
+            r#"
+[pack]
+name = "brain"
+description = ""
+version = "1"
+
+[[tool]]
+name = "brain_search"
+description = "Search."
+action = { type = "exec", cmd = "definitely-not-a-real-binary-xyz", args = ["query"] }
+"#,
+        )
+        .unwrap();
+
+        let refused = plan(&cfg, &pack, false).unwrap_err().to_string();
+        assert!(
+            refused.contains("definitely-not-a-real-binary-xyz"),
+            "{refused}"
+        );
+
+        let missing = missing_files(&pack);
+        assert_eq!(missing.len(), 1);
+        let real = std::env::current_exe().unwrap();
+        resolve_file(&mut pack, &missing[0], &real.display().to_string()).unwrap();
+
+        let applied = plan(&cfg, &pack, false).expect("it should plan once the command is real");
+        assert_eq!(applied.tools, vec!["brain_search"]);
+        assert!(missing_files(&pack).is_empty());
+    }
 }
