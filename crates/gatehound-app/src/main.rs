@@ -1421,21 +1421,25 @@ fn inspect_pack(
     // was found, with no way to tell that the thing you just did had worked.
     resolutions: Option<Vec<String>>,
 ) -> Result<PackPlan, String> {
-    let mut loaded = Pack::load(Path::new(&path)).map_err(err)?;
+    let loaded = Pack::load(Path::new(&path)).map_err(err)?;
     let chosen = resolutions.unwrap_or_default();
-    if !chosen.is_empty() {
-        let missing = pack::missing_files(&loaded);
-        // Silently ignored when they do not line up: this runs on every repaint, and a pack
-        // edited on disk mid-inspection should redraw as it now is rather than fail.
-        if chosen.len() == missing.len() {
-            for (m, c) in missing.iter().zip(chosen.iter()) {
-                if !c.trim().is_empty() {
-                    pack::resolve_file(&mut loaded, m, c).map_err(err)?;
-                }
-            }
+
+    // The questions, asked of the pack as it sits on disk — so the list and its positions do
+    // not change as they are answered. Reporting only what was STILL missing renumbered the
+    // rows under the operator between clicks: the answers are held positionally, so a resolved
+    // row vanishing shifted every later one onto somebody else's answer, and the last file in
+    // a list of three could never be set at all.
+    let missing_files = pack::missing_files(&loaded);
+    let purposes = missing_files.iter().map(|m| m.purpose()).collect();
+
+    // The consequences, worked out with the answers applied.
+    let mut resolved = loaded.clone();
+    for (m, c) in missing_files.iter().zip(chosen.iter()) {
+        if !c.trim().is_empty() {
+            pack::resolve_file(&mut resolved, m, c).map_err(err)?;
         }
     }
-    let loaded = loaded;
+    let loaded = resolved;
     let cfg = &state.gateway.cfg;
 
     // Both answers, because the operator is choosing between them: a plain import, and one
@@ -1453,9 +1457,6 @@ fn inspect_pack(
         (None, true) => (None, why),
     };
     let replaces = pack::plan(cfg, &loaded, true).ok().map(Into::into);
-    let missing_files = pack::missing_files(&loaded);
-    let purposes = missing_files.iter().map(|m| m.purpose()).collect();
-
     Ok(PackPlan {
         scripts: loaded.reviews(),
         dangerous: loaded.dangerous(),

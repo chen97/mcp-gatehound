@@ -1458,10 +1458,9 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
            </div>
            <div class="row">
              <button id="c-open" class="primary">Add a downstream…</button>
-             <button id="pack-pick" class="ghost" data-reveals="#pack-panel">Import a pack…</button>
+             <button id="pack-pick" class="ghost">Import a pack…</button>
            </div>
          </div>` +
-    renderPackPlanIfAny() +
     downstreamHtml(snap, configFile, scriptList);
   if (!paint($("#actions"), html)) return;
 
@@ -1480,7 +1479,7 @@ function paintActions(snap: Snapshot, configFile: string, scriptList: ScriptView
   if (scriptDraft) wireScriptEditor();
   else wireScripts(scriptList);
   wireToolFace();
-  wirePackPanel();
+  $("#pack-pick")?.addEventListener("click", () => void importPack());
 }
 
 /// Whether rebuilding this screen would throw away something half-typed. Same rule as the
@@ -3115,29 +3114,18 @@ function wireScriptEditor(): void {
   });
 }
 
-function renderPackPlanIfAny(): string {
-  return packPath && packPlan ? renderPackPanel() : "";
-}
-
-function renderPackPanel(): string {
-  if (!packPath || !packPlan) {
-    return `
-      <div class="card">
-        <h3>Import a pack</h3>
-        <div class="meta">
-          A pack carries an upstream, the tools bound to it, and identity seeds — one file
-          instead of hand-written TOML. It never carries a credential.
-        </div>
-        <div class="row"><button id="pack-pick" class="primary">Choose a pack…</button></div>
-      </div>`;
-  }
-
+/// What a pack would do here, reviewed before any of it happens.
+///
+/// A modal rather than a panel under the button that opened it: this is a decision with a
+/// beginning and an end — read what it would change, point its paths at this machine, consent
+/// to its code, import or walk away — and a screen that keeps its other cards visible around
+/// that invites you to wander off halfway and leave it half-answered.
+function packBody(): string {
   const p = packPlan;
+  if (!p) return "";
   const blocked = p.adds === null && p.replaces === null;
 
   return `
-    <div class="card" id="pack-panel">
-      <h3>Import a pack</h3>
       <div class="meta">Nothing is written until you press Import.</div>
 
       <table><tbody>
@@ -3191,12 +3179,17 @@ function renderPackPanel(): string {
              </div>
              <table><tbody>${p.missing_files
                .map(
+                 // Every row stays, answered or not. They used to disappear as they were
+                 // set, which left no way back to one you wanted to change — and, because the
+                 // answers are held by position, renumbered the rows under you mid-task.
                  (m, i) => `<tr>
                    <td class="meta">${esc(p.purposes[i] ?? m.tool)}</td>
-                   <td class="meta"><code>${esc(m.declared)}</code> is not here</td>
+                   <td class="meta"><code>${esc(m.declared)}</code> ${
+                     packChoices[i] ? "was not here" : "is not here"
+                   }</td>
                    <td>${
                      packChoices[i]
-                       ? `<code>${esc(packChoices[i])}</code>`
+                       ? `<span class="dot green"></span> <code>${esc(packChoices[i])}</code>`
                        : `<span class="meta">not set</span>`
                    }</td>
                    <td class="tool-acts">${
@@ -3205,7 +3198,9 @@ function renderPackPanel(): string {
                      m.kind === "command"
                        ? `<button class="ghost pack-find" data-index="${i}">Find it</button>`
                        : ""
-                   }<button class="ghost pack-file" data-index="${i}">Choose…</button></td>
+                   }<button class="ghost pack-file" data-index="${i}">${
+                     packChoices[i] ? "Change…" : "Choose…"
+                   }</button></td>
                  </tr>`,
                )
                .join("")}</tbody></table>`
@@ -3225,7 +3220,7 @@ function renderPackPanel(): string {
           : ""
       }
 
-      <div class="row">
+      <div class="row modal-foot">
         ${
           consentWithheld(p)
             ? `<span class="meta">Read the scripts and tick the boxes above to enable Import.</span>`
@@ -3236,9 +3231,8 @@ function renderPackPanel(): string {
                 : ""
         }
         <button id="pack-cancel" class="ghost">Cancel</button>
-        ${blocked ? `<span class="meta">This pack cannot be imported as it stands.</span>` : ""}
-      </div>
-    </div>`;
+        ${blocked ? `<span class="meta">Not importable yet — see above.</span>` : ""}
+      </div>`;
 }
 
 /// True while this pack carries code the operator has not agreed to run.
@@ -3297,42 +3291,51 @@ function packScriptsHtml(p: PackPlan): string {
     }`;
 }
 
-function wirePackPanel(): void {
-  $("#pack-pick")?.addEventListener("click", async () => {
-    const chosen = await invoke<string | null>("choose_pack");
-    if (!chosen) return;
-    try {
-      // A fresh pack is a fresh decision: consent never carries over from the last file.
-      allowScripts = false;
-      allowDangerousScripts = false;
-      scriptsAreStale();
-      packPlan = await invoke<PackPlan>("inspect_pack", { path: chosen, resolutions: null });
-      packPath = chosen;
-      packChoices = packPlan.missing_files.map(() => "");
-    } catch (e) {
-      void say(String(e));
-      return;
-    }
-    await refresh();
-  });
+/// Choose a pack file, then review it in a modal of its own.
+async function importPack(): Promise<void> {
+  const chosen = await invoke<string | null>("choose_pack");
+  if (!chosen) return;
+  try {
+    // A fresh pack is a fresh decision: consent never carries over from the last file.
+    allowScripts = false;
+    allowDangerousScripts = false;
+    scriptsAreStale();
+    packPlan = await invoke<PackPlan>("inspect_pack", { path: chosen, resolutions: null });
+    packPath = chosen;
+    packChoices = packPlan.missing_files.map(() => "");
+  } catch (e) {
+    void say(String(e));
+    return;
+  }
+  await stepModal(`Import ${packPlan.name}`, "xl", packBody, () => wirePack());
+  packPath = null;
+  packPlan = null;
+  packChoices = [];
+  allowScripts = false;
+  allowDangerousScripts = false;
+  redrawActions();
+}
 
-  /// Ask what importing would do now, with the paths chosen so far applied.
-  ///
-  /// Rather than repainting from the answer given before any of them were: a pack refused
-  /// because it named a command this machine does not have stayed refused after the command
-  /// was found, under a notice promising that pointing at it would clear the refusal.
-  const reinspect = async (): Promise<void> => {
-    if (!packPath) return;
-    try {
-      packPlan = await invoke<PackPlan>("inspect_pack", {
-        path: packPath,
-        resolutions: packChoices,
-      });
-    } catch (e) {
-      void say(String(e));
-    }
-    await refresh();
-  };
+/// Ask what importing would do now, with the paths chosen so far applied.
+///
+/// Rather than repainting from the answer given before any of them were: a pack refused
+/// because it named a command this machine does not have stayed refused after the command was
+/// found, under a notice promising that pointing at it would clear the refusal.
+async function reinspectPack(): Promise<void> {
+  if (!packPath) return;
+  try {
+    packPlan = await invoke<PackPlan>("inspect_pack", {
+      path: packPath,
+      resolutions: packChoices,
+    });
+  } catch (e) {
+    void say(String(e));
+  }
+  redrawStep();
+}
+
+function wirePack(): void {
+  const reinspect = reinspectPack;
 
   document.querySelectorAll<HTMLButtonElement>(".pack-find").forEach((b) => {
     b.addEventListener("click", async () => {
@@ -3375,14 +3378,7 @@ function wirePackPanel(): void {
     });
   });
 
-  $("#pack-cancel")?.addEventListener("click", () => {
-    packPath = null;
-    packPlan = null;
-    packChoices = [];
-    allowScripts = false;
-    allowDangerousScripts = false;
-    redrawActions();
-  });
+  $("#pack-cancel")?.addEventListener("click", () => endStep());
 
   for (const [id, set] of [
     ["#pack-allow-scripts", (v: boolean) => (allowScripts = v)],
@@ -3390,7 +3386,7 @@ function wirePackPanel(): void {
   ] as const) {
     $(id)?.addEventListener("change", (e) => {
       set((e.target as HTMLInputElement).checked);
-      redrawActions();
+      redrawStep();
     });
   }
 
@@ -3413,11 +3409,7 @@ function wirePackPanel(): void {
         void say(String(e));
         return;
       }
-      packPath = null;
-      packPlan = null;
-      packChoices = [];
-      allowScripts = false;
-      allowDangerousScripts = false;
+      endStep();
 
       const env = result.missing_env.length
         ? `\n\nStill to set: ${result.missing_env.join(", ")}`

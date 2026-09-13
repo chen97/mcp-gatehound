@@ -73,7 +73,10 @@ h1 { font-size: 14px; margin: 0; letter-spacing: -0.01em; }
 .sub { color: var(--mut); font-size: 12px; }
 header .ghost { margin-left: auto; }
 
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mut); flex: none; }
+/* `inline-block` so a width and a height apply outside a flex row too — in a table cell an
+   inline element ignores both and the dot renders as a sliver. A flex container blockifies its
+   children anyway, so this changes nothing where the dot was already used. */
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--mut); flex: none; }
 .dot.green { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
 .dot.grey  { background: var(--mut); }
 .dot.red   { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent); }
