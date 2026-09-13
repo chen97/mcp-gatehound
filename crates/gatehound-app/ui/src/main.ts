@@ -3644,7 +3644,16 @@ function toolGroups(snap: Snapshot): { key: string; label: string; sub: string; 
       tools: byUpstream.get(u.name)!,
     }));
   if (local.length) {
-    out.push({ key: "local", label: "Local commands", sub: "run on this machine", tools: local });
+    // One group for both, and it says so. Everything here runs on this machine rather than
+    // going out over the wire — a local command and a script the operator wrote are the same
+    // thing from a grant's side — but labelling the group for only half of what is in it made
+    // a script's tools look absent from a list they were in all along.
+    out.push({
+      key: "local",
+      label: "Local commands & scripts",
+      sub: "run on this machine",
+      tools: local,
+    });
   }
   return out;
 }
