@@ -11,40 +11,113 @@
 
 use anyhow::Result;
 
-/// The bridge Desktop runs. Small enough to read before trusting, which is the point.
+/// The bridge Desktop runs. Node's own modules and nothing else, and short enough to read
+/// before trusting — which is the point of shipping it in the open rather than fetching it.
 const SHIM: &str = r#"#!/usr/bin/env node
-// Bridge Claude Desktop's stdio to the gateway's Streamable HTTP endpoint.
+// Bridge Claude Desktop's stdio to the gateway's HTTP endpoint.
+//
+// Node's own modules and nothing else. The first version of this started `npx mcp-remote`,
+// which meant the bundle only worked on a machine with npm on the PATH Desktop happens to
+// have — and Desktop runs this with its own built-in Node, whose PATH is not a login shell's.
+// A bridge that needs to fetch a package before it can answer `initialize` is a bridge that
+// loses the race with the client waiting for that answer.
 //
 // No token in this file. It arrives in AUTH_HEADER, which Claude Desktop fills from the value
 // typed at install and keeps in the OS keychain.
-const { spawn } = require("node:child_process");
+const http = require("node:http");
+const https = require("node:https");
 
-const url = process.env.GATEHOUND_URL;
+const endpoint = process.env.GATEHOUND_URL;
 const auth = process.env.AUTH_HEADER;
-if (!url || !auth) {
+if (!endpoint || !auth) {
   console.error("GATEHOUND_URL and AUTH_HEADER must both be set; reinstall this bundle.");
   process.exit(2);
 }
+const url = new URL(endpoint);
+const transport = url.protocol === "https:" ? https : http;
 
-// Built here rather than left as a ${placeholder} in the manifest: that substitution happens in
-// Claude Desktop, and by the time this runs there is nothing left to expand it. The space
-// inside "Bearer ..." is safe because spawn passes argv straight through without a shell.
-const args = [
-  "-y",
-  "mcp-remote",
-  url,
-  "--transport",
-  "http-only",
-  "--header",
-  `Authorization: ${auth}`,
-];
+// Requests sent and not yet answered. Closing stdin means the client has finished asking, not
+// that it has finished listening: exiting there drops every reply still in flight.
+let pending = 0;
+let inputEnded = false;
+const leaveWhenDone = () => {
+  if (inputEnded && pending === 0) process.exit(0);
+};
 
-const child = spawn("npx", args, { stdio: "inherit", env: process.env });
-child.on("error", (e) => {
-  console.error(`could not start npx: ${e.message}. Node.js must be installed and on PATH.`);
-  process.exit(1);
+/// One JSON-RPC message on its way to the gateway.
+function forward(line) {
+  pending += 1;
+  let id = null;
+  try {
+    id = JSON.parse(line).id ?? null;
+  } catch {
+    // Unparseable input is the client's problem, and the gateway will say so.
+  }
+  const body = Buffer.from(line, "utf8");
+  const req = transport.request(
+    {
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": body.length,
+        accept: "application/json",
+        authorization: auth,
+      },
+    },
+    (res) => {
+      let out = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => (out += c));
+      res.on("end", () => {
+        // A notification is answered with no body, and has nothing to write back.
+        if (out.trim()) process.stdout.write(out.trim() + "\n");
+        pending -= 1;
+        leaveWhenDone();
+      });
+    },
+  );
+  req.on("error", (e) => {
+    pending -= 1;
+    console.error(`gatehound: ${e.message}`);
+    // Answered rather than dropped: a request with no reply leaves the client waiting for one
+    // forever, and "is the gateway running?" is the useful thing to say.
+    if (id !== null) {
+      process.stdout.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: -32001,
+            message: `cannot reach the gateway at ${endpoint}: ${e.message}. Is MCP Gatehound running?`,
+          },
+        }) + "\n",
+      );
+    }
+    leaveWhenDone();
+  });
+  req.end(body);
+}
+
+// Newline-delimited JSON, which is what the stdio transport speaks.
+let buffered = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffered += chunk;
+  let at;
+  while ((at = buffered.indexOf("\n")) >= 0) {
+    const line = buffered.slice(0, at).trim();
+    buffered = buffered.slice(at + 1);
+    if (line) forward(line);
+  }
 });
-child.on("exit", (code) => process.exit(code ?? 1));
+process.stdin.on("end", () => {
+  inputEnded = true;
+  leaveWhenDone();
+});
 "#;
 
 /// The `.mcpb` bytes for one client identity.
