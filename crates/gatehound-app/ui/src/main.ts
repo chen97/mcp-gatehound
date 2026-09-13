@@ -3541,6 +3541,7 @@ function clientCard(c: Client, snap: Snapshot, owner: string): string {
           <option value="ask">ask</option>
         </select>
         <button class="ghost cl-add" data-identity="${esc(c.identity)}">Add rule</button>
+        <button class="ghost cl-bundle" data-identity="${esc(c.identity)}">Claude Desktop bundle\u2026</button>
         <span class="meta">
           An exact tool beats <code>*</code>. With no rule at all, a call waits for you.
         </span>
@@ -3783,7 +3784,15 @@ function issuedPanelHtml(): string {
                : `It can call nothing yet — grant tools on the Upstream screen.`
            }
          </div>
-         <div class="row"><button id="dismiss-new" class="ghost">Done</button></div>
+         <div class="row">
+           <button id="bundle-new" class="ghost">Claude Desktop bundle\u2026</button>
+           <button id="dismiss-new" class="ghost">Done</button>
+         </div>
+         <div class="meta">
+           Desktop installs a bundle and asks for the token; every other client takes a URL and
+           an <code>Authorization</code> header. The endpoint is on this screen, under
+           <strong>This gateway</strong>.
+         </div>
        </div>`;
 }
 
@@ -4552,6 +4561,36 @@ function wireIssuedPanel(): void {
     justIssued = null;
     void refresh();
   });
+  $("#bundle-new")?.addEventListener("click", () => {
+    if (justIssued) void saveBundle(justIssued.identity);
+  });
+  for (const b of Array.from(document.querySelectorAll<HTMLElement>(".cl-bundle"))) {
+    b.addEventListener("click", () => void saveBundle(b.dataset.identity!));
+  }
+}
+
+/// Write a Claude Desktop bundle for one client.
+///
+/// The token is not in it. Desktop declares it as a field to fill at install and keeps it in
+/// the keychain, which is what makes the file safe to leave in a Downloads folder — and is
+/// worth saying, because a file named after a client looks like it should hold one.
+async function saveBundle(identity: string): Promise<void> {
+  let where: string | null;
+  try {
+    where = await invoke<string | null>("save_client_bundle", { identity });
+  } catch (e) {
+    void say(String(e));
+    return;
+  }
+  if (!where) return;
+  await say(
+    `Written to ${where}.\n\n` +
+      `Open it to install, or drag it onto Claude Desktop's Settings \u2192 Extensions. It ` +
+      `will ask for the token; paste the one issued for ${identity}.\n\n` +
+      `The bundle carries no token and no tools of its own \u2014 it points Desktop at this ` +
+      `gateway, and what it may call is still decided here.`,
+    "Bundle saved",
+  );
 }
 
 function wireRevoke(): void {

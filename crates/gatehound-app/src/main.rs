@@ -964,6 +964,52 @@ async fn choose_pack(app: AppHandle) -> Option<String> {
         .map(|p| p.display().to_string())
 }
 
+/// Write a Claude Desktop bundle for one client, and say where it went.
+///
+/// Desktop installs a bundle as a local server it launches, so a bundle for a gateway that is
+/// already running carries a bridge rather than a server — and no token: the token is declared
+/// as a field Desktop asks for at install and keeps in the keychain, so the file is safe to
+/// leave in Downloads.
+#[tauri::command]
+async fn save_client_bundle(app: AppHandle, identity: String) -> Result<Option<String>, String> {
+    let state = app.state::<AppState>();
+    let endpoint = format!("http://{}/mcp", state.gateway.cfg.listen_addr);
+    // What this identity may call, for the sentence Desktop shows in its installer. Policy
+    // decides what it can actually reach; nothing here widens that.
+    let allowed: Vec<String> = state
+        .gateway
+        .identities()
+        .map_err(err)?
+        .into_iter()
+        .filter(|r| {
+            r.identity == identity && r.decision == Decision::Allow.as_str() && r.tool != "*"
+        })
+        .map(|r| r.tool)
+        .collect();
+    let bytes = gatehound_core::bundle::mcpb(&identity, &endpoint, &allowed).map_err(err)?;
+
+    let slug: String = identity
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let Some(path) = file_dialog_on_window(&app)
+        .set_title("Save the Claude Desktop bundle")
+        .set_file_name(format!("gatehound-{}.mcpb", slug.trim_matches('-')))
+        .add_filter("MCP bundle", &["mcpb"])
+        .blocking_save_file()
+        .and_then(|p| p.into_path().ok())
+    else {
+        return Ok(None);
+    };
+    std::fs::write(&path, bytes).map_err(err)?;
+    let _ = state.gateway.store.log_admin(
+        "client.bundle",
+        Some(&identity),
+        &format!("wrote a Claude Desktop bundle to {}", path.display()),
+    );
+    Ok(Some(path.display().to_string()))
+}
+
 /// Look for a command by name in the places a login shell would have added to PATH.
 ///
 /// The app's PATH is launchd's, not the operator's, so a Homebrew or npm binary is invisible
@@ -1748,6 +1794,7 @@ fn main() {
             inspect_pack,
             choose_file,
             find_command,
+            save_client_bundle,
             apply_pack,
             discover_tools,
             add_connection,

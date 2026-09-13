@@ -9,6 +9,7 @@
 pub mod actions;
 pub mod approval;
 pub mod auth;
+pub mod bundle;
 pub mod config;
 pub mod connect;
 pub mod events;
