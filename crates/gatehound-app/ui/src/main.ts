@@ -355,7 +355,7 @@ function recentHtml(rows: RequestLog[]): string {
     <table><tbody>${rows
       .slice(0, 6)
       .map(
-        (r) => `<tr>
+        (r) => `<tr class="clickable" data-id="${r.id}">
           <td class="meta">${ago(r.ts)}</td>
           <td><code>${esc(r.identity ?? "—")}</code></td>
           <td><code>${esc(r.tool ?? r.method ?? "")}</code></td>
@@ -367,7 +367,22 @@ function recentHtml(rows: RequestLog[]): string {
         </tr>`,
       )
       .join("")}</tbody></table>
+    <div class="meta">Open a row for what was sent and what came back.</div>
   </div>`;
+}
+
+/// The same dialog the Live log opens, from the six rows on the board.
+///
+/// Wired separately because this table is painted on its own — the flow above it animates
+/// itself into place, so the two cannot share a repaint — but it is the same question being
+/// asked of the same record, and answering it differently in two places would be the reason
+/// somebody stops trusting either.
+function wireRecent(): void {
+  for (const tr of Array.from(
+    document.querySelectorAll<HTMLTableRowElement>("#home-recent tr.clickable"),
+  )) {
+    tr.addEventListener("click", () => void showRequest(Number(tr.dataset.id)));
+  }
 }
 
 /// How far apart the board's pieces arrive. Under the 30-80ms band that reads as a group
@@ -1098,7 +1113,7 @@ async function renderHome(snap: Snapshot): Promise<void> {
   // waiting badge on the gate is what draws the eye down here, so it belongs after the picture
   // that points at it, not in front of it.
   if (paint($("#approvals"), approvalsHtml(pending))) wireApprovals();
-  paint($("#home-recent"), recentHtml(recent));
+  if (paint($("#home-recent"), recentHtml(recent))) wireRecent();
 }
 
 // ---- Approvals -------------------------------------------------------------
