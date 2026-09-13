@@ -317,6 +317,16 @@ const painted = new WeakMap<Element, string>();
 /// changed, which is almost all of them. Returning whether anything was written also keeps
 /// handlers correct: the caller re-attaches them only when the elements are new, instead of
 /// stacking a second listener on every surviving button.
+/// Forget what was last painted here, so the next paint runs even if it produces the same HTML.
+///
+/// The memo below compares against the string last *written*, which is not the same thing as
+/// what is on screen: typing into a field changes the DOM and not the string. So anything that
+/// means "put it back how it was" has to say so — regenerating the identical HTML is a no-op,
+/// and the edit stays.
+function forgetPainted(el: Element): void {
+  painted.delete(el);
+}
+
 function paint(el: Element, html: string): boolean {
   if (painted.get(el) === html) return false;
   painted.set(el, html);
@@ -4298,7 +4308,10 @@ function publishEditor(f: PublishForm, pending: Saved | null): string {
       </div>
       <div class="row">
         <label class="meta" for="pub-token" style="min-width:120px">Tunnel token</label>
-        <input id="pub-token" type="password" style="min-width:320px"
+        <!-- "new-password" rather than "off": browsers ignore "off" on a password field and
+             offer a saved website password, and this one is blank-means-keep, so an autofill
+             nobody noticed would replace the stored tunnel token on the next save. -->
+        <input id="pub-token" type="password" autocomplete="new-password" style="min-width:320px"
                placeholder="${f.has_token ? "stored — leave blank to keep" : "paste a remotely-managed tunnel's token"}" />
         ${f.has_token ? `<button id="pub-forget" class="ghost">Forget</button>` : ""}
       </div>
@@ -4564,6 +4577,10 @@ function wirePublishForm(): void {
 
   $("#pub-discard")?.addEventListener("click", () => {
     publishDirty = false;
+    // Both of these are part of "put it back how it was": one revealed the Access block, and
+    // the other is why the fields on screen no longer match the HTML that produced them.
+    accessAnyway = false;
+    forgetPainted($("#network"));
     void refresh();
   });
 
