@@ -543,6 +543,109 @@ impl Default for Config {
 /// spawn will look it up, on PATH. Reported as an error rather than a warning because the
 /// alternative — a tool that imports cleanly and fails on first call — is the failure this is
 /// here to move earlier.
+/// Where a command might be, beyond the PATH this process was given.
+///
+/// A GUI app on macOS inherits launchd's PATH, not the one a login shell builds — so `qmd`
+/// installed by Homebrew or npm is on the operator's PATH and invisible here. Asking their
+/// login shell would find it, but that means running their startup files to answer a question
+/// about a file, so this looks in the places those files would have added instead: fixed,
+/// side-effect free, and the same answer every time.
+/// Takes the environment rather than reading it, so a test can ask about a directory it laid
+/// out itself without setting HOME for every other test running beside it.
+fn bin_dirs(
+    home: Option<&std::path::Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // Whatever this process does have, first: if it is already there, say so.
+    if let Some(path) = path {
+        dirs.extend(std::env::split_paths(path));
+    }
+    for fixed in [
+        "/opt/homebrew/bin", // Homebrew on Apple silicon
+        "/usr/local/bin",    // Homebrew on Intel, and most `make install`
+        "/opt/local/bin",    // MacPorts
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+        "/snap/bin",
+    ] {
+        dirs.push(std::path::PathBuf::from(fixed));
+    }
+    if let Some(h) = home {
+        for under in [
+            ".local/bin",
+            ".bun/bin",
+            ".cargo/bin",
+            ".deno/bin",
+            "go/bin",
+            ".volta/bin",
+            "bin",
+        ] {
+            dirs.push(h.join(under));
+        }
+        // Node version managers keep one bin directory per installed version, so the directory
+        // to look in is not knowable without looking.
+        for manager in [
+            ".nvm/versions/node",
+            ".fnm/node-versions",
+            ".asdf/installs/nodejs",
+        ] {
+            if let Ok(entries) = std::fs::read_dir(h.join(manager)) {
+                for e in entries.flatten() {
+                    dirs.push(e.path().join("bin"));
+                    // fnm and asdf nest one level deeper than nvm does.
+                    dirs.push(e.path().join("installation/bin"));
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// Every place a command by this name actually is, best guess first.
+///
+/// Offered to the operator rather than picked for them: which `python3` or which `node` a tool
+/// runs is a decision with consequences, and a list they can see beats one this picked quietly.
+pub fn find_command(name: &str) -> Vec<std::path::PathBuf> {
+    find_command_in(
+        name,
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+fn find_command_in(
+    name: &str,
+    home: Option<&std::path::Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> Vec<std::path::PathBuf> {
+    // A declared path that is missing still names the binary somebody meant, so search for
+    // that rather than giving up because the directory it names is not here.
+    let base = std::path::Path::new(name.trim())
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if base.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for dir in bin_dirs(home, path) {
+        for spelling in spellings(&base) {
+            let candidate = dir.join(&spelling);
+            if candidate.is_file() && !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
 pub fn resolve_command(cmd: &str) -> Result<std::path::PathBuf> {
     let cmd = cmd.trim();
     if cmd.contains('/') || cmd.contains('\\') {
@@ -1394,5 +1497,33 @@ required = false
         );
         assert!(!t.arguments[1].required);
         assert_eq!(t.schema()["required"], serde_json::json!(["query"]));
+    }
+    /// Finding a command the process's own PATH does not have.
+    #[test]
+    fn a_command_is_found_where_a_login_shell_would_have_put_it() {
+        let home = std::env::temp_dir().join(format!("gh-find-{}", uuid::Uuid::new_v4()));
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("qmd-test-binary");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+
+        // Deliberately not on PATH: this is the case the button exists for. The environment
+        // is passed in rather than set, so this cannot disturb a test running beside it.
+        let look = |n: &str| find_command_in(n, Some(home.as_path()), None);
+
+        assert!(look("qmd-test-binary").contains(&exe));
+        // A declared path that is missing still names the binary somebody meant.
+        assert!(look("/nowhere/at/all/qmd-test-binary").contains(&exe));
+        assert!(look("definitely-not-a-real-binary-xyz").is_empty());
+        assert!(look("").is_empty());
+
+        // And the process's own PATH is searched too, ahead of the guesses.
+        let on_path = find_command_in(
+            "qmd-test-binary",
+            None,
+            Some(std::ffi::OsStr::new(bin.to_str().unwrap())),
+        );
+        assert_eq!(on_path, vec![exe.clone()]);
+        std::fs::remove_dir_all(home).ok();
     }
 }

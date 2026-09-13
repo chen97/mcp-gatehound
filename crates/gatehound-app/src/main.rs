@@ -964,6 +964,20 @@ async fn choose_pack(app: AppHandle) -> Option<String> {
         .map(|p| p.display().to_string())
 }
 
+/// Look for a command by name in the places a login shell would have added to PATH.
+///
+/// The app's PATH is launchd's, not the operator's, so a Homebrew or npm binary is invisible
+/// here even though `which` finds it in their terminal. Every hit is returned rather than one
+/// picked: which `python3` a tool runs is a decision with consequences, and a short list they
+/// can see beats a choice made quietly on their behalf.
+#[tauri::command]
+fn find_command(name: String) -> Vec<String> {
+    gatehound_core::config::find_command(&name)
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect()
+}
+
 /// Pick a local file to stand in for one a pack names but this machine does not have.
 #[tauri::command]
 async fn choose_file(app: AppHandle, purpose: String) -> Option<String> {
@@ -1709,6 +1723,7 @@ fn main() {
             choose_pack,
             inspect_pack,
             choose_file,
+            find_command,
             apply_pack,
             discover_tools,
             add_connection,

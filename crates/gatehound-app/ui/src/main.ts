@@ -3199,7 +3199,13 @@ function renderPackPanel(): string {
                        ? `<code>${esc(packChoices[i])}</code>`
                        : `<span class="meta">not set</span>`
                    }</td>
-                   <td><button class="ghost pack-file" data-index="${i}">Choose…</button></td>
+                   <td class="tool-acts">${
+                     // Only for a command. An argument or a working directory is somebody's
+                     // own data file, which is not on any PATH and cannot be guessed at.
+                     m.kind === "command"
+                       ? `<button class="ghost pack-find" data-index="${i}">Find it</button>`
+                       : ""
+                   }<button class="ghost pack-file" data-index="${i}">Choose…</button></td>
                  </tr>`,
                )
                .join("")}</tbody></table>`
@@ -3308,6 +3314,36 @@ function wirePackPanel(): void {
       return;
     }
     await refresh();
+  });
+
+  document.querySelectorAll<HTMLButtonElement>(".pack-find").forEach((b) => {
+    b.addEventListener("click", async () => {
+      const i = Number(b.dataset.index);
+      const declared = packPlan?.missing_files[i]?.declared ?? "";
+      const found = await invoke<string[]>("find_command", { name: declared });
+      if (found.length === 0) {
+        await say(
+          `Nothing called ${declared.split("/").pop()} in any of the usual places.\n\n` +
+            `Run \`which ${declared.split("/").pop()}\` in a terminal and use Choose… with ` +
+            `what it prints. If that comes up empty too, it is not installed.`,
+          "Not found",
+        );
+        return;
+      }
+      // One is an answer; several is a question. Which python3 a tool runs is not a decision
+      // to make quietly on somebody's behalf.
+      const chosen =
+        found.length === 1
+          ? found[0]
+          : await choose(
+              `Which one should ${packPlan?.missing_files[i]?.tool ?? "this tool"} run?`,
+              found.map((f) => ({ value: f, label: f })),
+              { body: [`Found ${found.length}. They may be different versions.`] },
+            );
+      if (!chosen) return;
+      packChoices[i] = chosen;
+      await refresh();
+    });
   });
 
   document.querySelectorAll<HTMLButtonElement>(".pack-file").forEach((b) => {
