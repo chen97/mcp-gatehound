@@ -97,6 +97,11 @@ table.args input { width: 100%; }
 
 /* The actions on a tool row. Nowrap so three buttons stay on one line and the column keeps a
    straight right edge down the table; the column itself takes only what it needs. */
+/* The command a tool runs, under its action. Wraps rather than truncating: a path elided in
+   the middle is exactly the part worth reading, and this is the answer to "what am I allowing?" */
+.cmdline { margin-top: 3px; max-width: 42ch; }
+.cmdline code { font-size: 11px; color: var(--tx); opacity: .8; overflow-wrap: anywhere; }
+
 td.tool-acts { white-space: nowrap; width: 1%; }
 td.tool-acts button + button { margin-left: 6px; }
 

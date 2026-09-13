@@ -359,6 +359,26 @@ async fn check(cfg: Config, db_path: Option<PathBuf>) -> Result<()> {
             }
         );
     }
+    // What each local tool actually spawns. "exec" or "script" on its own says nothing about
+    // what is being allowed, and the answer used to be in the configuration file only.
+    let commands: Vec<(String, String)> = gateway
+        .catalog()
+        .into_iter()
+        .filter_map(|t| {
+            Some((
+                t["name"].as_str()?.to_string(),
+                t["command"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    if !commands.is_empty() {
+        println!();
+        println!("Runs locally (caller values shown as <name>):");
+        for (name, command) in commands {
+            println!("  - {name}");
+            println!("      {command}");
+        }
+    }
     println!();
 
     println!("Upstreams:");

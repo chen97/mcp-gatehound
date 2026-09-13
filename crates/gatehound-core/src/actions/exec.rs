@@ -145,17 +145,7 @@ pub fn build_argv(
     for arg in &spec.args {
         push_checked(&mut argv, render(arg, vars)?)?;
     }
-
-    let placed: Vec<String> = spec
-        .args
-        .iter()
-        .chain(spec.stdin.iter())
-        .flat_map(|t| placeholders(t))
-        .collect();
-    for a in declared {
-        if placed.iter().any(|p| p == &a.name) {
-            continue;
-        }
+    for a in appended(spec, declared) {
         // Absent is simply left out — an absent required one already bailed above.
         if let Some(value) = vars.get(&a.name) {
             push_checked(&mut argv, format!("--{}", a.name))?;
@@ -163,6 +153,41 @@ pub fn build_argv(
         }
     }
     Ok(argv)
+}
+
+/// The declared arguments this spec does not place itself, in the order they are appended.
+///
+/// One definition, used both to build a real command line and to show one: a preview that
+/// worked this out separately would be a second copy of the rule, and a preview that disagrees
+/// with what runs is worse than no preview.
+fn appended<'a>(
+    spec: &ExecSpec,
+    declared: &'a [crate::config::ArgumentDef],
+) -> Vec<&'a crate::config::ArgumentDef> {
+    let placed: Vec<String> = spec
+        .args
+        .iter()
+        .chain(spec.stdin.iter())
+        .flat_map(|t| placeholders(t))
+        .collect();
+    declared
+        .iter()
+        .filter(|a| !placed.iter().any(|p| p == &a.name))
+        .collect()
+}
+
+/// The command line this tool runs, with the caller's values left as `<name>`.
+///
+/// For the operator, who should be able to see what a tool does from the screen that lists it
+/// rather than by opening the configuration file.
+pub fn preview_argv(spec: &ExecSpec, declared: &[crate::config::ArgumentDef]) -> Vec<String> {
+    let mut argv = vec![spec.cmd.clone()];
+    argv.extend(spec.args.iter().cloned());
+    for a in appended(spec, declared) {
+        argv.push(format!("--{}", a.name));
+        argv.push(format!("<{}>", a.name));
+    }
+    argv
 }
 
 pub struct ExecRunner {
@@ -421,6 +446,48 @@ mod tests {
         let s = spec(&["append"], Some("{text}"));
         let argv = build_argv(&s, &[arg("text", true)], &vars(&[("text", "hello")])).unwrap();
         assert_eq!(argv, vec!["append"]);
+    }
+
+    /// The line shown to the operator is the line that runs, argument for argument.
+    #[test]
+    fn the_preview_matches_what_is_actually_spawned() {
+        let spec = spec(&["query", "{text}", "-c", "brain"], None);
+        let declared = [arg("text", true), arg("limit", false)];
+
+        // The helper's own path, whatever this platform spells it as.
+        let want: Vec<String> = [
+            spec.cmd.as_str(),
+            "query",
+            "{text}",
+            "-c",
+            "brain",
+            "--limit",
+            "<limit>",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            preview_argv(&spec, &declared),
+            want,
+            "an argument the config places itself is left where it was put"
+        );
+
+        // And with every value supplied, the real argv has the same shape: the placed one in
+        // position, the appended one as a --name value pair at the end.
+        let real = build_argv(
+            &spec,
+            &declared,
+            &vars(&[("text", "gatehound"), ("limit", "10")]),
+        )
+        .unwrap();
+        assert_eq!(
+            real,
+            vec!["query", "gatehound", "-c", "brain", "--limit", "10"]
+        );
+        // `cmd` is not templated and so is not part of build_argv, which is why the preview
+        // adds it: the operator is asking which binary, and that is the answer.
+        assert_eq!(preview_argv(&spec, &declared)[0], spec.cmd);
     }
 
     #[test]

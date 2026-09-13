@@ -337,10 +337,28 @@ impl Gateway {
 
     /// The tool catalog with each tool's action, for the "Upstreams & actions" screen.
     pub fn catalog(&self) -> Vec<serde_json::Value> {
+        let base_dir = self.cfg.script_dir();
         self.cfg
             .tools
             .iter()
             .map(|t| {
+                // Exactly what will be spawned, caller values left as <name>. A tool that runs
+                // a local command should say which one on the screen that lists it, rather
+                // than only in the configuration file — "exec" on its own tells an operator
+                // nothing about what they are about to allow.
+                let command = match &t.action {
+                    crate::config::Action::Exec(spec) => {
+                        Some(crate::actions::exec::preview_argv(spec, &t.arguments).join(" "))
+                    }
+                    crate::config::Action::Script(spec) => self
+                        .cfg
+                        .script(&spec.script)
+                        .and_then(|def| spec.lower(def, &base_dir).ok())
+                        .map(|lowered| {
+                            crate::actions::exec::preview_argv(&lowered, &t.arguments).join(" ")
+                        }),
+                    crate::config::Action::Proxy { .. } => None,
+                };
                 serde_json::json!({
                     "name": t.name,
                     "description": t.description,
@@ -350,6 +368,7 @@ impl Gateway {
                     // runs rather than under a catch-all "local" group that says nothing about
                     // where it goes.
                     "script": t.action.script(),
+                    "command": command,
                     "rate_limit": t.rate_limit,
                     "idempotent": t.idempotent,
                 })

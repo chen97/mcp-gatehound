@@ -37,6 +37,9 @@ interface ToolInfo {
   upstream: string | null;
   /// The script this tool runs, for a script action. Null for every other kind.
   script: string | null;
+  /// The command line this tool spawns, caller values shown as <name>. Null for a proxy,
+  /// which calls an upstream rather than running anything here.
+  command: string | null;
   rate_limit: { per_hour: number; min_spacing_secs: number } | null;
   idempotent: boolean;
 }
@@ -3828,7 +3831,11 @@ function toolRow(t: ToolInfo): string {
   }
   return `<tr>
     <td><code>${esc(t.name)}</code></td>
-    <td class="meta">${esc(t.action)}</td>
+    <td class="meta">${esc(t.action)}${
+      // What it actually spawns. "exec" on its own says nothing about what you are allowing,
+      // and until now the only way to find out was to open the configuration file.
+      t.command ? `<div class="cmdline"><code>${esc(t.command)}</code></div>` : ""
+    }</td>
     <td>${[
       t.idempotent ? "idempotent" : "",
       t.rate_limit ? `${t.rate_limit.per_hour}/h, ${t.rate_limit.min_spacing_secs}s apart` : "",
