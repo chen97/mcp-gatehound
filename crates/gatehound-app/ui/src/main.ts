@@ -1192,7 +1192,7 @@ async function renderLog(): Promise<void> {
                )
                .join("")}</tbody>
            </table>
-           <div id="detail"></div>`
+           <div class="meta">Open a row to see its arguments and response.</div>`
     }</div>`;
   if (!paint($("#log"), html)) return;
 
@@ -1205,29 +1205,76 @@ async function renderLog(): Promise<void> {
     void renderLog();
   });
   document.querySelectorAll<HTMLTableRowElement>("#log tr.clickable").forEach((tr) => {
-    tr.addEventListener("click", async () => {
-      const row = await invoke<RequestLog | null>("request_detail", { id: Number(tr.dataset.id) });
-      if (!row) return;
-      paint($("#detail"), `
-        <div class="card">
-          <h3>Request #${row.id}</h3>
-          <div class="meta">${esc(row.ts)} · ${esc(row.identity ?? "—")}${
-            row.client_name ? ` · ${esc(row.client_name)}` : ""
-          }${
-            // Which token, not just which identity: one identity can hold several, and after
-            // one is revoked this is the only thing that says which of them made the call.
-            row.token_id ? ` · token <code>${esc(row.token_id)}</code>` : ""
-          }</div>
-          ${row.error ? `<div class="meta" style="color:var(--bad)">${esc(row.error)}</div>` : ""}
-          <div class="meta" style="margin-top:8px">Arguments (redacted, truncated)</div>
-          <pre>${esc(pretty(row.args_json)) || "—"}</pre>
-          <div class="meta" style="margin-top:8px">Response (truncated)</div>
-          <pre>${esc(pretty(row.response_json)) || "—"}</pre>
-        </div>`,
-      );
-      $("#detail").scrollIntoView({ behavior: "smooth", block: "nearest" });
-    });
+    tr.addEventListener("click", () => void showRequest(Number(tr.dataset.id)));
   });
+}
+
+/// One logged request, in full.
+///
+/// A dialog rather than a card appended under the table: the table is three hundred rows long
+/// and refreshes itself every five seconds, so a panel at the bottom was somewhere you had to
+/// be sent to and which moved while you read it. A request is also a finished thing — read it
+/// and close it — which is what a dialog is for.
+async function showRequest(id: number): Promise<void> {
+  let row: RequestLog | null;
+  try {
+    row = await invoke<RequestLog | null>("request_detail", { id });
+  } catch (e) {
+    void say(String(e));
+    return;
+  }
+  if (!row) return;
+  const r = row;
+  await stepModal(
+    `Request #${r.id}`,
+    "xl",
+    () => `<div class="meta">${esc(r.ts)} · ${esc(r.identity ?? "—")}${
+      r.client_name ? ` · ${esc(r.client_name)}` : ""
+    }${
+      // Which token, not just which identity: one identity can hold several, and after one is
+      // revoked this is the only thing that says which of them made the call.
+      r.token_id ? ` · token <code>${esc(r.token_id)}</code>` : ""
+    }</div>
+
+      <table class="kv"><tbody>
+        <tr><td class="meta">Method</td><td><code>${esc(r.method ?? "—")}</code></td></tr>
+        ${r.tool ? `<tr><td class="meta">Tool</td><td><code>${esc(r.tool)}</code></td></tr>` : ""}
+        <tr><td class="meta">Decision</td><td><span class="pill">${esc(r.decision ?? "—")}</span></td></tr>
+        <tr><td class="meta">Went to</td><td>${esc(r.action_type ?? "—")}${
+          r.upstream ? ` → <code>${esc(r.upstream)}</code>` : ""
+        }</td></tr>
+        <tr><td class="meta">Outcome</td><td>
+          <span class="pill ${esc(r.status ?? "")}">${esc(r.status ?? "—")}</span>${
+            r.replayed
+              ? ` <span class="pill">replayed</span> <span class="meta">the first result, returned again</span>`
+              : ""
+          }${r.duration_ms != null ? ` <span class="meta">in ${r.duration_ms}ms</span>` : ""}
+        </td></tr>
+      </tbody></table>
+
+      ${r.error ? `<div class="notice warn"><strong>${esc(r.error)}</strong></div>` : ""}
+
+      <h4>Arguments</h4>
+      <div class="meta">As the caller sent them, with secrets redacted and long values cut.</div>
+      <pre class="script-body">${esc(pretty(r.args_json)) || "—"}</pre>
+
+      <h4>Response</h4>
+      <div class="meta">Truncated, and not kept past the log's retention window.</div>
+      <pre class="script-body">${esc(pretty(r.response_json)) || "—"}</pre>
+
+      <div class="row modal-foot">
+        <button id="rq-copy" class="ghost">Copy as JSON</button>
+        <button id="rq-done" class="primary">Done</button>
+      </div>`,
+    () => {
+      $("#rq-done")?.addEventListener("click", () => endStep());
+      // The whole row, because what gets pasted into a bug report is never only the half you
+      // happened to have selected.
+      $("#rq-copy")?.addEventListener("click", (e) =>
+        void copy(JSON.stringify(r, null, 2), e.currentTarget as HTMLElement),
+      );
+    },
+  );
 }
 
 // ---- Downstream ------------------------------------------------------------
