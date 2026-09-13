@@ -1224,6 +1224,35 @@ async function renderLog(): Promise<void> {
   });
 }
 
+/// A JSON payload, wrapped rather than scrolled.
+function payloadHtml(text: string): string {
+  return `<div class="payload-wrap">
+    <pre class="payload">${esc(text) || "—"}</pre>
+    <button class="ghost payload-more" hidden>Show all</button>
+  </div>`;
+}
+
+/// Offer Show all only on the blocks that are actually cut off.
+///
+/// Measured rather than guessed: whether a payload overflows depends on the window's width and
+/// on how the text wrapped, neither of which is known while the string is being built. A button
+/// offering to reveal nothing is worse than no button.
+function wirePayloads(): void {
+  for (const wrap of Array.from(document.querySelectorAll<HTMLElement>(".payload-wrap"))) {
+    const pre = wrap.querySelector<HTMLElement>(".payload");
+    const more = wrap.querySelector<HTMLButtonElement>(".payload-more");
+    if (!pre || !more) continue;
+    // A pixel or two of rounding is not a cut-off payload.
+    if (pre.scrollHeight <= pre.clientHeight + 2) continue;
+    pre.classList.add("clipped");
+    more.hidden = false;
+    more.addEventListener("click", () => {
+      wrap.classList.add("open");
+      more.hidden = true;
+    });
+  }
+}
+
 /// One logged request, in full.
 ///
 /// A dialog rather than a card appended under the table: the table is three hundred rows long
@@ -1271,17 +1300,18 @@ async function showRequest(id: number): Promise<void> {
 
       <h4>Arguments</h4>
       <div class="meta">As the caller sent them, with secrets redacted and long values cut.</div>
-      <pre class="script-body">${esc(pretty(r.args_json)) || "—"}</pre>
+      ${payloadHtml(pretty(r.args_json))}
 
       <h4>Response</h4>
       <div class="meta">Truncated, and not kept past the log's retention window.</div>
-      <pre class="script-body">${esc(pretty(r.response_json)) || "—"}</pre>
+      ${payloadHtml(pretty(r.response_json))}
 
       <div class="row modal-foot">
         <button id="rq-copy" class="ghost">Copy as JSON</button>
         <button id="rq-done" class="primary">Done</button>
       </div>`,
     () => {
+      wirePayloads();
       $("#rq-done")?.addEventListener("click", () => endStep());
       // The whole row, because what gets pasted into a bug report is never only the half you
       // happened to have selected.
