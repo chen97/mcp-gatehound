@@ -427,6 +427,12 @@ struct Rule {
     severity: Severity,
     id: &'static str,
     needles: &'static [&'static str],
+    /// Idioms that contain one of the needles and are not the thing this rule is looking for.
+    /// Deliberately tiny: this is for the two or three spellings common enough that keeping
+    /// them would make a whole tier unreadable, not a place to quiet a rule that is merely
+    /// noisy. A needle is only skipped by an exception that actually contains it, so a line
+    /// doing both things still reports the half that matters.
+    unless: &'static [&'static str],
     why: &'static str,
 }
 
@@ -447,6 +453,7 @@ const RULES: &[Rule] = &[
             "os.system(", "subprocess", "popen(", "child_process", "execSync", "spawnSync",
             "Deno.Command", "Deno.run(", "shell=True", "pty.spawn", "/bin/sh", "/bin/bash",
         ],
+        unless: &[],
         why: "starts another process, which can be a shell — the one thing an argv-only action engine exists to prevent",
     },
     Rule {
@@ -456,12 +463,17 @@ const RULES: &[Rule] = &[
             "eval(", "exec(", "new Function(", "Function(\"", "compile(", "__import__(",
             "importlib.import_module", "vm.runIn", "pickle.loads", "marshal.loads", "yaml.load(",
         ],
+        // `compile(` is the builtin that turns a string into code. `re.compile(` is a regular
+        // expression, and a regular expression is in any script that reads text — left in, the
+        // danger tier is mostly regexes, and a tier nobody reads gates nothing.
+        unless: &["re.compile(", "regex.compile(", "re2.compile("],
         why: "turns a value into code at runtime, so anything that reaches that value is code",
     },
     Rule {
         severity: Severity::Danger,
         id: "fetches-code",
         needles: &["curl ", "wget ", "pip install", "npm install", "--allow-all", "-A --", "deno install"],
+        unless: &[],
         why: "pulls something else onto the machine and runs it, which puts what actually executes outside this review",
     },
     Rule {
@@ -474,6 +486,9 @@ const RULES: &[Rule] = &[
             "import socket", "socket.", "fetch(", "XMLHttpRequest", "Deno.connect", "axios",
             "net.Socket", "https.request",
         ],
+        // urllib.parse is string handling — quote, unquote, urlencode, urljoin — and opens
+        // nothing. urllib.request is the half that does, and a bare `urllib` still fires.
+        unless: &["urllib.parse"],
         why: "talks to the network, so whatever it reads locally can leave the machine",
     },
     Rule {
@@ -483,6 +498,7 @@ const RULES: &[Rule] = &[
             "os.environ", "process.env", "Deno.env", ".ssh/", "id_rsa", ".aws/credentials",
             ".npmrc", "keychain", ".netrc", "GATEHOUND_TOKEN", ".git-credentials",
         ],
+        unless: &[],
         why: "reads secrets or the environment; combined with egress that is exfiltration",
     },
     Rule {
@@ -492,18 +508,21 @@ const RULES: &[Rule] = &[
             "shutil.rmtree", "os.remove(", "os.unlink(", "rm -rf", "fs.rm(", "fs.rmSync",
             "unlinkSync", "Deno.remove", "truncate(",
         ],
+        unless: &[],
         why: "deletes files, and a wrong path here is not recoverable",
     },
     Rule {
         severity: Severity::Warn,
         id: "obfuscated",
         needles: &["b64decode", "atob(", "fromCharCode", "codecs.decode", "\\x68\\x74"],
+        unless: &[],
         why: "decodes text before using it, which is how a payload hides from exactly this review",
     },
     Rule {
         severity: Severity::Note,
         id: "writes-outside-cwd",
         needles: &["/etc/", "/usr/", "/Library/", "expanduser(\"~", "os.path.expanduser", "homedir()"],
+        unless: &[],
         why: "touches a path outside the working directory the tool declares",
     },
 ];
@@ -527,7 +546,11 @@ pub fn scan(body: &str) -> Vec<Finding> {
             continue;
         }
         for rule in RULES {
-            if let Some(hit) = rule.needles.iter().find(|nd| line.contains(**nd)) {
+            let hit = rule
+                .needles
+                .iter()
+                .find(|nd| line.contains(**nd) && !explained(line, nd, rule.unless));
+            if let Some(hit) = hit {
                 out.push(Finding {
                     severity: rule.severity,
                     rule: rule.id.into(),
@@ -540,6 +563,15 @@ pub fn scan(body: &str) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// Whether this line's match is one of the rule's stated exceptions, rather than the shape it
+/// is looking for. The exception has to contain the needle it excuses, so `eval(re.compile(p))`
+/// still reports `eval(`.
+fn explained(line: &str, needle: &str, unless: &[&str]) -> bool {
+    unless
+        .iter()
+        .any(|idiom| idiom.contains(needle) && line.contains(idiom))
 }
 
 fn excerpt(line: &str, _needle: &str) -> String {
@@ -968,6 +1000,25 @@ token = os.environ["GATEHOUND_TOKEN"]
         assert!(findings.iter().any(|f| f.rule == "reads-credentials"));
         // Line numbers are 1-based so they match an editor.
         assert_eq!(findings[0].line, 2);
+    }
+
+    /// A regular expression is not a compiler, and URL quoting is not a socket. Both spellings
+    /// were rating ordinary text-handling scripts Danger and Warn, which is how a tier stops
+    /// being read.
+    #[test]
+    fn the_stated_exceptions_do_not_fire() {
+        let clean = scan("import re\nfrom urllib.parse import quote\nP = re.compile(r\"a|b\")\n");
+        assert!(clean.is_empty(), "{clean:?}");
+
+        // The half of each pair that does open something still does.
+        let dirty = scan("import urllib.request\nc = compile(src, \"<s>\", \"exec\")\n");
+        assert!(dirty.iter().any(|f| f.rule == "network-egress"));
+        assert!(dirty.iter().any(|f| f.rule == "data-becomes-code"));
+
+        // An exception only excuses the needle it contains.
+        let both = scan("eval(re.compile(p).pattern)\n");
+        assert_eq!(both.len(), 1);
+        assert_eq!(both[0].rule, "data-becomes-code");
     }
 
     #[test]
