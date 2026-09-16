@@ -155,6 +155,27 @@ pub enum ArgKind {
 }
 
 impl ArgKind {
+    /// Whether a caller's value is this kind.
+    ///
+    /// A number, a boolean or a null is not a string: rendering one into argv anyway is how a
+    /// tool ends up acting on `"true"` because the caller meant the flag. The one latitude is
+    /// a numeric or boolean sent as text — `"12"`, `"false"` — which plenty of clients do,
+    /// which is unambiguous, and which arrives at the script as those same characters either
+    /// way. Null is "not set": `scalar_vars` already drops it, so it is allowed here too.
+    fn accepts(self, v: &Value) -> bool {
+        if v.is_null() {
+            return true;
+        }
+        match self {
+            ArgKind::String => v.is_string(),
+            ArgKind::Integer => {
+                v.is_i64() || v.is_u64() || text(v).is_some_and(|s| s.parse::<i64>().is_ok())
+            }
+            ArgKind::Number => v.is_number() || text(v).is_some_and(|s| s.parse::<f64>().is_ok()),
+            ArgKind::Boolean => v.is_boolean() || matches!(text(v), Some("true") | Some("false")),
+        }
+    }
+
     fn json_name(self) -> &'static str {
         match self {
             ArgKind::String => "string",
@@ -162,6 +183,22 @@ impl ArgKind {
             ArgKind::Number => "number",
             ArgKind::Boolean => "boolean",
         }
+    }
+}
+
+fn text(v: &Value) -> Option<&str> {
+    v.as_str()
+}
+
+/// What a caller actually sent, for an error message that says how to fix it.
+fn kind_of(v: &Value) -> &'static str {
+    match v {
+        Value::String(_) => "a string",
+        Value::Number(_) => "a number",
+        Value::Bool(_) => "a boolean",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+        Value::Null => "null",
     }
 }
 
@@ -260,6 +297,70 @@ impl ToolConfig {
             // way to argv, so saying so beats accepting it silently.
             "additionalProperties": false,
         })
+    }
+
+    /// Refuse a call whose arguments this tool did not declare, or declared as something else.
+    ///
+    /// The schema already says `additionalProperties: false`. This is what makes that true.
+    /// An undeclared key is dropped on the way to argv, and a dropped key does not make a call
+    /// smaller — it makes it wider: `brain_list {foldr: "Work"}` lists the entire vault and
+    /// the answer looks exactly like a folder that contains everything. On a read that costs
+    /// tokens; on a write, a silently dropped scope is a wrong write nobody was told about.
+    ///
+    /// Only for tools that declare their arguments. A hand-written `input_schema` is the
+    /// escape hatch for shapes `[[tool.argument]]` cannot express, and enforcing one would
+    /// mean carrying a JSON Schema engine to do it honestly.
+    pub fn check_arguments(&self, args: &Value) -> Result<()> {
+        if self.arguments.is_empty() || self.input_schema.is_some() {
+            return Ok(());
+        }
+        let map = match args {
+            Value::Object(m) => m,
+            Value::Null => return self.check_required(&serde_json::Map::new()),
+            other => bail!("arguments must be an object, not {}", kind_of(other)),
+        };
+        for (key, value) in map {
+            if self.idempotent && key == IDEMPOTENCY_KEY {
+                continue;
+            }
+            let Some(def) = self.arguments.iter().find(|a| &a.name == key) else {
+                bail!(
+                    "{} takes no argument '{key}'. It takes: {}",
+                    self.name,
+                    self.argument_names()
+                );
+            };
+            if !def.kind.accepts(value) {
+                bail!(
+                    "argument '{key}' must be {}, not {}",
+                    def.kind.json_name(),
+                    kind_of(value)
+                );
+            }
+        }
+        self.check_required(map)
+    }
+
+    /// Declared, required, and not sent. Checked here as well as in `build_argv` so a proxy
+    /// tool — which has no argv to build — is held to what it advertised too.
+    fn check_required(&self, map: &serde_json::Map<String, Value>) -> Result<()> {
+        for a in &self.arguments {
+            if a.required && map.get(&a.name).is_none_or(Value::is_null) {
+                bail!("argument '{}' is required", a.name);
+            }
+        }
+        if self.idempotent && !map.contains_key(IDEMPOTENCY_KEY) {
+            bail!("idempotency_key is required for {}", self.name);
+        }
+        Ok(())
+    }
+
+    fn argument_names(&self) -> String {
+        self.arguments
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// The description a client sees in `tools/list`.
@@ -1348,6 +1449,92 @@ decision = "allow"
             required,
             kind: ArgKind::String,
         }
+    }
+
+    /// `additionalProperties: false` in the schema is a claim; this is what makes it true.
+    /// A key the tool does not know used to be dropped, and a dropped scoping argument does
+    /// not make the call smaller — `brain_list {foldr: "Work"}` returned the whole vault and
+    /// read exactly like a folder containing all of it.
+    #[test]
+    fn an_argument_the_tool_never_declared_is_refused() {
+        let t = tool_with_arguments(vec![declared("folder", "Where to look.", false)]);
+
+        assert!(t.check_arguments(&json!({ "folder": "Work" })).is_ok());
+        assert!(t.check_arguments(&json!({})).is_ok());
+
+        let err = t
+            .check_arguments(&json!({ "foldr": "Work" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("takes no argument 'foldr'"), "{err}");
+        // And says what it does take, so the caller can fix it without reading the schema.
+        assert!(err.contains("folder"), "{err}");
+    }
+
+    #[test]
+    fn a_declared_argument_of_the_wrong_kind_is_refused() {
+        let mut t = tool_with_arguments(vec![
+            declared("text", "What to find.", true),
+            ArgumentDef {
+                name: "limit".into(),
+                description: "How many.".into(),
+                required: false,
+                kind: ArgKind::Integer,
+            },
+        ]);
+        t.name = "brain_grep".into();
+
+        assert!(t
+            .check_arguments(&json!({ "text": "a", "limit": 5 }))
+            .is_ok());
+        // A number sent as text is unambiguous and arrives as those characters either way.
+        assert!(t
+            .check_arguments(&json!({ "text": "a", "limit": "5" }))
+            .is_ok());
+        // Null is "not set", which is what scalar_vars already does with it.
+        assert!(t
+            .check_arguments(&json!({ "text": "a", "limit": null }))
+            .is_ok());
+
+        let err = t
+            .check_arguments(&json!({ "text": 42 }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must be string, not a number"), "{err}");
+
+        let err = t
+            .check_arguments(&json!({ "text": "a", "limit": "soon" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must be integer"), "{err}");
+    }
+
+    /// A proxy tool has no argv to build, so `build_argv` never saw its missing arguments.
+    #[test]
+    fn a_required_argument_is_checked_even_without_an_argv() {
+        let mut t = tool_with_arguments(vec![declared("note", "Which note.", true)]);
+        t.action = Action::Proxy {
+            upstream: "notes".into(),
+            op: "read".into(),
+        };
+        assert!(t.check_arguments(&json!({ "note": "A" })).is_ok());
+        let err = t.check_arguments(&json!({})).unwrap_err().to_string();
+        assert!(err.contains("argument 'note' is required"), "{err}");
+        let err = t
+            .check_arguments(&json!({ "note": null }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("argument 'note' is required"), "{err}");
+    }
+
+    /// A hand-written schema is the escape hatch for shapes `[[tool.argument]]` cannot express,
+    /// and checking one honestly would mean carrying a JSON Schema engine to do it.
+    #[test]
+    fn a_hand_written_schema_is_left_alone() {
+        let mut t = tool_with_arguments(vec![]);
+        t.input_schema =
+            Some(json!({ "type": "object", "properties": { "q": { "type": "string" } } }));
+        assert!(t.check_arguments(&json!({ "anything": [1, 2, 3] })).is_ok());
     }
 
     /// The schema a client reads is derived, so it cannot disagree with what the command line

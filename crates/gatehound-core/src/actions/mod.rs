@@ -79,6 +79,10 @@ impl ActionEngine {
     /// Run one tool call. Errors are tool failures, reported to the caller as
     /// `result.isError`, never as a JSON-RPC error.
     pub async fn dispatch(&self, tool: &ToolConfig, args: &Value) -> Result<Value> {
+        // Before anything is claimed, rate-limited or run: the arguments are what the tool
+        // said it takes. A key it does not know would be dropped silently on the way to argv,
+        // and the caller would read the wider answer as the one they asked for.
+        tool.check_arguments(args)?;
         if tool.idempotent {
             return self.dispatch_idempotent(tool, args).await;
         }
