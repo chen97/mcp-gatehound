@@ -92,7 +92,11 @@ fn rpc_result(id: Value, result: Value) -> Value {
 
 /// Success: a human-readable text block plus the machine-readable payload.
 fn tool_ok(gw: &Gateway, era: &Era, id: Value, payload: Value) -> Value {
-    let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+    // Compact, not pretty. The same payload already travels in `structuredContent` for clients
+    // that read it, so this block exists for the ones that don't — and those hand it to a model,
+    // which reads `{"a":1}` exactly as well as it reads four lines of indentation. On a listing
+    // of a few hundred rows the whitespace was about an eighth of the whole response.
+    let text = serde_json::to_string(&payload).unwrap_or_else(|_| payload.to_string());
     rpc_result(
         id,
         protocol::finish(

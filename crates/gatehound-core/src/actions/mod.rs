@@ -156,11 +156,29 @@ impl ActionEngine {
                 let vars = scalar_vars(args)?;
                 let out = runner.run(&vars).await?;
                 Ok(json!({
-                    "stdout": out.stdout,
+                    "stdout": answered(&out.stdout),
                     "truncated": out.truncated
                 }))
             }
         }
+    }
+}
+
+/// A script that answers in JSON gets its answer back as JSON.
+///
+/// stdout used to travel as a string whatever was in it, so a tool script — which prints an
+/// object, because that is what a tool returns — arrived as JSON inside a JSON string inside
+/// the JSON-RPC envelope. Every quote in it was escaped twice, and the caller paid for the
+/// escaping on the wire and then parsed its way back out of it. Read once here, the same
+/// answer is structured content a client can use directly.
+///
+/// Anything that is not a JSON object or array stays a string: a script that prints a line of
+/// text means a line of text, and a bare `4` or `true` is more useful as what was printed than
+/// as a number nobody can tell from a number that was meant.
+fn answered(stdout: &str) -> Value {
+    match serde_json::from_str::<Value>(stdout.trim()) {
+        Ok(v) if v.is_object() || v.is_array() => v,
+        _ => Value::String(stdout.to_string()),
     }
 }
 
@@ -200,6 +218,26 @@ fn scalar_vars(args: &Value) -> Result<BTreeMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tool script prints an object, because that is what a tool returns. Carried as a string
+    /// it reached the caller as JSON inside a JSON string inside the envelope, every quote
+    /// escaped twice, and the caller paid for the escaping and then parsed back out of it.
+    #[test]
+    fn a_script_that_answers_in_json_is_not_re_encoded_as_a_string() {
+        let v = answered("{\"ok\": true, \"notes\": [\"A.md\"]}\n");
+        assert_eq!(v, json!({ "ok": true, "notes": ["A.md"] }));
+        assert_eq!(answered("[1, 2]"), json!([1, 2]));
+
+        // Plain output means plain output, and a bare scalar is more useful as what was
+        // printed than as a number nobody can tell from a number that was meant.
+        assert_eq!(answered("all done\n"), json!("all done\n"));
+        assert_eq!(answered("4\n"), json!("4\n"));
+        assert_eq!(answered("true"), json!("true"));
+
+        // Output cut at the byte ceiling is not JSON any more; handing back what was printed
+        // beats failing the call over the half that arrived.
+        assert_eq!(answered("{\"ok\": tr"), json!("{\"ok\": tr"));
+    }
     use crate::config::{ExecSpec, RateLimit, UpstreamConfig, UpstreamKind};
 
     /// A tool that runs the test helper, so the same fixtures run on Unix and Windows.
@@ -517,8 +555,9 @@ mod tests {
         let replay = e.dispatch(&tool, &args).await.unwrap();
         assert_eq!(replay["duplicate"], true);
         assert_eq!(replay["stdout"], first["stdout"]);
-        assert!(
-            replay["stdout"].as_str().unwrap().contains("a1b2c3d"),
+        // The body the script printed, as the object it printed — not a string of it.
+        assert_eq!(
+            replay["stdout"]["commit"], "a1b2c3d",
             "the replay lost the recorded body: {replay}"
         );
     }
