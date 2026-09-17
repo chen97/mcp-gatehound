@@ -1234,33 +1234,13 @@ async function renderLog(): Promise<void> {
   });
 }
 
-/// A JSON payload, wrapped rather than scrolled.
-function payloadHtml(text: string): string {
-  return `<div class="payload-wrap">
-    <pre class="payload">${esc(text) || "—"}</pre>
-    <button class="ghost payload-more" hidden>Show all</button>
-  </div>`;
-}
-
-/// Offer Show all only on the blocks that are actually cut off.
+/// The arguments or the response, whole.
 ///
-/// Measured rather than guessed: whether a payload overflows depends on the window's width and
-/// on how the text wrapped, neither of which is known while the string is being built. A button
-/// offering to reveal nothing is worse than no button.
-function wirePayloads(): void {
-  for (const wrap of Array.from(document.querySelectorAll<HTMLElement>(".payload-wrap"))) {
-    const pre = wrap.querySelector<HTMLElement>(".payload");
-    const more = wrap.querySelector<HTMLButtonElement>(".payload-more");
-    if (!pre || !more) continue;
-    // A pixel or two of rounding is not a cut-off payload.
-    if (pre.scrollHeight <= pre.clientHeight + 2) continue;
-    pre.classList.add("clipped");
-    more.hidden = false;
-    more.addEventListener("click", () => {
-      wrap.classList.add("open");
-      more.hidden = true;
-    });
-  }
+/// No height cap and no Show all. Both were guarding against a payload burying the dialog's
+/// buttons, and the dialog's footer is sticky, so there was nothing left to guard: all the cap
+/// did was hide the end of what somebody opened the dialog to read, behind a second click.
+function payloadHtml(text: string): string {
+  return `<pre class="payload">${esc(text) || "—"}</pre>`;
 }
 
 /// One logged request, in full.
@@ -1321,7 +1301,6 @@ async function showRequest(id: number): Promise<void> {
         <button id="rq-done" class="primary">Done</button>
       </div>`,
     () => {
-      wirePayloads();
       $("#rq-done")?.addEventListener("click", () => endStep());
       // The whole row, because what gets pasted into a bug report is never only the half you
       // happened to have selected.
@@ -3036,6 +3015,8 @@ function paintStdinOptions(): void {
     .join("");
   if (sel.innerHTML === want) return;
   if (!named.includes(d.stdin)) d.stdin = "";
+  // The <select> holds the state a paint() memo would, and the return above is the guard, so
+  // this is diffed against what is there and cannot rewrite itself on a timer.
   sel.innerHTML = want;
   sel.value = d.stdin;
 }

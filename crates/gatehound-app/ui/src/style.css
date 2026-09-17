@@ -291,24 +291,25 @@ pre {
 }
 
 /* The arguments and response of a logged request.
-   Wrapped, never scrolled sideways: a JSON value is read left to right, and a horizontal
-   scrollbar hides the half of a line that says what happened. Capped in height so one huge
-   payload cannot bury the buttons under it — but clipped rather than given its own scrollbar,
-   because the dialog already scrolls and a box that scrolls inside a box that scrolls is a
-   trap for the wheel. What the cap hides is reachable with Show all, so nothing is lost
-   quietly. */
+
+   Its whole height, and no scrollbar of its own in either direction. The dialog scrolls, and
+   its footer is sticky, so a long payload can neither bury the buttons nor need a second
+   scroller to get past — and a box that scrolls inside a box that scrolls is a trap for the
+   wheel. Sideways it wraps instead, because a JSON value is read left to right and a
+   horizontal scrollbar hides the half of the line that says what happened.
+
+   `overflow: visible` on purpose, and it does two jobs. It undoes the `overflow-x: auto` every
+   other `pre` here wants — with the text wrapping there is nothing to scroll to, and `auto`
+   would still make this a scroll container the wheel can get caught in. And it is what keeps
+   the block its own size at all: this is a flex item in the dialog's column, so `overflow`
+   anything but visible gives it `min-height: 0` and lets the column squeeze it. That is what
+   was really happening before — a 78px block of arguments was being shown 28px tall, well
+   inside a cap that was never the binding constraint. */
 .payload {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  overflow: hidden;
-  max-height: 40vh;
+  overflow: visible;
 }
-.payload-wrap.open .payload { max-height: none; }
-/* Faded at the cut, so a clipped block does not read as a complete one. */
-.payload-wrap:not(.open) .payload.clipped {
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 40px), transparent);
-}
-.payload-wrap .payload-more { margin-top: var(--s2); }
 
 
 /* ---- Pills ----------------------------------------------------------------- */

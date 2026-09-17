@@ -60,14 +60,24 @@ lines.forEach((line, i) => {
   const at = `src/main.ts:${i + 1}`;
   // Writing innerHTML directly skips the "has anything actually changed?" check, so the
   // screen rebuilds on every read whether or not it needed to.
-  // One exemption, and it has to say so on the line: an element built once and thrown away —
-  // a modal, say — is not a screen, has nothing to diff against, and cannot redraw on a timer
-  // because nothing re-renders it. Requiring the marker keeps every such case visible here
-  // rather than letting the rule quietly rot.
+  //
+  // `=` and not `==`: reading `el.innerHTML === want` to decide whether to write is the
+  // invariant being enforced, not a breach of it, and flagging the guard along with the write
+  // is how a check teaches people to stop reading it.
+  //
+  // Two exemptions, each of which has to say so on the line or the one above, so every case
+  // stays visible here rather than letting the rule quietly rot:
+  //   * built once, never repainted — an element built and thrown away, a modal say, is not a
+  //     screen: it has nothing to diff against and nothing re-renders it on a timer.
+  //   * diffed against what is there — the write is already guarded by comparing the new HTML
+  //     with the old, which is the whole of what paint() does; it just keeps no memo because
+  //     the element it writes to holds the state (a <select>'s own value, say).
+  const exempt = `${lines[i - 1] ?? ""}\n${line}`;
   if (
-    /\.innerHTML\s*=/.test(line) &&
+    /\.innerHTML\s*=(?!=)/.test(line) &&
     !/^\s*el\.innerHTML = html;/.test(line) &&
-    !/built once, never repainted/.test(`${lines[i - 1] ?? ""}\n${line}`)
+    !/built once, never repainted/.test(exempt) &&
+    !/diffed against what is there/.test(exempt)
   ) {
     problems.push(`${at}  writes innerHTML directly — go through paint(el, html)`);
   }
