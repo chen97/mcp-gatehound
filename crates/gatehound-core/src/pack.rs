@@ -1431,7 +1431,7 @@ version = "1"
 [[tool]]
 name = "brain_search"
 description = "Search."
-action = { type = "exec", cmd = "definitely-not-a-real-binary-xyz", args = ["query"] }
+action = { type = "exec", cmd = 'definitely-not-a-real-binary-xyz', args = ["query"] }
 "#;
         let pack: Pack = toml::from_str(text).unwrap();
         // Before, only a path-shaped command counted, so this came back empty and the operator
@@ -1447,13 +1447,25 @@ action = { type = "exec", cmd = "definitely-not-a-real-binary-xyz", args = ["que
         resolve_file(&mut pack, &missing[0], &real.display().to_string()).unwrap();
         assert!(missing_files(&pack).is_empty());
 
-        // A command that IS on PATH is not reported.
+        // A command that IS on PATH is not reported. `cmd` is a TOML literal string above so
+        // that this substitution survives the path it gets on Windows: in a basic string
+        // `D:\a\mcp-gatehound` is four invalid escape sequences, and the fixture stopped
+        // parsing before the assertion could run.
         let ok: Pack = toml::from_str(&text.replace(
             "definitely-not-a-real-binary-xyz",
             &real.display().to_string(),
         ))
         .unwrap();
         assert!(missing_files(&ok).is_empty());
+
+        // And the same substitution with a path shaped like Windows', so the fixture is held
+        // to that on every platform rather than only on the one that breaks.
+        let windows: Pack = toml::from_str(&text.replace(
+            "definitely-not-a-real-binary-xyz",
+            r"D:\a\mcp-gatehound\target\debug\nothing-here.exe",
+        ))
+        .unwrap();
+        assert_eq!(missing_files(&windows).len(), 1);
     }
 
     /// Only a real name clash is a name clash.
@@ -1498,7 +1510,7 @@ version = "1"
 [[tool]]
 name = "brain_grep"
 description = "d"
-action = { type = "exec", cmd = "definitely-not-a-real-binary-xyz", args = [] }
+action = { type = "exec", cmd = 'definitely-not-a-real-binary-xyz', args = [] }
 "#,
         )
         .unwrap();
@@ -1524,7 +1536,7 @@ version = "1"
 [[tool]]
 name = "brain_search"
 description = "Search."
-action = { type = "exec", cmd = "definitely-not-a-real-binary-xyz", args = ["query"] }
+action = { type = "exec", cmd = 'definitely-not-a-real-binary-xyz', args = ["query"] }
 "#,
         )
         .unwrap();
