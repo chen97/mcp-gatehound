@@ -29,6 +29,14 @@ fn main() {
             let n: usize = rest.first().and_then(|s| s.parse().ok()).unwrap_or(0);
             print!("{}", "x".repeat(n));
         }
+        // The same flood on the other pipe: a child that says too much on stderr is as stuck as
+        // one that says too much on stdout, if nobody is reading either.
+        Some("noise") => {
+            let n: usize = rest.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            eprint!("{}", "e".repeat(n));
+            let _ = std::io::stderr().flush();
+            print!("done");
+        }
         Some("sleep") => {
             let secs: u64 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(1);
             std::thread::sleep(std::time::Duration::from_secs(secs));
