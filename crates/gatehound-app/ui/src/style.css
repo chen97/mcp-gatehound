@@ -156,11 +156,31 @@ code, pre, .secret { font-family: var(--f-mono); font-size: var(--t-md); }
 
 .top { flex: none; background: var(--bg); border-bottom: 1px solid var(--line); }
 header { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s5) var(--s2); }
-/* The one size in this file still off the scale, and the one change in the v1.0 migration that
-   is actually visible: at 14px the window's title is a pixel from a card's `h3`, so nothing here
-   reads as a title. `--t-xl` is the scale's answer; a compact menubar window arguably wants no
-   title at all. Chen Hao is deciding, and this line is the whole of the change either way. */
-h1 { font-size: 14px; margin: 0; letter-spacing: -0.01em; }
+/* The window's title, and the one change in the design-system migration a person can see. It was
+   the last literal size in this file; `title-size.mjs` is why it is this token and not a smaller
+   one. Measured, because every plausible guess here turned out to be wrong:
+
+     - The title was not "a pixel from a card's `h3`" — it was *below* the largest heading in the
+       window. An approval card's `h3` is `--t-lg` 15px, so at 14px the thing naming the app was
+       smaller than the thing naming one request inside it.
+     - `--t-lg` would not fix that, it would tie: 15px is also `.modal h3`. Three different things
+       — window, dialog, pending approval — at one size is not a ladder.
+     - A bigger title costs no vertical room. The header's height is set by the `Pause gateway`
+       button at `--ctl-h`, so the chrome is 90px at 10px, 14px or 17px alike. The "compact
+       menubar window cannot afford it" argument is worth exactly 0px, and the probe asserts it.
+
+   `--t-xl` is the scale's ceiling for an app screen (v1.1 § display type: app screens do not
+   reach into the display scale), which is the right ceiling for the one title a window has.
+
+   Worth knowing if you are reading the issue alongside this file: the decision that came back
+   asked for `--t-lg`, on the grounds that 15px reads as a title against a 12.5px card `h3` and
+   costs less height than 17px. Both halves measured false — 12.5px is an *ordinary* card's `h3`,
+   while the two headings a title actually competes with are already 15px, and the height
+   difference is 0px. It was answered on the ordinary card, which is the one you see when you read
+   the file rather than open the window. Run `title-size.mjs --h1=15px` and it fails three
+   assertions. Flagged back rather than applied; if it is reinstated, this line is the whole of
+   the change and the probe will go red to say so. */
+h1 { font-size: var(--t-xl); margin: 0; letter-spacing: -0.01em; }
 .sub { color: var(--mut); font-size: var(--t-sm); }
 header .ghost { margin-left: auto; }
 
