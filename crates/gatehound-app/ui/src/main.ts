@@ -225,6 +225,49 @@ const esc = (s: unknown): string =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string,
   );
 
+/// The colour a logged decision or status earns, as one of the three meanings the stylesheet
+/// knows: `ok` ran, `waiting` needs a person, `bad` did not happen. Anything unrecognised gets
+/// no colour rather than a guessed one — a grey pill is honest, a wrong-coloured one is not.
+///
+/// This exists because the class used to be the raw string the core logs, interpolated straight
+/// into `class="pill ${decision}"`. That worked for exactly three of the eleven values. The core
+/// writes `ask→allowed` and `ask→denied` for a call a person ruled on, plus `timeout`,
+/// `shutdown`, `unauthorized`, `protocol` and `unknown_tool` — none of which matched a selector,
+/// so a refused call and a replayed one rendered identically. The arrow values could never have
+/// matched: `→` is escaped to `&#8594;` on its way into the attribute.
+///
+/// Note that `ask` alone is the only amber here. `ask→denied` is red: the reader is not being
+/// asked to do anything about a refusal, so it is an outcome, not a pending state.
+const PILL_MEANING: Record<string, "ok" | "bad" | "waiting"> = {
+  // Decisions, as `Decision::as_str` writes them.
+  allow: "ok",
+  deny: "bad",
+  ask: "waiting",
+  // Decisions a held call resolves to, as `Outcome::log_decision` writes them.
+  "ask→allowed": "ok",
+  "ask→denied": "bad",
+  timeout: "bad",
+  shutdown: "bad",
+  // Calls that never reached a policy decision.
+  unauthorized: "bad",
+  protocol: "bad",
+  unknown_tool: "bad",
+  // Statuses.
+  ok: "ok",
+  error: "bad",
+  pending: "waiting",
+};
+
+/// A pill carrying the colour its own text has earned.
+///
+/// `label` defaults to the value, because for every decision and status in this app the thing
+/// worth showing *is* the value. Pass it only where the row says something else — "replayed".
+function pill(value: string | null | undefined, label?: string): string {
+  const text = label ?? value ?? "—";
+  const meaning = value ? PILL_MEANING[value] : undefined;
+  return `<span class="pill${meaning ? ` ${meaning}` : ""}">${esc(text)}</span>`;
+}
+
 /// A relative time that updates itself without redrawing the screen around it.
 ///
 /// "just now" becoming "2m ago" changes the HTML, which would make every list containing a
@@ -369,10 +412,8 @@ function recentHtml(rows: RequestLog[]): string {
           <td class="meta">${ago(r.ts)}</td>
           <td><code>${esc(r.identity ?? "—")}</code></td>
           <td><code>${esc(r.tool ?? r.method ?? "")}</code></td>
-          <td><span class="pill ${esc(r.decision ?? "")}">${esc(r.decision ?? "")}</span></td>
-          <td><span class="pill ${esc(r.status ?? "")}">${esc(
-            r.replayed ? "replayed" : (r.status ?? ""),
-          )}</span></td>
+          <td>${pill(r.decision)}</td>
+          <td>${r.replayed ? pill(null, "replayed") : pill(r.status)}</td>
           <td class="meta">${r.duration_ms != null ? `${r.duration_ms}ms` : ""}</td>
         </tr>`,
       )
@@ -921,6 +962,12 @@ function drawBoard(): void {
   for (const path of Array.from(svg.querySelectorAll<SVGPathElement>("path"))) {
     const len = Math.max(1, Math.round(path.getTotalLength()));
     path.style.setProperty("--len", String(len));
+    // The sweep's far endpoint, written out rather than computed as `calc(-1 * var(--len))` in
+    // the keyframe. Chrome substitutes the var but keeps the result as an unresolved `calc(-93px)`,
+    // and it will not interpolate `34px` → `calc(…)`: the animation silently degrades to discrete
+    // and the spark teleports from one end to the other at the halfway point instead of sweeping.
+    // Measured — see `spark.mjs`. A plain number has nothing to leave unresolved.
+    path.style.setProperty("--len-neg", String(-len));
     if (path.classList.contains("trace-spark")) {
       path.dataset.ms = String(Math.round(len / SPARK_SPEED));
     }
@@ -1130,7 +1177,12 @@ async function renderHome(snap: Snapshot): Promise<void> {
 
 function approvalsHtml(rows: Pending[]): string {
   if (rows.length === 0) {
-    return '<div class="empty">Nothing waiting.<br>A call from an identity with no rule is held here until you decide.</div>';
+    // Two of the three parts, and the third deliberately absent: approvals arrive on their own,
+    // so there is genuinely no action that fills this. A button here would have to invent one.
+    return `<div class="empty">
+              <h4>Nothing waiting.</h4>
+              <p>A call from an identity with no rule is held here until you decide.</p>
+            </div>`;
   }
   return rows
     .map(
@@ -1151,17 +1203,38 @@ function approvalsHtml(rows: Pending[]): string {
     .join("");
 }
 
+/// What each approval button says while it is working.
+///
+/// Resolving a call goes to the core and back, which is the 200ms–2s band: the control that was
+/// pressed carries the wait, and nothing else on the screen changes. No spinner and no overlay —
+/// an action scoped to one button is reported on that button.
+const RESOLVING_LABEL: Record<Resolution, string> = {
+  allow_once: "Allowing…",
+  allow_always: "Allowing…",
+  reject: "Rejecting…",
+  reject_always: "Rejecting…",
+};
+
 function wireApprovals(): void {
   $("#approvals").querySelectorAll<HTMLButtonElement>("button[data-act]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const id = btn.closest<HTMLElement>("[data-id]")!.dataset.id!;
       const resolution = btn.dataset.act as Resolution;
+      // Every button in the card goes disabled — the card is deciding one thing, so a second
+      // press on a sibling is not a different action, it is a race. Only the pressed one changes
+      // its label, because it is the one that says what is happening.
       btn.closest<HTMLElement>(".card")!
         .querySelectorAll("button")
         .forEach((b) => (b.disabled = true));
+      const pressed = btn.textContent;
+      btn.textContent = RESOLVING_LABEL[resolution] ?? "Working…";
       try {
         await invoke("resolve", { id, resolution });
       } catch (e) {
+        // The refresh below repaints from scratch on success, so restoring the label only
+        // matters on the path where it does not — a failed resolve leaves the card in place,
+        // and a card stuck on "Allowing…" reads as still working.
+        btn.textContent = pressed;
         void say(String(e));
       }
       await refresh();
@@ -1194,7 +1267,21 @@ async function renderLog(): Promise<void> {
     </div>
     ${
       filtered.length === 0
-        ? '<div class="empty">No matching requests yet.</div>'
+        ? // Two different states that had been sharing one sentence. "Nothing has happened yet"
+          // and "your filter excluded everything" want opposite things from the reader: the
+          // first wants them to go and make a call, the second wants them to widen the filter.
+          // Offering "Clear filters" to someone with an empty log is noise; withholding it from
+          // someone with 300 rows and a typo is the whole problem.
+          rows.length === 0
+          ? `<div class="empty">
+               <h4>No requests yet.</h4>
+               <p>Calls appear here as they arrive. Point a client at the gateway and make one.</p>
+             </div>`
+          : `<div class="empty">
+               <h4>No requests match this filter.</h4>
+               <p>${rows.length} request${rows.length === 1 ? " is" : "s are"} logged, but none match what you have narrowed to.</p>
+               <div class="row"><button class="primary" id="logclear">Clear filters</button></div>
+             </div>`
         : `<table>
              <thead><tr>
                <th>When</th><th>Identity</th><th>Method</th><th>Tool</th>
@@ -1207,11 +1294,9 @@ async function renderLog(): Promise<void> {
                    <td>${esc(r.identity ?? "—")}</td>
                    <td>${esc(r.method ?? "")}</td>
                    <td>${esc(r.tool ?? "")}</td>
-                   <td><span class="pill">${esc(r.decision ?? "")}</span></td>
+                   <td>${pill(r.decision)}</td>
                    <td>${esc(r.action_type ?? "")}${r.upstream ? ` → ${esc(r.upstream)}` : ""}</td>
-                   <td><span class="pill ${esc(r.status ?? "")}">${esc(r.status ?? "")}</span>${
-                     r.replayed ? ' <span class="pill">replayed</span>' : ""
-                   }</td>
+                   <td>${pill(r.status)}${r.replayed ? ` ${pill(null, "replayed")}` : ""}</td>
                    <td>${r.duration_ms ?? ""}</td>
                  </tr>`,
                )
@@ -1227,6 +1312,13 @@ async function renderLog(): Promise<void> {
   });
   $<HTMLSelectElement>("#logstatus")?.addEventListener("change", (e) => {
     statusFilter = (e.target as HTMLSelectElement).value;
+    void renderLog();
+  });
+  // The empty state's one action, and it clears both filters rather than the one the reader most
+  // recently touched — "clear" that leaves a filter on is the button not doing what it says.
+  $<HTMLButtonElement>("#logclear")?.addEventListener("click", () => {
+    logFilter = "";
+    statusFilter = "";
     void renderLog();
   });
   document.querySelectorAll<HTMLTableRowElement>("#log tr.clickable").forEach((tr) => {
@@ -1273,20 +1365,20 @@ async function showRequest(id: number): Promise<void> {
       <table class="kv"><tbody>
         <tr><td class="meta">Method</td><td><code>${esc(r.method ?? "—")}</code></td></tr>
         ${r.tool ? `<tr><td class="meta">Tool</td><td><code>${esc(r.tool)}</code></td></tr>` : ""}
-        <tr><td class="meta">Decision</td><td><span class="pill">${esc(r.decision ?? "—")}</span></td></tr>
+        <tr><td class="meta">Decision</td><td>${pill(r.decision)}</td></tr>
         <tr><td class="meta">Went to</td><td>${esc(r.action_type ?? "—")}${
           r.upstream ? ` → <code>${esc(r.upstream)}</code>` : ""
         }</td></tr>
         <tr><td class="meta">Outcome</td><td>
-          <span class="pill ${esc(r.status ?? "")}">${esc(r.status ?? "—")}</span>${
+          ${pill(r.status)}${
             r.replayed
-              ? ` <span class="pill">replayed</span> <span class="meta">the first result, returned again</span>`
+              ? ` ${pill(null, "replayed")} <span class="meta">the first result, returned again</span>`
               : ""
           }${r.duration_ms != null ? ` <span class="meta">in ${r.duration_ms}ms</span>` : ""}
         </td></tr>
       </tbody></table>
 
-      ${r.error ? `<div class="notice warn"><strong>${esc(r.error)}</strong></div>` : ""}
+      ${r.error ? `<div class="notice error"><strong>${esc(r.error)}</strong></div>` : ""}
 
       <h4>Arguments</h4>
       <div class="meta">As the caller sent them, with secrets redacted and long values cut.</div>
@@ -1390,7 +1482,7 @@ function downstreamHtml(snap: Snapshot, configFile: string, scripts: ScriptView[
       script: sc,
       pills:
         `<span class="pill">${esc(sc.interpreter)}</span>` +
-        (sc.sandboxed ? `<span class="pill good">sandboxed</span>` : "") +
+        (sc.sandboxed ? `<span class="pill ok">sandboxed</span>` : "") +
         (worst ? `<span class="sev sev-${worst}">${SEVERITY_LABEL[worst]}</span>` : "") +
         (sc.problem ? `<span class="sev sev-danger">changed on disk</span>` : ""),
     });
@@ -2142,7 +2234,7 @@ function discoveredList(d: Draft): string {
     <div class="checks" id="c-picked">
       ${d.discovered
         .map(
-          (t, i) => `<label class="check">
+          (t, i) => `<label class="check compact">
             <input type="checkbox" class="c-pick" data-i="${i}" ${t.chosen ? "checked" : ""} />
             <code>${esc(t.name)}</code>
             <span class="meta">${esc(t.description)}</span>
@@ -2277,7 +2369,7 @@ function connectBody(d: Draft): string {
 
     ${
       d.error
-        ? `<div class="notice warn"><strong>That did not work.</strong>
+        ? `<div class="notice error" role="alert"><strong>That did not work.</strong>
              <div class="meta">${esc(d.error)}</div></div>`
         : ""
     }
@@ -2611,7 +2703,7 @@ function worstOf(findings: Finding[]): Severity | null {
 /// gateway starting: what a caller could do with it is not the question yet.
 function scriptProblemHtml(sc: ScriptView): string {
   if (!sc.problem) return "";
-  return `<div class="notice warn">
+  return `<div class="notice error">
     <strong>This file no longer matches what was registered.</strong>
     <div class="meta">${esc(sc.problem)}</div>
     <div class="meta">
@@ -3239,7 +3331,7 @@ function packBody(): string {
             : // Not a clash, so replace is not the remedy and is not offered. Anything this
               // screen can actually help with — a command that is not on this machine —
               // appears under "Files this pack expects" below, with a picker.
-              `<div class="notice warn">
+              `<div class="notice error">
                  <strong>This pack will not import as it stands.</strong>
                  <div class="meta">${esc(p.refusal ?? "")}</div>
                  ${
@@ -3351,7 +3443,7 @@ function packScriptsHtml(p: PackPlan): string {
           <div class="row" style="margin-top:0">
             <code>${esc(sc.name)}</code>
             <span class="pill">${esc(sc.interpreter)}</span>
-            ${sc.sandboxed ? `<span class="pill good">sandboxed</span>` : ""}
+            ${sc.sandboxed ? `<span class="pill ok">sandboxed</span>` : ""}
             ${dangerous.has(sc.name) ? `<span class="sev sev-danger">danger</span>` : ""}
             <span class="meta">${sc.lines} lines · ${sc.bytes} bytes</span>
             <span class="meta" style="margin-left:auto"><code>${esc(sc.sha256.slice(0, 16))}\u2026</code></span>
@@ -3560,9 +3652,9 @@ function clientSummary(c: Client, owner: string): string {
   const wildcard = allowed.some((r) => r.tool === "*");
 
   const can = wildcard
-    ? `<span class="pill allow">every tool</span>`
+    ? `<span class="pill ok">every tool</span>`
     : allowed.length
-      ? `<span class="pill allow">${allowed.length} tool${allowed.length === 1 ? "" : "s"}</span>`
+      ? `<span class="pill ok">${allowed.length} tool${allowed.length === 1 ? "" : "s"}</span>`
       : `<span class="pill">nothing yet</span>`;
 
   const holds =
@@ -3571,7 +3663,7 @@ function clientSummary(c: Client, owner: string): string {
       : live
         ? `<span class="meta">${live} live token${live === 1 ? "" : "s"}</span>`
         : c.tokens.length
-          ? `<span class="pill error" title="Every token for this name is revoked. Nothing can present these rules — until something else authenticates as the same name.">no live token</span>`
+          ? `<span class="pill bad" title="Every token for this name is revoked. Nothing can present these rules — until something else authenticates as the same name.">no live token</span>`
           : `<span class="meta">no token — authenticates through Access</span>`;
 
   return `${can} ${holds}`;
@@ -3590,7 +3682,7 @@ function clientCard(c: Client, snap: Snapshot, owner: string): string {
            .map(
              (r) => `<tr>
                <td><code>${esc(r.tool)}</code></td>
-               <td><span class="pill ${esc(r.decision)}">${esc(r.decision)}</span></td>
+               <td>${pill(r.decision)}</td>
                <td class="meta">${ago(r.updated_at)}</td>
                <td><button class="danger ghost cl-forget" data-identity="${esc(r.identity)}" data-tool="${esc(r.tool)}">Remove</button></td>
              </tr>`,
@@ -4217,7 +4309,7 @@ async function copy(text: string, button: HTMLElement): Promise<void> {
 /// issuing, and it is how a row is matched to a client's own records.
 function tokenRow(t: TokenInfo): string {
   const state = t.revoked_at
-    ? `<span class="pill error">revoked</span>`
+    ? `<span class="pill bad">revoked</span>`
     : `<span class="pill ok">active</span>`;
   return `<tr>
     <td>${esc(t.name)} <code class="meta">ghd_${esc(t.id)}…</code></td>
@@ -4231,10 +4323,15 @@ function tokenRow(t: TokenInfo): string {
   </tr>`;
 }
 
-const REACH: Record<Reach, { pill: string; label: string; who: string }> = {
+/// `pill` is typed to the three meanings the stylesheet knows rather than to `string`, because
+/// this map is the one place a pill class is written by hand rather than earned through
+/// `PILL_MEANING`. It said `error` — a selector that no longer exists — and so the row that tells
+/// you the gateway is open to the public internet rendered in the same neutral grey as the row
+/// that tells you it is not. The type is now what stops that, not a reviewer noticing.
+const REACH: Record<Reach, { pill: "ok" | "bad" | "waiting"; label: string; who: string }> = {
   loopback: { pill: "ok", label: "This machine only", who: "Nothing off this machine can reach the gateway." },
   tailnet: { pill: "ok", label: "Your tailnet", who: "Devices signed in to your tailnet can reach it. The public internet cannot." },
-  internet: { pill: "error", label: "The public internet", who: "Anything that can resolve the hostname can reach it." },
+  internet: { pill: "bad", label: "The public internet", who: "Anything that can resolve the hostname can reach it." },
 };
 
 const BACKENDS: { value: string; label: string; hint: string }[] = [
@@ -4381,7 +4478,7 @@ function publishPanel(p: PublishInfo): string {
         ? "none, by configuration"
         : `none — <code>${esc(p.configured)}</code> found nothing set up on this machine`
       : st.state === "failed"
-        ? `<code>${esc(st.via)}</code> <span class="pill error">failed</span>`
+        ? `<code>${esc(st.via)}</code> <span class="pill bad">failed</span>`
         : (st.via === p.configured
             ? `<code>${esc(st.via)}</code>`
             : `<code>${esc(st.via)}</code> <span class="meta">(configured: ${esc(p.configured)})</span>`) +
@@ -4409,7 +4506,7 @@ function publishPanel(p: PublishInfo): string {
               ? "Not needed — nothing off this machine can reach it."
               : "Not needed — a device had to join your tailnet to get here."
           }</span>`
-        : `<span class="pill error">none</span>`;
+        : `<span class="pill bad">none</span>`;
 
   // Only worth shouting about when it is actually true right now: an internet reach with the
   // token as the only factor. A configuration that intends that but has not started is the
@@ -4428,7 +4525,7 @@ function publishPanel(p: PublishInfo): string {
 
   const failed =
     st.state === "failed"
-      ? `<div class="notice warn">
+      ? `<div class="notice error">
            <strong>${esc(st.via)} could not start.</strong>
            <div class="meta">${esc(st.error)}</div>
            <div class="meta">
