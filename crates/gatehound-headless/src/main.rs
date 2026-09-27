@@ -203,6 +203,11 @@ async fn publish_status(cfg: Config) -> Result<()> {
     match publish::launch(&cfg.publish, &cfg.listen_addr)? {
         Some(l) => {
             println!("Would run:       {} {}", l.program, l.args.join(" "));
+            // Names only. The values are credentials, and this is printed to a terminal.
+            let names: Vec<&str> = l.env.iter().map(|(k, _)| k.as_str()).collect();
+            if !names.is_empty() {
+                println!("With in its env: {}", names.join(", "));
+            }
             if !l.stop_args.is_empty() {
                 println!("Stopping runs:   {} {}", l.program, l.stop_args.join(" "));
             }
