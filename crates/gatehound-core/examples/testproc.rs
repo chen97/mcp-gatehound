@@ -37,6 +37,14 @@ fn main() {
             let _ = std::io::stderr().flush();
             print!("done");
         }
+        // One environment variable's value, or `<unset>`: what the child actually inherited.
+        Some("env") => {
+            let name = rest.first().expect("env needs a variable name");
+            print!(
+                "{}",
+                std::env::var(name).unwrap_or_else(|_| "<unset>".into())
+            );
+        }
         Some("sleep") => {
             let secs: u64 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(1);
             std::thread::sleep(std::time::Duration::from_secs(secs));
