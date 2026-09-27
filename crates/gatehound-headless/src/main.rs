@@ -639,8 +639,12 @@ fn import_pack(mut cfg: Config, args: &Args) -> Result<()> {
     // The importer holds the credentials, not the pack, so say what still needs setting.
     let missing = pack.missing_env();
 
-    let body = toml::to_string_pretty(&cfg).context("serializing the merged configuration")?;
-    std::fs::write(&target, body).with_context(|| format!("writing {}", target.display()))?;
+    // for_disk: the merged configuration carries whatever the environment supplied at load,
+    // and none of that belongs in the file this writes.
+    let body =
+        toml::to_string_pretty(&cfg.for_disk()).context("serializing the merged configuration")?;
+    gatehound_core::config::write_private(&target, &body)
+        .with_context(|| format!("writing {}", target.display()))?;
 
     println!("imported '{}' into {}", pack.pack.name, target.display());
     for (label, items) in [

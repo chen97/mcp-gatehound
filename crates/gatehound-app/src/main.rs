@@ -291,7 +291,7 @@ fn add_connection(
         gatehound_core::connect::apply_inline_token(&mut cfg, &connection.name, token);
     }
 
-    let body = toml::to_string_pretty(&cfg)
+    let body = toml::to_string_pretty(&cfg.for_disk())
         .context("serializing the configuration")
         .map_err(err)?;
     if let Some(dir) = state.config_path.parent() {
@@ -299,7 +299,7 @@ fn add_connection(
             .with_context(|| format!("creating {}", dir.display()))
             .map_err(err)?;
     }
-    std::fs::write(&state.config_path, body)
+    gatehound_core::config::write_private(&state.config_path, &body)
         .with_context(|| format!("writing {}", state.config_path.display()))
         .map_err(err)?;
 
@@ -408,7 +408,7 @@ fn set_tool_face(
     tool.name = new_name.clone();
     tool.description = description.trim().to_string();
 
-    let body = toml::to_string_pretty(&cfg)
+    let body = toml::to_string_pretty(&cfg.for_disk())
         .context("serializing the configuration")
         .map_err(err)?;
     if let Some(dir) = state.config_path.parent() {
@@ -416,7 +416,7 @@ fn set_tool_face(
             .with_context(|| format!("creating {}", dir.display()))
             .map_err(err)?;
     }
-    std::fs::write(&state.config_path, body)
+    gatehound_core::config::write_private(&state.config_path, &body)
         .with_context(|| format!("writing {}", state.config_path.display()))
         .map_err(err)?;
 
@@ -634,7 +634,7 @@ fn set_publish(state: tauri::State<'_, AppState>, edit: PublishEdit) -> Result<S
     let warnings = apply_publish_edit(&mut cfg, edit)?;
     let via = cfg.publish.via;
 
-    let body = toml::to_string_pretty(&cfg)
+    let body = toml::to_string_pretty(&cfg.for_disk())
         .context("serializing the configuration")
         .map_err(err)?;
     if let Some(dir) = state.config_path.parent() {
@@ -642,7 +642,7 @@ fn set_publish(state: tauri::State<'_, AppState>, edit: PublishEdit) -> Result<S
             .with_context(|| format!("creating {}", dir.display()))
             .map_err(err)?;
     }
-    std::fs::write(&state.config_path, body)
+    gatehound_core::config::write_private(&state.config_path, &body)
         .with_context(|| format!("writing {}", state.config_path.display()))
         .map_err(err)?;
 
@@ -1443,7 +1443,7 @@ fn add_script_tool(
 /// not start next time, and the operator finds out at the worst moment.
 fn write_config(state: &tauri::State<'_, AppState>, cfg: &Config) -> Result<(), String> {
     cfg.validate().map_err(|e| format!("{e:#}"))?;
-    let body = toml::to_string_pretty(cfg)
+    let body = toml::to_string_pretty(&cfg.for_disk())
         .context("serializing the configuration")
         .map_err(err)?;
     if let Some(dir) = state.config_path.parent() {
@@ -1451,7 +1451,7 @@ fn write_config(state: &tauri::State<'_, AppState>, cfg: &Config) -> Result<(), 
             .with_context(|| format!("creating {}", dir.display()))
             .map_err(err)?;
     }
-    std::fs::write(&state.config_path, body)
+    gatehound_core::config::write_private(&state.config_path, &body)
         .with_context(|| format!("writing {}", state.config_path.display()))
         .map_err(err)
 }
@@ -1574,7 +1574,7 @@ fn apply_pack(
     )
     .map_err(err)?;
 
-    let body = toml::to_string_pretty(&cfg)
+    let body = toml::to_string_pretty(&cfg.for_disk())
         .context("serializing the merged configuration")
         .map_err(err)?;
     if let Some(dir) = state.config_path.parent() {
@@ -1582,7 +1582,7 @@ fn apply_pack(
             .with_context(|| format!("creating {}", dir.display()))
             .map_err(err)?;
     }
-    std::fs::write(&state.config_path, body)
+    gatehound_core::config::write_private(&state.config_path, &body)
         .with_context(|| format!("writing {}", state.config_path.display()))
         .map_err(err)?;
 
@@ -1920,8 +1920,13 @@ fn load_config() -> Result<(Config, PathBuf)> {
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
+    // The one write that keeps a token from the environment: this creates the file the app will
+    // run from, and a Mac app launched from the Dock or Finder does not inherit a shell's
+    // environment — without the token in the file it could not start. Owner-only, like every
+    // other write of this file.
     let body = toml::to_string_pretty(&cfg).context("serializing the new configuration")?;
-    std::fs::write(&target, body).with_context(|| format!("writing {}", target.display()))?;
+    gatehound_core::config::write_private(&target, &body)
+        .with_context(|| format!("writing {}", target.display()))?;
     tracing::info!(
         config = %target.display(),
         generated_token = generated,
