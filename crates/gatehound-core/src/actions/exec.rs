@@ -642,7 +642,10 @@ mod tests {
         // the whole process while other tests spawn children and resolve hosts beside it.
         // The helper is started by absolute path, so it runs with PATH withheld.
         let expected = std::env::var("PATH").expect("PATH is set");
-        let s = spec(&["env", "PATH"], None);
+        let mut s = spec(&["env", "PATH"], None);
+        // Room for a real PATH. The helper spec caps output at 1KB, and a CI runner's PATH is
+        // several times that — it came back cut off, and the test compared half a PATH.
+        s.max_output_bytes = 1 << 20;
         let inherited = ExecRunner::new(s.clone()).run(&vars(&[])).await.unwrap();
         assert_eq!(
             inherited.stdout, expected,
