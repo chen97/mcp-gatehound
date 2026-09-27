@@ -130,6 +130,30 @@ impl Upstreams {
     }
 }
 
+/// Follow a redirect only to the origin the request was sent to.
+///
+/// An upstream's credential rides on every request, and reqwest strips only `Authorization`
+/// and `Cookie` when a redirect changes host — a key sent as `x-api-key` goes along to wherever
+/// the `Location` points. A 307 or 308 also sends the body again, and the body is the caller's
+/// arguments. So a redirect to another scheme, host or port is an error the operator sees,
+/// never a request quietly sent somewhere the configuration does not name.
+pub(crate) fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let from = attempt.previous().first().map(|u| u.origin());
+        if from.is_some_and(|o| o != attempt.url().origin()) {
+            let to = attempt.url().origin().ascii_serialization();
+            attempt.error(format!(
+                "refusing to follow a redirect to {to}: the upstream's credential and the \
+                 caller's arguments would go with it"
+            ))
+        } else if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
