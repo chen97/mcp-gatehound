@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1440 1080" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
   <defs>
-    <marker id="mAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#F2C14E"/></marker>
+    <marker id="mAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#7AACF7"/></marker>
     <marker id="mBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5B9DFF"/></marker>
     <marker id="mGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5CCB8B"/></marker>
     <marker id="mMute" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8A95A3"/></marker>
@@ -22,11 +22,11 @@
   <text x="366" y="234" font-size="13" font-weight="400" fill="#96A1AE">service token&#x27;s common_name</text>
   <text x="366" y="266" font-size="12" font-weight="400" fill="#7A8695">nothing is exposed directly</text>
   <path d="M620,222.0 L664,222.0" stroke="#5B9DFF" stroke-width="2" fill="none" marker-end="url(#mBlue)"/>
-  <rect x="672" y="152" width="300" height="140" rx="10" fill="#222A33" stroke="#F2C14E" stroke-width="1"/>
+  <rect x="672" y="152" width="300" height="140" rx="10" fill="#222A33" stroke="#7AACF7" stroke-width="1"/>
   <text x="694" y="186" font-size="15" font-weight="700" fill="#EDF0F4">MCP Gatehound</text>
   <text x="694" y="214" font-size="13" font-weight="400" fill="#96A1AE">bound to 127.0.0.1 — it refuses</text>
   <text x="694" y="234" font-size="13" font-weight="400" fill="#96A1AE">to start on any other address</text>
-  <text x="694" y="266" font-size="12" font-weight="400" fill="#F2C14E">gateway · GUI · SQLite · one process</text>
+  <text x="694" y="266" font-size="12" font-weight="400" fill="#7AACF7">gateway · GUI · SQLite · one process</text>
   <path d="M980,222.0 L1024,222.0" stroke="#5CCB8B" stroke-width="2" fill="none" marker-end="url(#mGreen)"/>
   <rect x="1032" y="152" width="360" height="140" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
   <text x="1054" y="182" font-size="13" font-weight="600" fill="#EDF0F4">Upstreams — whatever config declares</text>
@@ -36,7 +36,7 @@
   <circle cx="1062" cy="240" r="3.5" fill="#5CCB8B"/>
   <text x="1076" y="244" font-size="12" font-weight="600" fill="#EDF0F4">Another MCP server</text>
   <text x="1076" y="260" font-size="11" font-weight="400" fill="#7A8695">contributes only the tools you declare</text>
-  <circle cx="1062" cy="276" r="3.5" fill="#F2C14E"/>
+  <circle cx="1062" cy="276" r="3.5" fill="#7AACF7"/>
   <text x="1076" y="280" font-size="12" font-weight="600" fill="#EDF0F4">A local command</text>
   <text x="1076" y="296" font-size="11" font-weight="400" fill="#7A8695">argv only, never a shell</text>
   <text x="48" y="330" font-size="12" font-weight="700" fill="#7A8695" letter-spacing="1.6">ONE PROCESS, ONE LIFECYCLE</text>
@@ -94,8 +94,8 @@
   <path d="M876,678.0 L898,678.0" stroke="#8A95A3" stroke-width="2" fill="none" marker-end="url(#mMute)"/>
   <rect x="906" y="602" width="250" height="152" rx="10" fill="#1D232B" stroke="#2C3540" stroke-width="1"/>
   <text x="926" y="630" font-size="14" font-weight="700" fill="#EDF0F4">Action engine</text>
-  <text x="926" y="652" font-size="12" font-weight="400" fill="#F2C14E">the caller names a tool,</text>
-  <text x="926" y="669" font-size="12" font-weight="400" fill="#F2C14E">never an action</text>
+  <text x="926" y="652" font-size="12" font-weight="400" fill="#7AACF7">the caller names a tool,</text>
+  <text x="926" y="669" font-size="12" font-weight="400" fill="#7AACF7">never an action</text>
   <text x="926" y="694" font-size="12" font-weight="400" fill="#96A1AE">proxy → an upstream op</text>
   <text x="926" y="711" font-size="12" font-weight="400" fill="#96A1AE">exec → a fixed argv template</text>
   <text x="926" y="734" font-size="11" font-weight="400" fill="#7A8695">an idempotency key is claimed</text>
@@ -104,12 +104,12 @@
   <text x="68" y="834" font-size="13" font-weight="700" fill="#EDF0F4">SQLite — bundled, WAL mode</text>
   <text x="68" y="858" font-size="12" font-weight="400" fill="#96A1AE">the audit log: every request, decision and outcome, denials included</text>
   <text x="68" y="882" font-size="11" font-weight="400" fill="#7A8695">secrets redacted by key · bodies truncated, then blanked, then deleted</text>
-  <rect x="620" y="806" width="536" height="96" rx="10" fill="#222A33" stroke="#F2C14E" stroke-width="1"/>
+  <rect x="620" y="806" width="536" height="96" rx="10" fill="#222A33" stroke="#7AACF7" stroke-width="1"/>
   <text x="640" y="834" font-size="13" font-weight="700" fill="#EDF0F4">Approval queue — a person in the loop</text>
   <text x="640" y="858" font-size="11" font-weight="400" fill="#96A1AE">the HTTP request is parked on a bounded hold — allow once · allow and whitelist · reject</text>
   <text x="640" y="882" font-size="11" font-weight="400" fill="#7A8695">kept under Cloudflare&#x27;s ~100s edge timeout · unanswered returns approval_timeout</text>
-  <path d="M745.0,760 L745.0,798" stroke="#F2C14E" stroke-width="2" fill="none" marker-end="url(#mAmber)"/>
-  <text x="757.0" y="788" font-size="12" font-weight="400" fill="#F2C14E">ask</text>
+  <path d="M745.0,760 L745.0,798" stroke="#7AACF7" stroke-width="2" fill="none" marker-end="url(#mAccent)"/>
+  <text x="757.0" y="788" font-size="12" font-weight="400" fill="#7AACF7">ask</text>
   <rect x="48" y="930" width="1344" height="120" rx="10" fill="#222A33" stroke="#2C3540" stroke-width="1"/>
   <text x="72" y="962" font-size="15" font-weight="700" fill="#EDF0F4">Packs — the gateway ships knowing nothing</text>
   <text x="72" y="988" font-size="13" font-weight="400" fill="#96A1AE">Everything it fronts is configuration: an upstream, its named operations, and the tools bound to them. A pack is that configuration as one portable file.</text>
