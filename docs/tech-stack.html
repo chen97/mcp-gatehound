@@ -12,7 +12,9 @@
       --color-panel:   #1a1f27;
       --color-ink:     #e8ecf1;
       --color-muted:   #8d99a8;
-      --color-accent:  #f2c14e;
+      /* design-system v1.5 accent. This page is dark-only, so it takes the
+         dark value; there is no light block to keep in step. */
+      --color-accent:  #7aacf7;
       --font-sans:     'Geist', system-ui, sans-serif;
       --font-serif:    'Instrument Serif', serif;
       --font-mono:     'Geist Mono', ui-monospace, monospace;
@@ -87,7 +89,7 @@
           <polygon points="0 0, 8 3, 0 6" fill="#8d99a8"/>
         </marker>
         <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-          <polygon points="0 0, 8 3, 0 6" fill="#f2c14e"/>
+          <polygon points="0 0, 8 3, 0 6" fill="var(--color-accent)"/>
         </marker>
         <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
           <polygon points="0 0, 8 3, 0 6" fill="#5ccb8b"/>
@@ -110,7 +112,7 @@
       <line x1="216" y1="312" x2="296" y2="312" stroke="#5ccb8b" stroke-width="1.2"
             marker-end="url(#arrow-link)"/>
       <!-- 2. Listener → core (primary flow) -->
-      <line x1="472" y1="312" x2="552" y2="312" stroke="#f2c14e" stroke-width="1.4"
+      <line x1="472" y1="312" x2="552" y2="312" stroke="var(--color-accent)" stroke-width="1.4"
             marker-end="url(#arrow-accent)"/>
       <!-- 3. Core → database -->
       <line x1="648" y1="352" x2="648" y2="440" stroke="#8d99a8" stroke-width="1.2"
@@ -137,7 +139,7 @@
             text-anchor="middle" letter-spacing="0.08em">MCP · BEARER</text>
 
       <rect x="472" y="288" width="80" height="12" rx="2" fill="#12161c"/>
-      <text x="512" y="297" fill="#f2c14e" font-size="8" font-family="'Geist Mono', monospace"
+      <text x="512" y="297" fill="var(--color-accent)" font-size="8" font-family="'Geist Mono', monospace"
             text-anchor="middle" letter-spacing="0.08em">EVERY CALL</text>
 
       <rect x="660" y="384" width="84" height="12" rx="2" fill="#12161c"/>
@@ -217,10 +219,10 @@
       <!-- gatehound-core (focal) -->
       <rect x="552" y="280" width="192" height="72" rx="6" fill="#12161c"/>
       <rect x="552" y="280" width="192" height="72" rx="6"
-            fill="rgba(242,193,78,0.08)" stroke="#f2c14e" stroke-width="1"/>
+            fill="color-mix(in srgb, var(--color-accent) 8%, transparent)" stroke="var(--color-accent)" stroke-width="1"/>
       <rect x="560" y="288" width="40" height="12" rx="2" fill="transparent"
-            stroke="rgba(242,193,78,0.50)" stroke-width="0.8"/>
-      <text x="580" y="297" fill="#f2c14e" font-size="7" font-family="'Geist Mono', monospace"
+            stroke="color-mix(in srgb, var(--color-accent) 50%, transparent)" stroke-width="0.8"/>
+      <text x="580" y="297" fill="var(--color-accent)" font-size="7" font-family="'Geist Mono', monospace"
             text-anchor="middle" letter-spacing="0.08em">CORE</text>
       <text x="648" y="320" fill="#e8ecf1" font-size="12" font-weight="600"
             font-family="'Geist', sans-serif" text-anchor="middle">gatehound-core</text>
@@ -272,7 +274,7 @@
             letter-spacing="0.18em">LEGEND</text>
 
       <rect x="40" y="640" width="14" height="10" rx="2"
-            fill="rgba(242,193,78,0.08)" stroke="#f2c14e" stroke-width="1"/>
+            fill="color-mix(in srgb, var(--color-accent) 8%, transparent)" stroke="var(--color-accent)" stroke-width="1"/>
       <text x="60" y="649" fill="#8d99a8" font-size="8.5" font-family="'Geist', sans-serif">Decides everything</text>
 
       <rect x="200" y="640" width="14" height="10" rx="2" fill="#1a1f27" stroke="#e8ecf1" stroke-width="1"/>
@@ -293,7 +295,7 @@
       <line x1="716" y1="646" x2="744" y2="646" stroke="#5ccb8b" stroke-width="1.2" marker-end="url(#arrow-link)"/>
       <text x="752" y="649" fill="#8d99a8" font-size="8.5" font-family="'Geist', sans-serif">Tool call over HTTP</text>
 
-      <line x1="904" y1="646" x2="932" y2="646" stroke="#f2c14e" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+      <line x1="904" y1="646" x2="932" y2="646" stroke="var(--color-accent)" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
       <text x="940" y="649" fill="#8d99a8" font-size="8.5" font-family="'Geist', sans-serif">Primary path</text>
 
       <line x1="1060" y1="646" x2="1088" y2="646" stroke="#8d99a8" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
