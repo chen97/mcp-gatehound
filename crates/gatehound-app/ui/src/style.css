@@ -263,14 +263,18 @@ button.ghost:hover { background: var(--in); color: var(--tx); border-color: var(
 button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; background: var(--panel-2); }
 button.primary:disabled { background: var(--in); color: var(--mut); }
 
-input, select {
+/* TEXT-ENTRY CONTROLS ONLY. The :not() is load-bearing and must be copied exactly — without it
+   this block also matches input[type=checkbox] and input[type=radio] and deforms both. v1.5.3.
+   :where() keeps the selector at specificity (0,0,1), identical to the bare `input` it replaces. */
+input:not(:where([type="checkbox"], [type="radio"])), select {
   font: inherit; font-size: 12.5px; color: var(--tx); background: var(--in);
   border: 1px solid var(--line-strong); border-radius: var(--r);
   padding: 6px 10px; min-height: 30px;
   transition: border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
 }
 input::placeholder { color: color-mix(in srgb, var(--mut) 80%, transparent); }
-input:hover, select:hover { border-color: var(--mut); }
+input:not(:where([type="checkbox"], [type="radio"])):hover,
+select:hover { border-color: var(--mut); }
 
 /* One focus treatment everywhere, and only for keyboard users. */
 :is(button, input, select, [tabindex]):focus-visible {
