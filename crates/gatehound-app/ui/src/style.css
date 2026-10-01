@@ -1013,7 +1013,7 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
   transition: border-color var(--d-fast) var(--ease-out);
 }
 .check:hover { border-color: var(--line-strong); }
-.check:has(input:checked) { border-color: color-mix(in srgb, var(--ac) 45%, transparent); }
+.check:has(input:checked) { border-color: color-mix(in srgb, var(--ac) 35%, transparent); }
 .check input { margin-top: var(--s0); flex: none; accent-color: var(--ac); }
 
 /* The compact row, for a dense list of things you are ticking rather than a decision you are
@@ -1042,7 +1042,7 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
 .grant-group .check.group { margin-top: 0; background: var(--panel-2); }
 .grant-group .check.group:has(input:checked),
 .grant-group .check.group:has(input:indeterminate) {
-  border-color: color-mix(in srgb, var(--ac) 45%, transparent);
+  border-color: color-mix(in srgb, var(--ac) 35%, transparent);
 }
 /* Partly granted is its own answer and has to look like one: the same accent as a full grant,
    but hollow, so "some of these" never reads as "all of these" at a glance. */
@@ -1060,7 +1060,7 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
   background: none;
 }
 .grant-tools .check.sub:hover { border-color: var(--line); }
-.grant-tools .check.sub:has(input:checked) { border-color: color-mix(in srgb, var(--ac) 30%, transparent); }
+.grant-tools .check.sub:has(input:checked) { border-color: color-mix(in srgb, var(--ac) 35%, transparent); }
 
 .check .grow { display: flex; flex-direction: column; gap: var(--s0); min-width: 0; }
 .check .grow code { word-break: break-all; }
@@ -1202,10 +1202,9 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
 }
 .modal-choice:hover { border-color: var(--line-strong); background: var(--in); }
 .modal-choice input { margin: 2px 0 0; flex: none; accent-color: var(--ac); }
-.modal-choice:has(input:checked) {
-  border-color: var(--ac);
-  background: color-mix(in srgb, var(--ac) 8%, var(--panel-2));
-}
+/* Selected state, case 2b: the radio dot carries the selection, so the card takes only the
+   35% accent border and keeps its `--panel-2` bed. One border value for every checked control. */
+.modal-choice:has(input:checked) { border-color: color-mix(in srgb, var(--ac) 35%, transparent); }
 .modal-choice:has(input:focus-visible) {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ac) 25%, transparent);
 }
