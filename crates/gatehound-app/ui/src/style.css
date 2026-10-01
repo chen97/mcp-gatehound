@@ -212,14 +212,14 @@ header .ghost { margin-left: auto; }
    inline element ignores both and the dot renders as a sliver. A flex container blockifies its
    children anyway, so this changes nothing where the dot was already used. */
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--mut); flex: none; }
-.dot.green { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
-.dot.grey  { background: var(--mut); }
-.dot.red   { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent); }
-/* NOTE: the class name is a v1.5 misnomer — this dot is BLUE now. The name is wired through
-   GatewayStatus::Degraded.colour() in gatehound-core and the Dot union in main.ts, so renaming
-   it to a meaning-based name (it means "degraded", not a hue) is a code change with a test, not
-   a stylesheet change. Tracked separately rather than done here. */
-.dot.amber { background: var(--ac); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ac) 18%, transparent); }
+/* Named for what the dot means, never for the hue it happens to be. `degraded` was `amber`, and
+   went on saying amber for a release after v1.5 painted it blue; the next hue change should
+   touch these four lines and nothing else. The names are written by
+   GatewayStatus::colour() in gatehound-core and typed as `Dot` in main.ts. */
+.dot.ok       { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+.dot.paused   { background: var(--mut); }
+.dot.bad      { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent); }
+.dot.degraded { background: var(--ac); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ac) 18%, transparent); }
 /* Only a service has a health probe, and the rows that do not have one sit in the same list.
    A spacer the width of the dot keeps every name on the same left edge — without it a script
    row's name starts where a service's dot does, and the list reads as two lists again. */
@@ -776,8 +776,8 @@ pre {
 
 /* A halo leaving the status dot, once every three seconds. The only ambient motion besides the
    drift, and it answers the only question a glance at this page is really asking: is it up. */
-.chip .dot.green { position: relative; }
-.chip .dot.green::after {
+.chip .dot.ok { position: relative; }
+.chip .dot.ok::after {
   content: ""; position: absolute; inset: 0; border-radius: 50%;
   background: var(--ok); animation: alive 3s var(--ease-out) infinite;
 }
@@ -860,7 +860,7 @@ pre {
    repaint of the whole diagram every single frame. Measured at 4-6% of a core, continuously,
    for motion whose entire job is to be noticed by a person who is not there. */
 body.unwatched .trace-drift,
-body.unwatched .chip .dot.green::after,
+body.unwatched .chip .dot.ok::after,
 body.unwatched .pill.hot { animation-play-state: paused; }
 
 @keyframes tile-in-left  { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
@@ -912,7 +912,7 @@ body.unwatched .pill.hot { animation-play-state: paused; }
   .chip { animation-name: fade-in; animation-duration: var(--d-quick); }
   .trace { animation: none; stroke-dashoffset: 0; }
   .trace-drift { animation: none; opacity: 0; }
-  .chip .dot.green::after { animation: none; opacity: 0; }
+  .chip .dot.ok::after { animation: none; opacity: 0; }
   .chip .pill.hot { animation: none; }
   @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 }

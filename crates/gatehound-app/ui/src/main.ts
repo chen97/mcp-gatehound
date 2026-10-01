@@ -8,7 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 type Status = "listening" | "paused" | "degraded";
-type Dot = "green" | "grey" | "red" | "amber";
+type Dot = "ok" | "paused" | "bad" | "degraded";
 type Resolution = "allow_once" | "allow_always" | "reject" | "reject_always";
 type Decision = "allow" | "deny" | "ask";
 
@@ -487,7 +487,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
             label: u.target,
             short: shortLabel(u.target),
             sub: `${u.healthy ? u.kind : "not answering"} · ${n} tool${n === 1 ? "" : "s"}`,
-            dot: u.healthy ? "green" : "red",
+            dot: u.healthy ? "ok" : "bad",
             goto: "actions",
             focus: `service:${u.name}`,
             attr: `data-service="${esc(u.name)}"`,
@@ -532,7 +532,7 @@ function flowHtml(snap: Snapshot, clients: Client[], access: Access): string {
         <div class="chip-die">
           <div class="chip-core">
             <div class="chip-name" title="${snap.running ? "Listening" : "Paused"}">
-              <span class="dot ${snap.running ? "green" : "grey"}"></span>MCP Gatehound
+              <span class="dot ${snap.running ? "ok" : "paused"}"></span>MCP Gatehound
             </div>
             <div class="chip-meta">${esc(snap.listen_addr)}</div>
             ${snap.pending ? `<span class="pill hot">${snap.pending} waiting</span>` : ""}
@@ -1552,7 +1552,7 @@ function downstreamHtml(snap: Snapshot, configFile: string, scripts: ScriptView[
           ${
             r.healthy === undefined
               ? `<span class="dot-gap"></span>`
-              : `<span class="dot ${r.healthy ? "green" : "red"}"
+              : `<span class="dot ${r.healthy ? "ok" : "bad"}"
                        title="${r.healthy ? "Answering" : "Not answering its health probe"}"></span>`
           }
           <code>${esc(r.title)}</code>
