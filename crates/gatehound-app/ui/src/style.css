@@ -411,7 +411,10 @@ button.primary:hover { background: var(--ac-hover); }
    against `--panel-2` and the border needs only 3:1, so the two part company. In dark they are
    the same value and this costs nothing. */
 button.danger { color: var(--bad-tx); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
-button.danger:hover { background: color-mix(in srgb, var(--bad) 12%, transparent); }
+/* The hover tint mixes against `--panel`, not `transparent`: over the `--panel-2` approval card a
+   transparent 12% let dark `--bad-tx` fall to 4.33:1. Against `--panel` it is 4.83 dark, 5.52
+   light, on every bed. [design-system v1.5.13 — `--panel` is the only safe bed for a tint] */
+button.danger:hover { background: color-mix(in srgb, var(--bad) 12%, var(--panel)); }
 /* Quieter than a default button, but still visibly a button — borderless made "Edit" and
    "Reject" read as text, and a control you cannot see is a control nobody presses. */
 button.ghost { background: none; border-color: var(--line); color: var(--mut); }
