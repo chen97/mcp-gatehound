@@ -785,9 +785,21 @@ pre {
   0%   { opacity: .45; transform: scale(1); }
   70%, 100% { opacity: 0; transform: scale(2.6); }
 }
-/* The one loop meant to be noticed: something is waiting on a person. */
-.chip .pill.hot { animation: waiting 2.2s ease-in-out infinite; }
-@keyframes waiting { 0%, 100% { opacity: 1; } 50% { opacity: .58; } }
+/* The one loop meant to be noticed: something is waiting on a person. A halo leaving the pill,
+   in the same shape as the status dot's — the pill itself never fades. It used to: the whole
+   element pulsed to opacity .58, which took the label to 2.55:1 in light and 3.70:1 in dark at
+   the bottom of every cycle (CHE-123). The ink is the message, so the motion goes behind it.
+   `isolation` is what keeps the `z-index: -1` halo inside the pill's own stacking context —
+   above `.chip-core`, below the label. */
+.chip .pill.hot { position: relative; isolation: isolate; }
+.chip .pill.hot::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit;
+  background: var(--ac); animation: waiting 2.2s var(--ease-out) infinite;
+}
+@keyframes waiting {
+  0%   { opacity: .4; transform: scale(1); }
+  70%, 100% { opacity: 0; transform: scale(1.15, 1.5); }
+}
 
 /* ---- Traces ---- */
 
@@ -861,7 +873,7 @@ pre {
    for motion whose entire job is to be noticed by a person who is not there. */
 body.unwatched .trace-drift,
 body.unwatched .chip .dot.green::after,
-body.unwatched .pill.hot { animation-play-state: paused; }
+body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
 
 @keyframes tile-in-left  { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
 @keyframes tile-in-right { from { opacity: 0; transform: translateX(12px); }  to { opacity: 1; transform: none; } }
@@ -913,7 +925,7 @@ body.unwatched .pill.hot { animation-play-state: paused; }
   .trace { animation: none; stroke-dashoffset: 0; }
   .trace-drift { animation: none; opacity: 0; }
   .chip .dot.green::after { animation: none; opacity: 0; }
-  .chip .pill.hot { animation: none; }
+  .chip .pill.hot::after { animation: none; opacity: 0; }
   @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 }
 
