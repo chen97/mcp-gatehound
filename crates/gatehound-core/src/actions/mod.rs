@@ -32,12 +32,16 @@ impl ActionEngine {
         let mut execs = HashMap::new();
         let mut limits = HashMap::new();
         let base_dir = cfg.script_dir();
+        // The variable an operator chose for the tunnel token is as much the gateway's own
+        // credential as the fixed names the runner already withholds.
+        let withheld: Vec<String> = cfg.publish.cloudflare.token_env.iter().cloned().collect();
         for tool in &cfg.tools {
             match &tool.action {
                 Action::Exec(spec) => {
                     execs.insert(
                         tool.name.clone(),
-                        ExecRunner::with_arguments(spec.clone(), tool.arguments.clone()),
+                        ExecRunner::with_arguments(spec.clone(), tool.arguments.clone())
+                            .withholding(withheld.clone()),
                     );
                 }
                 // A script action becomes an exec here, once, at build time — so it inherits
@@ -55,7 +59,8 @@ impl ActionEngine {
                     let lowered = spec.lower(def, &base_dir)?;
                     execs.insert(
                         tool.name.clone(),
-                        ExecRunner::with_arguments(lowered, tool.arguments.clone()),
+                        ExecRunner::with_arguments(lowered, tool.arguments.clone())
+                            .withholding(withheld.clone()),
                     );
                 }
                 Action::Proxy { .. } => {}

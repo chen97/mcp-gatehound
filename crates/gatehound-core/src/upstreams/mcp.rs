@@ -64,10 +64,36 @@ fn from_sse(text: &str) -> Result<Value> {
     bail!("the event stream carried no JSON-RPC reply")
 }
 
+/// The upstream refused the session we presented, so the request was never acted on.
+///
+/// A type rather than a phrase to look for. Matching the error's text meant matching a message
+/// that also carries the upstream's URL and whatever body it sent: an upstream on port 4040, or
+/// at `/session/mcp`, turned every failure — a timeout after the call had already run included
+/// — into "stale session", and the `tools/call` was sent a second time.
+#[derive(Debug)]
+struct StaleSession(String);
+
+impl std::fmt::Display for StaleSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StaleSession {}
+
 /// Whether a failure means the server has forgotten our session rather than disliked the call.
 fn is_stale_session(e: &anyhow::Error) -> bool {
-    let s = e.to_string();
-    s.contains("404") || s.contains("Mcp-Session-Id") || s.contains("session")
+    e.downcast_ref::<StaleSession>().is_some()
+}
+
+/// Whether a refusal is the server rejecting the session id we sent. Only a 4xx counts: that is
+/// the server declining before doing anything, which is what makes resending safe. The
+/// transport answers an unknown session with 404; some servers use 400 and say so in the body.
+fn rejects_session(status: reqwest::StatusCode, body: &str, presented: bool) -> bool {
+    presented
+        && (status == reqwest::StatusCode::NOT_FOUND
+            || (status == reqwest::StatusCode::BAD_REQUEST
+                && body.to_ascii_lowercase().contains("session")))
 }
 
 /// A tool an MCP server says it has, as reported by `tools/list`.
@@ -120,6 +146,7 @@ impl McpUpstream {
         Ok(Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
+                .redirect(super::same_origin_redirects())
                 .build()?,
             url: url.to_string(),
             bearer,
@@ -180,11 +207,16 @@ impl McpUpstream {
         let text = resp.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            bail!(
+            let message = format!(
                 "MCP upstream {} -> {status}: {}",
                 self.url,
                 text.chars().take(300).collect::<String>()
             );
+            let presented = session.is_some_and(|s| s.id.is_some());
+            if rejects_session(status, &text, presented) {
+                return Err(StaleSession(message).into());
+            }
+            bail!(message);
         }
         Ok(Exchange {
             status,
@@ -350,5 +382,46 @@ impl McpUpstream {
 
     pub async fn healthy(&self) -> bool {
         self.rpc("ping", json!({})).await.is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn only_a_refused_session_counts_as_stale() {
+        assert!(rejects_session(StatusCode::NOT_FOUND, "", true));
+        assert!(rejects_session(
+            StatusCode::BAD_REQUEST,
+            "Bad Request: No valid session ID provided",
+            true
+        ));
+
+        // No session was presented, so there is nothing for the server to have forgotten.
+        assert!(!rejects_session(StatusCode::NOT_FOUND, "", false));
+        // A server error may come after the call ran; resending it could act twice.
+        assert!(!rejects_session(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session store down",
+            true
+        ));
+        assert!(!rejects_session(
+            StatusCode::BAD_REQUEST,
+            "missing argument",
+            true
+        ));
+    }
+
+    #[test]
+    fn a_failure_that_merely_mentions_a_session_is_not_stale() {
+        // The URL rides in every message: an upstream on port 4040, or under /session, used to
+        // make a timeout read as a stale session and resend the call.
+        let timeout = anyhow!("MCP upstream http://127.0.0.1:4040/session/mcp not reachable");
+        assert!(!is_stale_session(&timeout));
+        let stale: anyhow::Error = StaleSession("gone".into()).into();
+        assert!(is_stale_session(&stale));
+        assert!(is_stale_session(&stale.context("while calling a tool")));
     }
 }

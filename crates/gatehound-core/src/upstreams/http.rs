@@ -114,7 +114,7 @@ fn render_str(s: &str, args: &Value, encode_path: bool) -> Result<Value> {
             .get(name)
             .ok_or_else(|| anyhow!("template placeholder {{{name}}} has no value"))?;
         if encode_path {
-            return Ok(Value::String(encode_segment(&scalar(found)?)));
+            return Ok(Value::String(path_value(name, &scalar(found)?)?));
         }
         return Ok(found.clone());
     }
@@ -133,7 +133,7 @@ fn render_str(s: &str, args: &Value, encode_path: bool) -> Result<Value> {
             .ok_or_else(|| anyhow!("template placeholder {{{name}}} has no value"))?;
         let text = scalar(found)?;
         out.push_str(&if encode_path {
-            encode_segment(&text)
+            path_value(name, &text)?
         } else {
             text
         });
@@ -156,6 +156,20 @@ fn encode_segment(s: &str) -> String {
     utf8_percent_encode(s, PATH_SEGMENT).to_string()
 }
 
+/// A caller's value for a path placeholder, encoded — or refused when it is a dot segment.
+///
+/// Encoding `/` keeps a value inside its segment, but a value that *is* `.` or `..` needs no
+/// slash to move: the URL parser resolves dot segments when the request is built, so
+/// `/v1/chats/{id}/read` with `id = ".."` is sent as `/v1/read`, and two placeholders are
+/// enough to climb out and name any endpoint the upstream's credential can reach. `%2e` is no
+/// escape either, since a URL parser treats it as the same dot — so these are refused outright.
+fn path_value(name: &str, value: &str) -> Result<String> {
+    if value == "." || value == ".." {
+        bail!("argument '{name}' may not be '{value}': it would move the request to another path");
+    }
+    Ok(encode_segment(value))
+}
+
 impl HttpUpstream {
     pub fn new(
         base_url: &str,
@@ -168,6 +182,7 @@ impl HttpUpstream {
         Ok(Self {
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout_secs.max(1)))
+                .redirect(super::same_origin_redirects())
                 .build()?,
             base: base_url.trim_end_matches('/').to_string(),
             token: token.to_string(),
@@ -284,6 +299,99 @@ mod tests {
         m
     }
 
+    /// One-shot HTTP server: answers every request with `reply`, and hands back each request's
+    /// raw head so a test can see exactly what arrived.
+    async fn serve(reply: String) -> (u16, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = sock.write_all(reply.as_bytes()).await;
+            }
+        });
+        (port, rx)
+    }
+
+    /// reqwest strips Authorization on a cross-host redirect, not a key in a header of its own,
+    /// and a 307 sends the caller's body again. Neither may leave for a host nobody configured.
+    #[tokio::test]
+    async fn a_redirect_to_another_origin_is_refused_and_carries_nothing_there() {
+        let (elsewhere, mut stolen) =
+            serve("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".into()).await;
+        let (home, _) = serve(format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://127.0.0.1:{elsewhere}/take\r\ncontent-length: 0\r\n\r\n"
+        ))
+        .await;
+        let up = HttpUpstream::new(
+            &format!("http://127.0.0.1:{home}"),
+            "the-api-key",
+            HttpAuth::Header {
+                name: "x-api-key".into(),
+            },
+            ops(),
+            5,
+            None,
+        )
+        .unwrap();
+        let err = up
+            .call("read", &json!({ "id": "a", "limit": 1 }))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refusing to follow a redirect"),
+            "{err:#}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            stolen.try_recv().is_err(),
+            "a request reached the other origin"
+        );
+    }
+
+    /// Same origin, different path: an upstream moving an endpoint is still followed.
+    #[tokio::test]
+    async fn a_redirect_within_the_same_origin_is_still_followed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for n in 0.. {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let reply = if n == 0 {
+                    format!("HTTP/1.1 307 Temporary Redirect\r\nlocation: http://127.0.0.1:{port}/moved\r\ncontent-length: 0\r\n\r\n")
+                } else {
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{\"ok\":true}".to_string()
+                };
+                let _ = sock.write_all(reply.as_bytes()).await;
+            }
+        });
+        let up = HttpUpstream::new(
+            &format!("http://127.0.0.1:{port}"),
+            "k",
+            HttpAuth::Header {
+                name: "x-api-key".into(),
+            },
+            ops(),
+            5,
+            None,
+        )
+        .unwrap();
+        let out = up
+            .call("read", &json!({ "id": "a", "limit": 1 }))
+            .await
+            .unwrap();
+        assert_eq!(out, json!({ "ok": true }));
+    }
+
     #[test]
     fn a_placeholder_alone_keeps_the_argument_type() {
         let out = render(&json!({ "n": "{count}" }), &json!({ "count": 7 }), false).unwrap();
@@ -305,6 +413,19 @@ mod tests {
         // Characters RFC 3986 allows in a segment are left intact.
         let out = render_str("/v1/chats/{id}", &json!({ "id": "!abc:host.local" }), true).unwrap();
         assert_eq!(out, "/v1/chats/!abc:host.local");
+    }
+
+    #[test]
+    fn a_path_argument_cannot_be_a_dot_segment() {
+        // No slash needed: the URL parser resolves `..` itself, so `/v1/chats/../read` would
+        // be sent as `/v1/read`.
+        for dots in [".", ".."] {
+            assert!(render_str("/v1/chats/{id}/read", &json!({ "id": dots }), true).is_err());
+            assert!(render_str("/v1/chats/{id}", &json!({ "id": dots }), true).is_err());
+        }
+        // A value that merely contains dots is an ordinary identifier.
+        let out = render_str("/v1/chats/{id}", &json!({ "id": "a..b" }), true).unwrap();
+        assert_eq!(out, "/v1/chats/a..b");
     }
 
     #[test]

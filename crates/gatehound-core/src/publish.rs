@@ -296,10 +296,15 @@ pub fn launch(cfg: &PublishConfig, listen_addr: &str) -> Result<Option<Launch>> 
                 // A remotely-managed tunnel: the token carries the tunnel's identity and its
                 // routing lives in Cloudflare, so there is nothing to configure on this
                 // machine and no browser login to complete.
+                //
+                // Handed over in TUNNEL_TOKEN, which cloudflared reads as `--token`, rather than
+                // on the command line: argv is public. `ps` shows it to every user on the
+                // machine, and so does /proc/<pid>/cmdline, and whoever holds this token can run
+                // the tunnel — take this gateway's hostname and the traffic addressed to it. A
+                // process's environment is readable by its owner alone.
                 Some(token) => {
                     args.push("run".into());
-                    args.push("--token".into());
-                    args.push(token);
+                    env.push(("TUNNEL_TOKEN".into(), token));
                 }
                 // Fall back to whatever cloudflared is already set up for. This is what the
                 // app did before publishing was configurable, so an existing machine keeps
@@ -984,16 +989,18 @@ mod tests {
         let mut cfg = via(PublishVia::Cloudflare);
         cfg.cloudflare.token = Some("  eyJhIjoi-token  ".into());
         let l = launch(&cfg, "127.0.0.1:8790").unwrap().unwrap();
-        assert_eq!(
-            l.args,
-            [
-                "tunnel",
-                "--no-autoupdate",
-                "run",
-                "--token",
-                "eyJhIjoi-token"
-            ],
+        assert_eq!(l.args, ["tunnel", "--no-autoupdate", "run"]);
+        assert!(
+            l.env
+                .iter()
+                .any(|(k, v)| k == "TUNNEL_TOKEN" && v == "eyJhIjoi-token"),
             "a whitespace-padded token must still be usable: it is pasted by a human"
+        );
+        // Never on the command line, where `ps` shows it to everyone on the machine.
+        assert!(
+            !l.args.iter().any(|a| a.contains("eyJhIjoi")),
+            "{:?}",
+            l.args
         );
     }
 

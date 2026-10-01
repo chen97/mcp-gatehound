@@ -604,6 +604,32 @@ pub struct Config {
     /// instead of being pinned to one machine's absolute path.
     #[serde(skip)]
     pub base_dir: Option<std::path::PathBuf>,
+    /// The credentials `apply_env` put in place of what the file said, and what the file said.
+    ///
+    /// Not configuration either: it is how [`Config::for_disk`] knows which values belong to
+    /// the environment. Without it, every save from the app wrote the running configuration
+    /// back whole — and the running configuration holds the super token, the tunnel token and
+    /// every upstream token the environment supplied, so one unrelated Save copied them all
+    /// into the file in plain text: the one place the environment exists to keep them out of.
+    #[serde(skip)]
+    pub from_env: Vec<EnvSecret>,
+}
+
+/// One credential the environment supplied, with what the file held before it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvSecret {
+    slot: Secret,
+    file: Option<String>,
+    env: Option<String>,
+}
+
+/// Where a credential lives in the configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Secret {
+    Bearer,
+    Tunnel,
+    /// By upstream name, which nothing renames after load.
+    Upstream(String),
 }
 
 fn default_listen() -> String {
@@ -634,8 +660,25 @@ impl Default for Config {
             scripts: Vec::new(),
             publish: crate::publish::PublishConfig::default(),
             base_dir: None,
+            from_env: Vec::new(),
         }
     }
+}
+
+/// Write a configuration file readable by its owner alone.
+///
+/// It can hold credentials — the token the app generates on first run, a tunnel token typed
+/// into it — so 0600 on Unix, set on every write rather than only at creation, so a file made
+/// before this existed is tightened the next time it is saved. On Windows the profile directory
+/// it lives in is already the user's own.
+pub fn write_private(path: &Path, body: &str) -> std::io::Result<()> {
+    std::fs::write(path, body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// Prove an exec command names something that can actually run here.
@@ -817,13 +860,11 @@ fn env(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-fn env_list(key: &str) -> Option<Vec<String>> {
-    env(key).map(|v| {
-        v.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    })
+fn split_list(v: &str) -> Vec<String> {
+    v.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 impl Config {
@@ -858,22 +899,104 @@ impl Config {
     /// Environment overrides. Env always wins over the file so a launchd/systemd
     /// unit can adjust a deployment without editing config.
     pub fn apply_env(&mut self) {
-        if let Some(v) = env("LISTEN_ADDR") {
+        self.apply_env_from(&env);
+    }
+
+    /// [`Config::apply_env`] against any lookup. Tests pass a map here rather than calling
+    /// `set_var`, which mutates the whole process while other tests spawn children and
+    /// resolve hosts beside it.
+    pub fn apply_env_from(&mut self, var: &dyn Fn(&str) -> Option<String>) {
+        let before: Vec<(Secret, Option<String>)> = self
+            .secret_slots()
+            .into_iter()
+            .map(|slot| {
+                let value = self.secret(&slot);
+                (slot, value)
+            })
+            .collect();
+        self.apply_env_values(var);
+        for (slot, file) in before {
+            let env = self.secret(&slot);
+            if env != file && !self.from_env.iter().any(|e| e.slot == slot) {
+                self.from_env.push(EnvSecret { slot, file, env });
+            }
+        }
+    }
+
+    /// This configuration as its file should hold it.
+    ///
+    /// Every credential the environment supplied goes back to what the file said — unless it has
+    /// been changed since, because then it is a value somebody typed into the app, which is the
+    /// app's to store. Everything that writes the configuration file writes this, not `self`.
+    pub fn for_disk(&self) -> Config {
+        let mut out = self.clone();
+        for e in &self.from_env {
+            if out.secret(&e.slot) == e.env {
+                out.set_secret(&e.slot, e.file.clone());
+            }
+        }
+        out.from_env.clear();
+        out
+    }
+
+    fn secret_slots(&self) -> Vec<Secret> {
+        let mut slots = vec![Secret::Bearer, Secret::Tunnel];
+        slots.extend(
+            self.upstreams
+                .iter()
+                .map(|u| Secret::Upstream(u.name.clone())),
+        );
+        slots
+    }
+
+    fn secret(&self, slot: &Secret) -> Option<String> {
+        match slot {
+            Secret::Bearer => self.auth.bearer_token.clone(),
+            Secret::Tunnel => self.publish.cloudflare.token.clone(),
+            Secret::Upstream(name) => {
+                self.upstreams
+                    .iter()
+                    .find(|u| &u.name == name)
+                    .and_then(|u| match &u.kind {
+                        UpstreamKind::Http { token, .. } => Some(token.clone()),
+                        UpstreamKind::Mcp { bearer_token, .. } => bearer_token.clone(),
+                    })
+            }
+        }
+    }
+
+    fn set_secret(&mut self, slot: &Secret, value: Option<String>) {
+        match slot {
+            Secret::Bearer => self.auth.bearer_token = value,
+            Secret::Tunnel => self.publish.cloudflare.token = value,
+            Secret::Upstream(name) => {
+                if let Some(u) = self.upstreams.iter_mut().find(|u| &u.name == name) {
+                    match &mut u.kind {
+                        UpstreamKind::Http { token, .. } => *token = value.unwrap_or_default(),
+                        UpstreamKind::Mcp { bearer_token, .. } => *bearer_token = value,
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_env_values(&mut self, var: &dyn Fn(&str) -> Option<String>) {
+        if let Some(v) = var("LISTEN_ADDR") {
             self.listen_addr = v;
         }
-        if let Some(v) = env("DB_PATH") {
+        if let Some(v) = var("DB_PATH") {
             self.db_path = Some(v);
         }
-        if let Some(v) = env("APPROVAL_TIMEOUT_SECS").and_then(|v| v.parse().ok()) {
+        if let Some(v) = var("APPROVAL_TIMEOUT_SECS").and_then(|v| v.parse().ok()) {
             self.approval_timeout_secs = v;
         }
-        if let Some(v) = env("LOG_RETENTION_DAYS").and_then(|v| v.parse().ok()) {
+        if let Some(v) = var("LOG_RETENTION_DAYS").and_then(|v| v.parse().ok()) {
             self.log_retention_days = v;
         }
-        if let Some(v) = env("GATEHOUND_TOKEN") {
+        if let Some(v) = var("GATEHOUND_TOKEN") {
             self.auth.bearer_token = Some(v);
         }
-        match (env("CF_ACCESS_TEAM_DOMAIN"), env("CF_ACCESS_AUD")) {
+        match (var("CF_ACCESS_TEAM_DOMAIN"), var("CF_ACCESS_AUD")) {
             (Some(team), Some(aud)) => {
                 self.auth.access = Some(AccessConfig {
                     team_domain: team
@@ -898,10 +1021,10 @@ impl Config {
             }
             (None, None) => {}
         }
-        if let Some(v) = env_list("ALLOWED_EMAILS") {
+        if let Some(v) = var("ALLOWED_EMAILS").map(|v| split_list(&v)) {
             self.auth.allowed_identities = v;
         }
-        if let Some(v) = env("PUBLISH_VIA") {
+        if let Some(v) = var("PUBLISH_VIA") {
             match v.to_ascii_lowercase().as_str() {
                 "none" => self.publish.via = crate::publish::PublishVia::None,
                 "auto" => self.publish.via = crate::publish::PublishVia::Auto,
@@ -914,11 +1037,11 @@ impl Config {
         }
         // The tunnel token is a credential, so it comes from the environment like the others.
         if let Some(k) = self.publish.cloudflare.token_env.clone() {
-            if let Some(v) = env(&k) {
+            if let Some(v) = var(&k) {
                 self.publish.cloudflare.token = Some(v);
             }
         }
-        if let Some(v) = env("CLOUDFLARE_TUNNEL_TOKEN") {
+        if let Some(v) = var("CLOUDFLARE_TUNNEL_TOKEN") {
             self.publish.cloudflare.token = Some(v);
         }
 
@@ -929,7 +1052,7 @@ impl Config {
                 UpstreamKind::Http {
                     token, token_env, ..
                 } => {
-                    if let Some(v) = token_env.as_deref().and_then(env) {
+                    if let Some(v) = token_env.as_deref().and_then(var) {
                         *token = v;
                     }
                 }
@@ -938,14 +1061,14 @@ impl Config {
                     token_env,
                     ..
                 } => {
-                    if let Some(v) = token_env.as_deref().and_then(env) {
+                    if let Some(v) = token_env.as_deref().and_then(var) {
                         *bearer_token = Some(v);
                     }
                 }
             }
         }
 
-        if let Some(v) = env("SEND_LIMIT_PER_HOUR").and_then(|v| v.parse::<usize>().ok()) {
+        if let Some(v) = var("SEND_LIMIT_PER_HOUR").and_then(|v| v.parse::<usize>().ok()) {
             for t in self.tools.iter_mut() {
                 if let Some(rl) = t.rate_limit.as_mut() {
                     rl.per_hour = v.max(1);
@@ -1449,6 +1572,87 @@ decision = "allow"
             required,
             kind: ArgKind::String,
         }
+    }
+
+    /// The app writes the running configuration back to its file on every save, and the
+    /// running configuration holds whatever the environment supplied. None of that may reach
+    /// the file — but a value typed into the app since is the app's to store.
+    #[test]
+    fn credentials_from_the_environment_are_not_written_back_to_the_file() {
+        let file = r#"
+[auth]
+bearer_token = "file-token-0123456789"
+
+[[upstream]]
+name = "notes"
+type = "http"
+base_url = "http://127.0.0.1:1"
+token_env = "NOTES_TOKEN"
+
+[upstream.ops.read]
+method = "GET"
+path = "/v1/notes"
+"#;
+        let fake = std::collections::HashMap::from([
+            ("GATEHOUND_TOKEN", "env-super-token-0123456789"),
+            ("CLOUDFLARE_TUNNEL_TOKEN", "env-tunnel-token"),
+            ("NOTES_TOKEN", "env-notes-token"),
+        ]);
+        let lookup = |k: &str| fake.get(k).map(|v| v.to_string());
+
+        let mut cfg: Config = toml::from_str(file).unwrap();
+        cfg.apply_env_from(&lookup);
+        // Running with the environment's values, as it should.
+        assert_eq!(
+            cfg.auth.bearer_token.as_deref(),
+            Some("env-super-token-0123456789")
+        );
+        assert_eq!(
+            cfg.publish.cloudflare.token.as_deref(),
+            Some("env-tunnel-token")
+        );
+
+        let written = toml::to_string_pretty(&cfg.for_disk()).unwrap();
+        for secret in ["env-super-token", "env-tunnel-token", "env-notes-token"] {
+            assert!(
+                !written.contains(secret),
+                "{secret} reached the file:\n{written}"
+            );
+        }
+        // What the file said is what the file keeps.
+        assert!(written.contains("file-token-0123456789"), "{written}");
+        let back: Config = toml::from_str(&written).unwrap();
+        assert_eq!(back.publish.cloudflare.token, None);
+
+        // Typed into the app after load: that is a value to store, not one to give back.
+        let mut edited = cfg.clone();
+        edited.publish.cloudflare.token = Some("typed-in-the-app".into());
+        let written = toml::to_string_pretty(&edited.for_disk()).unwrap();
+        assert!(written.contains("typed-in-the-app"), "{written}");
+        assert!(!written.contains("env-super-token"), "{written}");
+
+        // An environment that agrees with the file changes nothing and records nothing.
+        let mut same: Config = toml::from_str(file).unwrap();
+        same.apply_env_from(&|k: &str| {
+            (k == "GATEHOUND_TOKEN").then(|| "file-token-0123456789".into())
+        });
+        assert!(same.from_env.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_configuration_file_is_written_for_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("gh-private-{}.toml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, "listen_addr = \"127.0.0.1:8790\"\n").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            mode, 0o600,
+            "an existing file is tightened too, not only a new one"
+        );
     }
 
     /// `additionalProperties: false` in the schema is a claim; this is what makes it true.

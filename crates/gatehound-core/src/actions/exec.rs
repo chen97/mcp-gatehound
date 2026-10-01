@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 
 /// argv elements stay short. Long content belongs on stdin — Windows caps a command line at
@@ -22,6 +22,14 @@ use tokio::sync::Semaphore;
 pub const MAX_ARGV_VALUE_BYTES: usize = 4096;
 /// Stderr is only ever used for an error message.
 const MAX_STDERR_BYTES: usize = 4096;
+
+/// Variables carrying the gateway's own credentials, withheld from every child.
+///
+/// A child inherits this process's environment, and this process is where the super token and
+/// the tunnel token live. No tool needs either, and a script — possibly somebody else's, from a
+/// pack — that could read the super token could call every tool as the owner. A tool that
+/// really wants one of these names can still set it through its own `env` table.
+pub const GATEWAY_SECRET_VARS: [&str; 2] = ["GATEHOUND_TOKEN", "CLOUDFLARE_TUNNEL_TOKEN"];
 
 #[derive(Debug, Clone)]
 pub struct ExecOutput {
@@ -143,7 +151,21 @@ pub fn build_argv(
 
     let mut argv = Vec::with_capacity(spec.args.len() + declared.len() * 2);
     for arg in &spec.args {
-        push_checked(&mut argv, render(arg, vars)?)?;
+        let rendered = render(arg, vars)?;
+        // argv-only stops a value becoming a second command; it does not stop a value becoming
+        // an option of this one. A template `["log", "{ref}"]` exposes one operand, and a caller
+        // sending `--output=/some/path` would otherwise hand the program a flag the operator
+        // never offered — for git, a file written anywhere. So an element that starts with `-`
+        // must have started with `-` in the template, where the operator put it. A plain
+        // negative number is still a number; `-inf` is not, since `sed` reads it as `-i nf`.
+        if rendered.starts_with('-') && !arg.starts_with('-') && !is_plain_number(&rendered) {
+            let name = placeholders(arg).into_iter().next().unwrap_or_default();
+            bail!(
+                "argument '{name}' may not begin with '-': in that position the command would \
+                 read it as an option rather than a value"
+            );
+        }
+        push_checked(&mut argv, rendered)?;
     }
     for a in appended(spec, declared) {
         // Absent is simply left out — an absent required one already bailed above.
@@ -153,6 +175,18 @@ pub fn build_argv(
         }
     }
     Ok(argv)
+}
+
+/// `-12` or `-0.5` and nothing else: no exponent, no `inf`, no `nan`, which is what keeps a
+/// negative number from being something a program would take for a cluster of short options.
+fn is_plain_number(s: &str) -> bool {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    let mut parts = digits.splitn(2, '.');
+    let whole = parts.next().unwrap_or("");
+    let frac = parts.next();
+    !whole.is_empty()
+        && whole.bytes().all(|b| b.is_ascii_digit())
+        && frac.is_none_or(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The declared arguments this spec does not place itself, in the order they are appended.
@@ -196,6 +230,8 @@ pub struct ExecRunner {
     /// because they belong to the tool a caller names, not to the command it happens to run.
     declared: Vec<crate::config::ArgumentDef>,
     permits: Arc<Semaphore>,
+    /// Inherited variables removed before the child starts. See [`GATEWAY_SECRET_VARS`].
+    withheld: Vec<String>,
 }
 
 impl ExecRunner {
@@ -209,7 +245,19 @@ impl ExecRunner {
             spec,
             declared,
             permits,
+            withheld: GATEWAY_SECRET_VARS.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    /// Withhold more inherited variables — the ones this configuration names for its own
+    /// credentials, such as a tunnel token read from a variable of the operator's choosing.
+    pub fn withholding(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        for name in names {
+            if !name.is_empty() && !self.withheld.contains(&name) {
+                self.withheld.push(name);
+            }
+        }
+        self
     }
 
     pub fn spec(&self) -> &ExecSpec {
@@ -243,6 +291,9 @@ impl ExecRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        for k in &self.withheld {
+            cmd.env_remove(k);
+        }
         for (k, v) in &self.spec.env {
             cmd.env(k, v);
         }
@@ -272,25 +323,24 @@ impl ExecRunner {
             .ok_or_else(|| anyhow!("no stderr pipe"))?;
         let cap = self.spec.max_output_bytes.max(1);
 
-        // `take` is the cap: the child may write more, we simply stop reading. Reading one
-        // byte past the cap is how truncation is detected.
-        let mut capped_stdout = (&mut stdout).take(cap as u64 + 1);
-        let mut capped_stderr = (&mut stderr).take(MAX_STDERR_BYTES as u64);
+        // Both pipes are read to the end, and only the first `cap` bytes kept. Stopping at the
+        // cap instead — which is what this used to do — leaves a child with more to say blocked
+        // on a full pipe, and `wait` then waits for an exit that cannot happen until the
+        // timeout kills it. The cap limits what is returned, never what the tool gets to do:
+        // a script mid-write must be allowed to finish, so it is drained, not killed.
         let collect = async {
-            let mut out = Vec::new();
-            let mut err = Vec::new();
             let (a, b) = tokio::join!(
-                capped_stdout.read_to_end(&mut out),
-                capped_stderr.read_to_end(&mut err),
+                read_capped(&mut stdout, cap),
+                read_capped(&mut stderr, MAX_STDERR_BYTES),
             );
-            a?;
-            b?;
+            let (out, truncated) = a?;
+            let (err, _) = b?;
             let status = child.wait().await?;
-            Ok::<_, std::io::Error>((out, err, status))
+            Ok::<_, std::io::Error>((out, truncated, err, status))
         };
 
         let timeout = Duration::from_secs(self.spec.timeout_secs.max(1));
-        let (out, err, status) = match tokio::time::timeout(timeout, collect).await {
+        let (out, truncated, err, status) = match tokio::time::timeout(timeout, collect).await {
             Ok(r) => r?,
             Err(_) => {
                 bail!(
@@ -301,8 +351,7 @@ impl ExecRunner {
             }
         };
 
-        let truncated = out.len() > cap;
-        let stdout_text = String::from_utf8_lossy(&out[..out.len().min(cap)]).to_string();
+        let stdout_text = String::from_utf8_lossy(&out).to_string();
         let stderr_text = String::from_utf8_lossy(&err).to_string();
 
         if !status.success() {
@@ -317,6 +366,30 @@ impl ExecRunner {
             stderr: stderr_text,
             truncated,
         })
+    }
+}
+
+/// Read a pipe to its end, keeping at most `cap` bytes, and say whether anything was dropped.
+///
+/// To the end, because the other side of a pipe can only exit once everything it wrote has been
+/// taken off it; a reader that stops early has decided the writer never finishes. Whatever is
+/// past the cap is read into the same small buffer and thrown away, so an endless writer costs
+/// a loop and not memory — and the runner's timeout still bounds how long that loop can run.
+async fn read_capped<R: AsyncRead + Unpin>(
+    r: &mut R,
+    cap: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut kept = Vec::with_capacity(cap.min(64 * 1024));
+    let mut dropped = false;
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = r.read(&mut buf).await?;
+        if n == 0 {
+            return Ok((kept, dropped));
+        }
+        let room = cap - kept.len();
+        kept.extend_from_slice(&buf[..n.min(room)]);
+        dropped |= n > room;
     }
 }
 
@@ -514,6 +587,93 @@ mod tests {
         assert!(!out.truncated);
     }
 
+    /// argv-only keeps a value from becoming a second command. This keeps it from becoming an
+    /// option of the first: `git log {ref}` exposes an operand, not `--output`.
+    #[test]
+    fn a_value_cannot_turn_an_operand_into_an_option() {
+        let s = spec(&["log", "{ref}"], None);
+        for evil in [
+            "--output=/tmp/x",
+            "-o/tmp/x",
+            "-",
+            "--",
+            "-inf",
+            "-1e5",
+            "--5",
+        ] {
+            let err = build_argv(&s, &[], &vars(&[("ref", evil)]))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("argument 'ref' may not begin with '-'"),
+                "{evil}: {err}"
+            );
+        }
+        // Negative numbers are numbers.
+        for n in ["-5", "-0.25", "12"] {
+            assert_eq!(build_argv(&s, &[], &vars(&[("ref", n)])).unwrap()[1], n);
+        }
+        // Where the operator wrote the dash, the option is theirs, and a value inside a longer
+        // element cannot start a new one.
+        let flag = spec(&["-n{count}", "--format={fmt}"], None);
+        let argv = build_argv(&flag, &[], &vars(&[("count", "3"), ("fmt", "-x")])).unwrap();
+        assert_eq!(argv, ["-n3", "--format=-x"]);
+        // An appended `--name value` pair keeps its dash-leading value: the flag in front of it
+        // is what the program reads it as the value of.
+        let declared = [crate::config::ArgumentDef {
+            name: "value".into(),
+            description: String::new(),
+            required: true,
+            kind: crate::config::ArgKind::String,
+        }];
+        let argv = build_argv(
+            &spec(&["fm-set"], None),
+            &declared,
+            &vars(&[("value", "--draft--")]),
+        )
+        .unwrap();
+        assert_eq!(argv, ["fm-set", "--value", "--draft--"]);
+    }
+
+    #[tokio::test]
+    async fn the_gateways_own_credentials_are_not_inherited() {
+        // PATH, because it is already set on every platform: the test needs a variable the
+        // child would inherit, and making one with set_var would mutate the environment of
+        // the whole process while other tests spawn children and resolve hosts beside it.
+        // The helper is started by absolute path, so it runs with PATH withheld.
+        let expected = std::env::var("PATH").expect("PATH is set");
+        let mut s = spec(&["env", "PATH"], None);
+        // Room for a real PATH. The helper spec caps output at 1KB, and a CI runner's PATH is
+        // several times that — it came back cut off, and the test compared half a PATH.
+        s.max_output_bytes = 1 << 20;
+        let inherited = ExecRunner::new(s.clone()).run(&vars(&[])).await.unwrap();
+        assert_eq!(
+            inherited.stdout, expected,
+            "the helper must see ordinary env"
+        );
+
+        let withheld = ExecRunner::new(s.clone())
+            .withholding(["PATH".to_string()])
+            .run(&vars(&[]))
+            .await
+            .unwrap();
+        assert_eq!(withheld.stdout, "<unset>");
+
+        // A tool that names the variable itself still gets its own value.
+        let mut own = s;
+        own.env.insert("PATH".into(), "set-by-the-tool".into());
+        let out = ExecRunner::new(own)
+            .withholding(["PATH".to_string()])
+            .run(&vars(&[]))
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "set-by-the-tool");
+
+        // And the ones withheld by default are the gateway's own credentials.
+        assert!(GATEWAY_SECRET_VARS.contains(&"GATEHOUND_TOKEN"));
+        assert!(GATEWAY_SECRET_VARS.contains(&"CLOUDFLARE_TUNNEL_TOKEN"));
+    }
+
     #[tokio::test]
     async fn content_reaches_the_child_on_stdin() {
         let s = spec(&["cat"], Some("{prompt}"));
@@ -531,6 +691,43 @@ mod tests {
         let out = ExecRunner::new(s).run(&vars(&[])).await.unwrap();
         assert_eq!(out.stdout.len(), 100);
         assert!(out.truncated);
+    }
+
+    /// Past the cap by more than a pipe buffer. The cap test above writes 5,000 bytes, which a
+    /// pipe holds whole, so the child exited whether anyone read it or not and the test never
+    /// saw what happens when it cannot: reading stopped at the cap, the child blocked on a full
+    /// pipe, and waiting for it to exit waited out the whole timeout. A `brain_read` of a note
+    /// bigger than the cap was a timeout, every time, and the caller's gateway took the
+    /// connection down with it.
+    #[tokio::test]
+    async fn output_far_over_the_cap_is_truncated_without_waiting_out_the_timeout() {
+        let mut s = spec(&["bytes", "2000000"], None);
+        s.max_output_bytes = 100;
+        s.timeout_secs = 20;
+        let started = std::time::Instant::now();
+        let out = ExecRunner::new(s).run(&vars(&[])).await.unwrap();
+        assert_eq!(out.stdout.len(), 100);
+        assert!(out.truncated);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}: the child was left blocked on a pipe nobody was reading",
+            started.elapsed()
+        );
+    }
+
+    /// The same on the other pipe. stderr was capped the same way and would stall the same way.
+    #[tokio::test]
+    async fn a_flood_on_stderr_does_not_stall_the_child_either() {
+        let mut s = spec(&["noise", "2000000"], None);
+        s.timeout_secs = 20;
+        let started = std::time::Instant::now();
+        let out = ExecRunner::new(s).run(&vars(&[])).await.unwrap();
+        assert_eq!(out.stdout, "done");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

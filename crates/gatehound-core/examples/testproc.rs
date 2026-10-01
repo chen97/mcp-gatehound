@@ -29,6 +29,22 @@ fn main() {
             let n: usize = rest.first().and_then(|s| s.parse().ok()).unwrap_or(0);
             print!("{}", "x".repeat(n));
         }
+        // The same flood on the other pipe: a child that says too much on stderr is as stuck as
+        // one that says too much on stdout, if nobody is reading either.
+        Some("noise") => {
+            let n: usize = rest.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+            eprint!("{}", "e".repeat(n));
+            let _ = std::io::stderr().flush();
+            print!("done");
+        }
+        // One environment variable's value, or `<unset>`: what the child actually inherited.
+        Some("env") => {
+            let name = rest.first().expect("env needs a variable name");
+            print!(
+                "{}",
+                std::env::var(name).unwrap_or_else(|_| "<unset>".into())
+            );
+        }
         Some("sleep") => {
             let secs: u64 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(1);
             std::thread::sleep(std::time::Duration::from_secs(secs));
