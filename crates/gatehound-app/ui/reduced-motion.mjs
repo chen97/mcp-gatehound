@@ -82,7 +82,10 @@ const r = reporter();
         drift: pick(".trace-drift"),
         halo: (() => { const el = document.querySelector(".chip .dot.ok"); if (!el) return null;
           const cs = getComputedStyle(el, "::after"); return { name: cs.animationName, opacity: +cs.opacity.slice(0, 4) }; })(),
-        hot: pick(".chip .pill.hot"),
+        // The pulse lives on the pill's `::after` (CHE-123), so the pill itself always reads "none"
+        // — reading the element would pass whether or not the reduce block reached the halo.
+        hot: (() => { const el = document.querySelector(".chip .pill.hot"); if (!el) return null;
+          const cs = getComputedStyle(el, "::after"); return { name: cs.animationName, opacity: +cs.opacity.slice(0, 4) }; })(),
       };
     });
 
@@ -111,10 +114,11 @@ const r = reporter();
   r.say(`\n  ambient loops under reduce`);
   r.say(`    .trace-drift          animation ${f.drift.name}  opacity ${f.drift.opacity}`);
   r.say(`    .chip .dot.ok::after  animation ${f.halo.name}  opacity ${f.halo.opacity}`);
-  r.say(`    .chip .pill.hot       animation ${f.hot?.name ?? "—"}`);
+  r.say(`    .chip .pill.hot::after   animation ${f.hot?.name ?? "—"}`);
   r.check(f.drift.name === "none" && f.drift.opacity === 0, "the idle drift is gone", `the idle drift still runs (${f.drift.name})`);
   r.check(f.halo.name === "none", "the status halo is gone", `the status halo still runs (${f.halo.name})`);
-  r.check(!f.hot || f.hot.name === "none", "the waiting pulse is gone", `the waiting pulse still runs (${f.hot.name})`);
+  r.check(f.hot && f.hot.name === "none", "the waiting pulse is gone",
+    f.hot ? `the waiting pulse still runs (${f.hot.name})` : "no waiting pill on the board — nothing was measured");
 
   // A call still has to say it happened — by lighting the whole wire and fading, not by travelling.
   await page.waitForTimeout(600);

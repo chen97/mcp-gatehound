@@ -154,6 +154,26 @@ const POPULATED = {
 
 for (const scheme of ["dark", "light"]) {
   const { page, errors, close } = await openBoard({ colorScheme: scheme, fixture: POPULATED });
+  // The hot pill pulses, and this file reads colours, not opacity — so a pulse that faded the
+  // label measured as a pass at every frame. It did, to 2.55:1 (CHE-123). Sample across one full
+  // 2.2s cycle: the pill's own opacity must never leave 1; the motion belongs on its halo.
+  {
+    const seen = [];
+    for (let i = 0; i < 12; i++) {
+      seen.push(await page.evaluate(() => {
+        const el = document.querySelector(".chip .pill.hot");
+        return el ? +getComputedStyle(el).opacity : null;
+      }));
+      await page.waitForTimeout(200);
+    }
+    if (seen[0] === null) r.fail(`${scheme}: no ".chip .pill.hot" on the board — the waiting pulse was not measured`);
+    else {
+      const low = Math.min(...seen);
+      r.say(`\n${scheme}: waiting pill opacity across a cycle, lowest ${low}`);
+      if (low < 1) r.fail(`${scheme}: the waiting pill fades its label to opacity ${low} — pulse the halo, not the ink`);
+    }
+  }
+
   // The board alone has no pills and no table. The log screen carries both; visiting it is what
   // makes those probes real rather than skipped.
   await page.click('nav button:has-text("Log")').catch(() => {});
