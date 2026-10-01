@@ -10,44 +10,131 @@
  *   - Anything pressable answers the press (`:active` scale), and anything focusable shows it.
  *   - Colour carries meaning — green ran, amber waits, red failed — and nothing else is
  *     coloured, so those three keep meaning something.
+ *
+ * The token block below is the company design system's, copied verbatim rather than adapted:
+ * this is the app the system was seeded *from*, so anything that drifts here drifts in the
+ * standard's own reference. The only variable this file adds is `--scroll-face`, which is not a
+ * token — it is a per-box hint naming the surface a scrollbar floats on, set where it is used.
  */
 
 :root {
-  /* Surfaces, from furthest back to nearest. Three steps is enough to say "page", "card",
-     "control" without turning depth into decoration. */
-  --bg: #12161c;
-  --panel: #1a1f27;
-  --panel-2: #212832;
-  --in: #262d37;
-  --line: #2c3540;
-  --line-strong: #3a4552;
+  /* ---- Surfaces: furthest back to nearest ----
+     Three steps plus an input well. Enough to say "page", "card", "control" without turning
+     depth into decoration. A fourth surface is almost always a card that should have been one
+     card. */
+  --bg: #12161c;         /* the page */
+  --panel: #1a1f27;      /* a card, a modal */
+  --panel-2: #212832;    /* a raised thing on a card: a tile, a choice, a default button */
+  --in: #262d37;         /* an input well, a hover fill, a code block on a card */
+  --line: #2c3540;       /* a divider, a quiet border */
+  --line-strong: #3a4552;/* a control's border, a scrollbar thumb */
 
-  --tx: #e8ecf1;
-  --mut: #8d99a8;
-  --am: #f2c14e;
-  --ok: #5ccb8b;
-  --bad: #f07167;
+  /* ---- Ink ---- */
+  --tx: #e8ecf1;         /* body and heading */
+  --mut: #8d99a8;        /* secondary: meta, hints, table headers, placeholders */
+  --on-accent: #1a1405;  /* ink on a filled amber surface — the one literal that is a token */
 
-  /* Spacing. Everything picks from here. */
-  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
-  --r: 10px;      /* control radius */
-  --r-lg: 14px;   /* card radius */
+  /* ---- The three meanings. Nothing else is coloured. ---- */
+  --am:  #f2c14e;        /* waits / needs a person / interactive accent */
+  --ok:  #5ccb8b;        /* ran / succeeded / granted */
+  --bad: #f07167;        /* failed / denied / destructive */
 
-  /* Taken as-is from Emil Kowalski's animation guidance rather than hand-rolled: the built-in
+  /* Text-safe variants. In dark these equal the base; in light the base fails 4.5:1 as text.
+     Rule: fills, borders, dots and rings use the base. TEXT uses the -tx variant. Always. */
+  --am-tx: #f2c14e;
+  --ok-tx: #5ccb8b;
+  --bad-tx: #f07167;
+
+  /* ---- Spacing. 2 is the only sub-4 value that exists. ---- */
+  --s0: 2px;  --s1: 4px;  --s2: 8px;  --s3: 12px;
+  --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+
+  /* ---- Radius ---- */
+  --r-sm: 7px;      /* something nested inside a control */
+  --r: 10px;        /* controls: button, input, pill-less badge, notice, tile */
+  --r-lg: 14px;     /* cards, modals, empty states */
+  --r-xl: 16px;     /* a hero object that is the subject of its screen */
+  --r-full: 999px;  /* pills, dots, scrollbar thumbs */
+
+  /* ---- Market colour. Unused here — GateHound plots nothing — and carried anyway, because a
+     `:root` that is a subset of the standard's is one a future chart quietly invents values
+     against. See `references/tokens.md` → "Market colour". ---- */
+  --up: #3fd6bb; --down: #ff6b8a; --neutral: #8d99a8;
+  --up-tx: #3fd6bb; --down-tx: #ff6b8a; --neutral-tx: #8d99a8;
+
+  /* ---- The user text-size factor. See `references/tokens.md` → "Type scaling". ----
+     Every size quoted anywhere in this system is the base value, i.e. the size at factor 1.
+     GateHound has no text-size control yet, so this stays 1 — but the sizes below are already
+     expressed against it, which is what makes adding that control a one-line change rather than
+     a re-migration of every step. */
+  --t-scale: 1;                                              /* .875 | 1 | 1.125 | 1.25 | 1.5 */
+  --t-scale-display: calc(1 + (var(--t-scale) - 1) * 0.5);   /* damped — display type only */
+
+  /* ---- Type: the UI scale. Everything a working screen is built from. ---- */
+  --t-micro: calc(10px * var(--t-scale));   /* uppercase marks: severity, "REQUIRED", icon names */
+  --t-xs: calc(11px * var(--t-scale));      /* pills, badges, table headers, sub-labels */
+  --t-sm: calc(12px * var(--t-scale));      /* meta, hints, code blocks */
+  --t-md: calc(12.5px * var(--t-scale));    /* controls and their labels */
+  --t-base: calc(13.5px * var(--t-scale));  /* body */
+  --t-lg: calc(15px * var(--t-scale));      /* card and dialog headings */
+  --t-xl: calc(17px * var(--t-scale));      /* a screen title, where a screen has one */
+
+  /* ---- Type: the display scale. Type that is the subject, not the content. ----
+     Steps climb at ~1.25x, so every adjacent pair is unmistakably a different size. This is a
+     different scale with a different job, not more of the UI scale — see "Display type" before
+     reaching into it. Nothing in this app is entitled to it: GateHound is all app screens, and
+     `references/tokens.md` is explicit that a settings page or a table does not reach in here. */
+  --t-2xl: calc(20px * var(--t-scale-display));  /* a section title over a group of cards */
+  --t-3xl: calc(26px * var(--t-scale-display));  /* screen title, content-led page; headline stat */
+  --t-4xl: calc(32px * var(--t-scale-display));  /* a page title, content-led or marketing */
+  --t-5xl: calc(40px * var(--t-scale-display));  /* hero headline at a small viewport; hero stat */
+  --t-6xl: calc(48px * var(--t-scale-display));  /* a hero headline */
+  --t-7xl: calc(60px * var(--t-scale-display));  /* a hero on a landing page that is mostly type */
+  --t-8xl: calc(72px * var(--t-scale-display));  /* the single largest thing on a site */
+
+  /* ---- Control height. Scales with type, because a control is sized by its content. ---- */
+  --ctl-h: calc(30px * var(--t-scale));        /* button, input, select */
+  --ctl-h-icon: calc(28px * var(--t-scale));   /* icon button height */
+  --ctl-w-icon: calc(30px * var(--t-scale));   /* icon button width */
+
+  --f-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --f-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ---- Motion ----
+     Taken as-is from Emil Kowalski's animation guidance rather than hand-rolled: the built-in
      CSS easings are too weak to read as intentional. */
-  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);      /* something arriving */
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);  /* something moving between two places */
+  --d-fast: 160ms;   /* things you do dozens of times a day */
+  --d-quick: 200ms;  /* the same, when it travels a distance */
+  --d-enter: 250ms;  /* something arriving, once per real change */
+  --d-slow: 320ms;   /* a composed entrance with a stagger */
 
-  --shadow: 0 1px 2px rgba(0,0,0,.28), 0 8px 24px -12px rgba(0,0,0,.45);
+  /* ---- Elevation ---- */
+  --shadow-1: 0 1px 2px rgba(0,0,0,.28), 0 8px 24px -12px rgba(0,0,0,.45);
+  --shadow-2: 0 2px 4px rgba(0,0,0,.32), 0 12px 32px -14px rgba(0,0,0,.55);
+  --shadow-3: 0 24px 64px -24px rgba(0,0,0,.6), 0 1px 2px rgba(0,0,0,.28);
+  --scrim: color-mix(in srgb, #000 52%, transparent);
+
+  --measure: 68ch;   /* the widest a sentence may be */
+  --screen: 1080px;  /* the widest a column of cards may be */
+
   color-scheme: dark light;
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f5f7fa; --panel: #fff; --panel-2: #f7f9fb; --in: #eef1f5;
+    --bg: #f5f7fa; --panel: #ffffff; --panel-2: #f7f9fb; --in: #eef1f5;
     --line: #dfe4ea; --line-strong: #c8d0d9;
-    --tx: #131820; --mut: #5d6875; --am: #b3790a; --ok: #1f9254; --bad: #c8382c;
-    --shadow: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px -12px rgba(16,24,40,.14);
+    --tx: #131820; --mut: #5d6875; --on-accent: #1a1405;
+    --am: #b3790a; --ok: #1f9254; --bad: #c8382c;
+    --am-tx: #8f5d02; --ok-tx: #0e7a46; --bad-tx: #b3241a;
+    --up: #0d9488; --down: #e11d48; --neutral: #5d6875;
+    --up-tx: #0f766e; --down-tx: #be123c; --neutral-tx: #5d6875;
+    --shadow-1: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px -12px rgba(16,24,40,.14);
+    --shadow-2: 0 2px 4px rgba(16,24,40,.08), 0 12px 32px -14px rgba(16,24,40,.18);
+    --shadow-3: 0 24px 64px -24px rgba(16,24,40,.28), 0 1px 2px rgba(16,24,40,.06);
+    --scrim: color-mix(in srgb, #0b1017 34%, transparent);
   }
 }
 
@@ -55,7 +142,7 @@
 
 body {
   margin: 0; background: var(--bg); color: var(--tx);
-  font: 13.5px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font: var(--t-base)/1.5 var(--f-sans);
   -webkit-font-smoothing: antialiased;
   /* The window is the viewport and only the content area scrolls. Letting the page scroll
      means the scrollbar appears the moment content outgrows the window, taking width from the
@@ -63,14 +150,38 @@ body {
   height: 100vh; display: flex; flex-direction: column; overflow: hidden;
 }
 
-code, pre, .secret { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+code, pre, .secret { font-family: var(--f-mono); font-size: var(--t-md); }
 
 /* ---- Chrome ---------------------------------------------------------------- */
 
 .top { flex: none; background: var(--bg); border-bottom: 1px solid var(--line); }
 header { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s5) var(--s2); }
-h1 { font-size: 14px; margin: 0; letter-spacing: -0.01em; }
-.sub { color: var(--mut); font-size: 12px; }
+/* The window's title, and the one change in the design-system migration a person can see. It was
+   the last literal size in this file; `title-size.mjs` is why it is this token and not a smaller
+   one. Measured, because every plausible guess here turned out to be wrong:
+
+     - The title was not "a pixel from a card's `h3`" — it was *below* the largest heading in the
+       window. An approval card's `h3` is `--t-lg` 15px, so at 14px the thing naming the app was
+       smaller than the thing naming one request inside it.
+     - `--t-lg` would not fix that, it would tie: 15px is also `.modal h3`. Three different things
+       — window, dialog, pending approval — at one size is not a ladder.
+     - A bigger title costs no vertical room. The header's height is set by the `Pause gateway`
+       button at `--ctl-h`, so the chrome is 90px at 10px, 14px or 17px alike. The "compact
+       menubar window cannot afford it" argument is worth exactly 0px, and the probe asserts it.
+
+   `--t-xl` is the scale's ceiling for an app screen (v1.1 § display type: app screens do not
+   reach into the display scale), which is the right ceiling for the one title a window has.
+
+   Worth knowing if you are reading the issue alongside this file: the decision that came back
+   asked for `--t-lg`, on the grounds that 15px reads as a title against a 12.5px card `h3` and
+   costs less height than 17px. Both halves measured false — 12.5px is an *ordinary* card's `h3`,
+   while the two headings a title actually competes with are already 15px, and the height
+   difference is 0px. It was answered on the ordinary card, which is the one you see when you read
+   the file rather than open the window. Run `title-size.mjs --h1=15px` and it fails three
+   assertions. Flagged back rather than applied; if it is reinstated, this line is the whole of
+   the change and the probe will go red to say so. */
+h1 { font-size: var(--t-xl); margin: 0; letter-spacing: -0.01em; }
+.sub { color: var(--mut); font-size: var(--t-sm); }
 header .ghost { margin-left: auto; }
 
 /* `inline-block` so a width and a height apply outside a flex row too — in a table cell an
@@ -100,7 +211,7 @@ table.args input { width: 100%; }
 /* The command a tool runs, under its action. Wraps rather than truncating: a path elided in
    the middle is exactly the part worth reading, and this is the answer to "what am I allowing?" */
 .cmdline { margin-top: 3px; max-width: 42ch; }
-.cmdline code { font-size: 11px; color: var(--tx); opacity: .8; overflow-wrap: anywhere; }
+.cmdline code { font-size: var(--t-xs); color: var(--tx); opacity: .8; overflow-wrap: anywhere; }
 
 td.tool-acts { white-space: nowrap; width: 1%; }
 td.tool-acts button + button { margin-left: 6px; }
@@ -136,10 +247,10 @@ nav button.active { color: var(--tx); }
 }
 
 .badge {
-  background: var(--in); color: var(--mut); border-radius: 999px;
-  padding: 1px 6px; font-size: 11px; font-weight: 600; margin-left: var(--s1);
+  background: var(--in); color: var(--mut); border-radius: var(--r-full);
+  padding: 1px 6px; font-size: var(--t-xs); font-weight: 600; margin-left: var(--s1);
 }
-.badge.hot { background: var(--am); color: #1a1405; }
+.badge.hot { background: var(--am); color: var(--on-accent); }
 
 main { flex: 1 1 auto; padding: var(--s5); overflow-y: scroll; scrollbar-gutter: stable; }
 .screen.hidden, .hidden { display: none !important; }
@@ -157,7 +268,7 @@ main { flex: 1 1 auto; padding: var(--s5); overflow-y: scroll; scrollbar-gutter:
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: var(--line-strong); border-radius: 999px;
+  background: var(--line-strong); border-radius: var(--r-full);
   border: 3px solid var(--scroll-face, var(--bg)); background-clip: padding-box;
   min-height: 32px; min-width: 32px;
 }
@@ -170,7 +281,7 @@ pre { --scroll-face: var(--bg); }
 
 .card {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
-  padding: var(--s4); margin-bottom: var(--s3); box-shadow: var(--shadow);
+  padding: var(--s4); margin-bottom: var(--s3); box-shadow: var(--shadow-1);
 }
 
 /* Anything a click can scroll to stops short of the window edge rather than flush against it.
@@ -178,13 +289,13 @@ pre { --scroll-face: var(--bg); }
    neither works without the other. Zero specificity, so it never competes with a real rule. */
 :where(.card, .checks, .row, table, input, select, textarea) { scroll-margin-block: var(--s4); }
 .card h3 {
-  margin: 0 0 var(--s1); font-size: 13px; font-weight: 650; letter-spacing: -0.006em;
+  margin: 0 0 var(--s1); font-size: var(--t-md); font-weight: 650; letter-spacing: -0.006em;
 }
 /* The sentence under a heading explains the card; it is not body copy and should not run the
    full width of a wide window. */
 .card > .meta { max-width: 68ch; }
 
-.meta { color: var(--mut); font-size: 12px; }
+.meta { color: var(--mut); font-size: var(--t-sm); }
 /* An empty state stands in for a card, so it is spaced like one. Without the matching margin
    it sat flush against whatever followed — on Home, the approvals placeholder and the Recent
    calls card were touching. */
@@ -193,6 +304,19 @@ pre { --scroll-face: var(--bg); }
   border: 1px dashed var(--line); border-radius: var(--r-lg); background: var(--panel);
   margin-bottom: var(--s3);
 }
+/* An empty state owes three things — what would be here, why it is not, and the one action that
+   fills it. The heading is the first of those and needs to read as ink rather than as meta, so it
+   takes `--tx` against the muted body. */
+.empty h4 { margin: 0 0 var(--s1); color: var(--tx); font-size: var(--t-md); font-weight: 600; }
+.empty p { margin: 0 auto; max-width: 44ch; font-size: var(--t-sm); line-height: 1.5; }
+.empty .row { justify-content: center; margin-top: var(--s4); }
+
+/* Screen level: nothing loaded. Same object as an empty state, because that is what it is —
+   a card-shaped placeholder — differing only in that the border and heading carry the failure.
+   The border takes `--bad` mixed toward `--line` rather than the flat colour: a dashed red box
+   at full strength reads as an alarm, and the screen failing to load is not one. */
+.empty.failed { border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+.empty.failed h4 { color: var(--bad-tx); }
 
 .notice {
   border: 1px solid var(--line-strong); border-left: 3px solid var(--mut);
@@ -200,42 +324,96 @@ pre { --scroll-face: var(--bg); }
   padding: var(--s3); margin: var(--s3) 0;
 }
 .notice.warn { border-left-color: var(--am); }
-.notice strong { display: block; margin-bottom: 2px; }
-.notice .meta { margin-top: 2px; }
+/* Surface level: the operation failed, the screen is intact. Distinct from `.warn`, which this
+   app had been using for both — a warning is "mind this", an error is "it did not happen", and
+   a reader scanning a column of amber edges cannot tell which one they are looking at. */
+.notice.error { border-left-color: var(--bad); }
+.notice.error strong { color: var(--bad-tx); }
+.notice.ok { border-left-color: var(--ok); }
+.notice.ok strong { color: var(--ok-tx); }
+.notice strong { display: block; margin-bottom: var(--s0); }
+.notice .meta { margin-top: var(--s0); }
+
+/* Field level. The sentence is the channel and the colour is the emphasis, never the reverse —
+   so `.error` here is a block of text that says what is wrong and what would be right, and the
+   border is what draws the eye to which control it belongs to. */
+.field.invalid input, .field.invalid select, .field.invalid textarea { border-color: var(--bad); }
+.field .error { color: var(--bad-tx); font-size: var(--t-sm); line-height: 1.5; margin-top: var(--s1); }
+
+/* ---- Loading ----------------------------------------------------------------
+   Rationed by how long the wait actually is. Under 200ms nothing renders, because a treatment
+   you are about to unrender reads as the app stuttering. Between 200ms and 2s the one control
+   responsible goes `disabled` and its label becomes the present participle, which is markup, not
+   CSS. Past 2s — or a first load of unknown length — skeletons, below. A background refresh of
+   something already on screen gets nothing at all: replacing a populated view throws away scroll
+   position, focus and anything expanded. */
+
+.skel { background: var(--in); border-radius: var(--r); }
+.skel-line { height: 12px; margin-bottom: var(--s2); }
+.skel-line:last-child { width: 60%; margin-bottom: 0; }
+.skel-row { height: 40px; border-radius: var(--r); margin-bottom: var(--s2); }
+
+/* Opacity only. A gradient sweep animates `background-position`, which is a style recalculation
+   and a repaint every frame — the same cost the idle drift is audited for. Opacity composites. */
+@keyframes skel-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+.skel { animation: skel-pulse 1.6s var(--ease-in-out) infinite; }
+/* A skeleton is ambient motion on a screen nobody is reading yet, so it pauses with everything
+   else when the window is hidden — see the `body.unwatched` block. */
+body.unwatched .skel { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) { .skel { animation: none; opacity: .8; } }
 
 /* ---- Controls -------------------------------------------------------------- */
 
 .row { display: flex; gap: var(--s2); margin-top: var(--s3); flex-wrap: wrap; align-items: center; }
 
 button {
-  font: inherit; font-weight: 550; font-size: 12.5px;
+  font: inherit; font-weight: 550; font-size: var(--t-md);
   background: var(--panel-2); color: var(--tx);
   border: 1px solid var(--line-strong); border-radius: var(--r);
-  padding: 6px 12px; min-height: 30px; cursor: pointer;
+  padding: 6px 12px; min-height: var(--ctl-h); cursor: pointer;
   transition: background 160ms var(--ease-out), border-color 160ms var(--ease-out),
               transform 160ms var(--ease-out), opacity 160ms var(--ease-out);
 }
 button:hover { background: var(--in); }
 /* Instant feedback on press — the interface answering, rather than waiting for the result. */
 button:active { transform: scale(0.97); }
-button.primary { background: var(--am); color: #1a1405; border-color: transparent; font-weight: 650; }
+button.primary { background: var(--am); color: var(--on-accent); border-color: transparent; font-weight: 650; }
 button.primary:hover { background: color-mix(in srgb, var(--am) 88%, #fff); }
-button.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+/* `--bad-tx` for the label, `--bad` for the border: in light the base measures 4.57:1 as text
+   against `--panel-2` and the border needs only 3:1, so the two part company. In dark they are
+   the same value and this costs nothing. */
+button.danger { color: var(--bad-tx); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
 button.danger:hover { background: color-mix(in srgb, var(--bad) 12%, transparent); }
 /* Quieter than a default button, but still visibly a button — borderless made "Edit" and
    "Reject" read as text, and a control you cannot see is a control nobody presses. */
 button.ghost { background: none; border-color: var(--line); color: var(--mut); }
 button.ghost:hover { background: var(--in); color: var(--tx); border-color: var(--line-strong); }
-button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; background: var(--panel-2); }
-button.primary:disabled { background: var(--in); color: var(--mut); }
+/* 0.5, not 0.4. Disabled controls are formally exempt from 1.4.3, but 0.4 measured 2.52:1 in
+   light — unreadable rather than de-emphasised, and "is this greyed out or is my eye going" is
+   not a question a UI should raise. Our floor for disabled text is 3:1; 0.5 gives 4.26 / 3.37.
+
+   The `color` here is the other half of that floor, and it belongs on the shared rule rather than
+   on any one variant. `opacity` quietens whatever ink it is handed, so a variant that has already
+   quietened its own — `.ghost` is `--mut`, `.danger` is `--bad-tx` — gets quietened twice and
+   lands under the floor: the ghost measured 2.36 dark / 2.05 light. Restating `--tx` means every
+   disabled button is full-strength ink quietened exactly once, whatever variant it started as,
+   and a new variant inherits the floor instead of having to remember it.
+   `.primary` is the sharpest case of the same thing rather than a different one: its
+   `--on-accent` is a near-black chosen to sit on the amber fill, so taking the fill away and
+   leaving the ink renders #1a1405 on `--in` at 1.17:1 — invisible. It needs the background
+   restated too, which is all that is left below. Every number here is driven; see `contrast.mjs`. */
+button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; background: var(--panel-2); color: var(--tx); }
+button.primary:disabled { background: var(--in); }
 
 input, select {
-  font: inherit; font-size: 12.5px; color: var(--tx); background: var(--in);
+  font: inherit; font-size: var(--t-md); color: var(--tx); background: var(--in);
   border: 1px solid var(--line-strong); border-radius: var(--r);
-  padding: 6px 10px; min-height: 30px;
+  padding: 6px 10px; min-height: var(--ctl-h);
   transition: border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
 }
-input::placeholder { color: color-mix(in srgb, var(--mut) 80%, transparent); }
+/* Full strength, not 80%. The mix measured 3.60 dark / 3.39 light against `--in` and a
+   placeholder is text somebody has to read. `--mut` at full is 4.79 / 5.01. */
+input::placeholder { color: var(--mut); }
 input:hover, select:hover { border-color: var(--mut); }
 
 /* One focus treatment everywhere, and only for keyboard users. */
@@ -246,14 +424,10 @@ input:hover, select:hover { border-color: var(--mut); }
 }
 
 .checks { display: grid; gap: var(--s1); margin-top: var(--s3); }
-.check {
-  display: flex; align-items: baseline; gap: var(--s2); cursor: pointer;
-  padding: 5px var(--s2); border-radius: var(--r);
-  transition: background 160ms var(--ease-out);
-}
-.check:hover { background: var(--panel-2); }
-.check input { margin: 0; flex: none; accent-color: var(--am); min-height: 0; }
-.check .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* `.check` itself is defined once, further down, as the bordered consent card. This file used to
+   define it twice with incompatible anatomy — a compact borderless row here and the card there —
+   and the card won at runtime while this block's `nowrap` ellipsis stayed live and truncated its
+   wrapping consent text. The compact row is now opt-in. */
 
 .filters { display: flex; gap: var(--s2); margin-bottom: var(--s3); flex-wrap: wrap; }
 
@@ -266,7 +440,7 @@ input:hover, select:hover { border-color: var(--mut); }
 
 table { width: 100%; border-collapse: collapse; margin-top: var(--s2); }
 th {
-  text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase;
+  text-align: left; font-size: var(--t-xs); font-weight: 600; text-transform: uppercase;
   letter-spacing: .05em; color: var(--mut); padding: 0 var(--s2) var(--s1);
   border-bottom: 1px solid var(--line);
 }
@@ -287,7 +461,7 @@ tr.clickable { cursor: pointer; }
 
 pre {
   background: var(--bg); border: 1px solid var(--line); border-radius: var(--r);
-  padding: var(--s3); margin: var(--s3) 0 0; overflow-x: auto; font-size: 12px; line-height: 1.5;
+  padding: var(--s3); margin: var(--s3) 0 0; overflow-x: auto; font-size: var(--t-sm); line-height: 1.5;
 }
 
 /* The arguments and response of a logged request.
@@ -314,29 +488,44 @@ pre {
 
 /* ---- Pills ----------------------------------------------------------------- */
 
+/* Three meanings, named by meaning. The vocabulary used to be named by verb — `.allow`, `.deny`,
+   `.ask`, `.error`, plus a `.denied` one letter from `.deny` carrying the opposite colour — which
+   put "refused" and "waiting on a person" on the same amber and made the pair a coin-flip to
+   read. A refusal is an outcome, not a pending state: the reader is not being asked to do
+   anything about it, so it is red.
+
+   `main.ts` maps what the core logs onto these three, which is the other half of the fix: the
+   class used to be the raw decision string, so `ask→denied`, `timeout` and `unauthorized` all
+   matched nothing and rendered as the same grey as `replayed`. */
 .pill {
-  border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 550;
+  border-radius: var(--r-full); padding: 2px 8px; font-size: var(--t-xs); font-weight: 550;
   border: 1px solid var(--line-strong); color: var(--mut); white-space: nowrap;
   display: inline-block;
 }
-.pill.ok, .pill.allow { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
-.pill.error, .pill.deny { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: color-mix(in srgb, var(--bad) 10%, transparent); }
-.pill.ask, .pill.denied { color: var(--am); border-color: color-mix(in srgb, var(--am) 40%, transparent); background: color-mix(in srgb, var(--am) 10%, transparent); }
-.pill.hot { background: var(--am); color: #1a1405; border-color: transparent; font-weight: 650; }
+/* Text takes the `-tx` variant, the border and fill take the base. In light the base measures
+   3.28:1 (`--am`) and 3.50:1 (`--ok`) against `--in` — fine for a 1px border, both failing AA
+   for 11px text. */
+.pill.ok      { color: var(--ok-tx);  border-color: color-mix(in srgb, var(--ok) 40%, transparent);  background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.pill.bad     { color: var(--bad-tx); border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: color-mix(in srgb, var(--bad) 10%, transparent); }
+.pill.waiting { color: var(--am-tx);  border-color: color-mix(in srgb, var(--am) 40%, transparent);  background: color-mix(in srgb, var(--am) 10%, transparent); }
+/* The filled variant of `waiting`: something is waiting on a person *right now*. */
+.pill.hot { background: var(--am); color: var(--on-accent); border-color: transparent; font-weight: 650; }
 
 /* ---- A waiting approval ------------------------------------------------------
    The one thing on any screen that is asking for a decision, so it is the one thing given an
    accent edge. If everything were highlighted, nothing would be. */
 
 .card.approval { border-left: 3px solid var(--am); background: var(--panel-2); }
-.card.approval h3 { font-size: 14px; }
+/* The one card heading that is a heading rather than a label, so it takes the scale's heading
+   step. This is the "14 → 15" collapse; the other 14 is the window's `h1`, still open. */
+.card.approval h3 { font-size: var(--t-lg); }
 
 /* ---- Collapsible rows (services, clients) ----------------------------------- */
 
 .svc-head { user-select: none; margin-top: 0 !important; padding: 2px 0; }
-.svc-head:hover code { color: var(--am); }
+.svc-head:hover code { color: var(--am-tx); }
 .svc-head code { transition: color 160ms var(--ease-out); }
-.twist { color: var(--mut); width: 12px; flex: none; font-size: 10px; }
+.twist { color: var(--mut); width: 12px; flex: none; font-size: var(--t-micro); }
 
 /* ---- The board on Home ------------------------------------------------------------
    One chip in the middle, and everything that talks to it around the edge. Every tile is a
@@ -379,7 +568,7 @@ pre {
   flex-direction: row; flex-wrap: wrap; justify-content: center; gap: var(--s3);
 }
 .rail-head {
-  color: var(--mut); font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--mut); font-size: var(--t-micro); text-transform: uppercase; letter-spacing: .08em;
   font-weight: 600; margin-bottom: calc(var(--s1) * -1);
 }
 .rail.right .rail-head { text-align: right; }
@@ -433,12 +622,12 @@ pre {
                  stroke-linecap: round; stroke-linejoin: round; }
 .tile-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .tile-short, .tile-label {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  font-family: var(--f-mono); font-size: var(--t-sm);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* Compact by default: the short name only. The full one and its detail are one hover away. */
 .tile-label, .tile-sub { display: none; }
-.tile-sub { color: var(--mut); font-size: 11px; white-space: nowrap; }
+.tile-sub { color: var(--mut); font-size: var(--t-xs); white-space: nowrap; }
 
 /* Expanded. Out of flow already, so this costs the layout nothing. */
 /* `min-width: 100%` is load-bearing, not tidiness. A short label expands to less than its slot —
@@ -451,7 +640,7 @@ pre {
      window pushed the tile past the edge of the card and put a scrollbar under the board. */
   z-index: 5; width: max-content; min-width: 100%; max-width: min(320px, var(--grow, 320px));
   border-color: var(--line-strong); background: var(--in);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-1);
 }
 /* Outward, always: a tile on the left grows further left, one on the right grows further
    right. Anchoring each to its chip-facing edge meant an expanded tile grew *towards* the
@@ -510,8 +699,8 @@ pre {
 .chip-name { font-weight: 650; white-space: nowrap; }
 .chip-name .dot { display: inline-block; margin-right: 6px; vertical-align: middle; }
 .chip-meta {
-  color: var(--mut); font-size: 11px; margin-top: 2px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--mut); font-size: var(--t-xs); margin-top: 2px;
+  font-family: var(--f-mono);
 }
 .chip-core .pill { display: inline-block; margin-top: var(--s2); }
 
@@ -527,7 +716,7 @@ pre {
 .chip-act {
   position: relative;
   display: flex; align-items: center; justify-content: center;
-  width: 30px; height: 28px; padding: 0;
+  width: var(--ctl-w-icon); height: var(--ctl-h-icon); padding: 0;
   background: none; border: 1px solid transparent; border-radius: var(--r);
   color: var(--mut); cursor: pointer;
   transition: color 160ms var(--ease-out), background 160ms var(--ease-out),
@@ -549,7 +738,7 @@ pre {
 .chip-act-name {
   position: absolute; top: calc(100% + 3px); left: 50%; transform: translateX(-50%);
   display: none; white-space: nowrap;
-  font-size: 10.5px; font-weight: 600; letter-spacing: .03em; color: var(--am);
+  font-size: var(--t-micro); font-weight: 600; letter-spacing: .03em; color: var(--am-tx);
 }
 .chip-act:hover .chip-act-name, .chip-act:focus-visible .chip-act-name { display: block; }
 
@@ -598,13 +787,36 @@ pre {
    the traffic it is travelling with rather than blending into it. */
 @keyframes march { to { stroke-dashoffset: -18; } }
 
-/* A call. Brighter, faster, once — and it takes the colour of what happened. */
+/* A call. Brighter, faster, once — and it takes the colour of what happened.
+
+   The dash is swept *along* the path by animating `stroke-dashoffset`, which is the only way to
+   move something along a curve the browser has measured for you. This used to animate
+   `@keyframes drift` — a `translateX` — which left the dash pinned at the start of the path and
+   slid the whole element sideways instead. Driven and measured: the light sat at 0.2px along a
+   93px trace for the entire animation while travelling 929px across the window, ending 858px
+   off the wire it was meant to be following. See `spark.mjs`.
+
+   The gap is a full `--len`, so there is exactly one dash and it has somewhere to come from and
+   somewhere to go: offset 34 parks it just before the start, offset `-len` carries it just past
+   the end, and the spark enters and leaves rather than appearing and vanishing.
+
+   `--len-neg` rather than `calc(-1 * var(--len))`, and that is not a style preference. Chrome
+   substitutes the var but leaves the result as `calc(-93px)`, and it will not interpolate a plain
+   `34px` against an unresolved `calc()` — so the animation degrades to *discrete* and the spark
+   sits at the start for half the duration, jumps to the end, and sits there. Every assertion a
+   reader would reach for still passed: the keyframes existed, `stroke-dashoffset` did change, the
+   element was not transformed. Only sampling the offset mid-flight showed the jump. `main.ts`
+   writes the negative out as a plain number, which has nothing left to resolve. See `spark.mjs`. */
 .trace-spark {
   fill: none; stroke: transparent; stroke-width: 2; stroke-linecap: round;
-  stroke-dasharray: 34 calc(var(--len) - 34);
-  stroke-dashoffset: var(--len);
+  stroke-dasharray: 34 var(--len);
+  stroke-dashoffset: 34;
 }
-.trace-spark.run { animation: drift 700ms linear; animation-timing-function: linear; }
+.trace-spark.run { animation: spark-sweep 700ms linear; }
+@keyframes spark-sweep {
+  from { stroke-dashoffset: 34; }
+  to   { stroke-dashoffset: var(--len-neg); }
+}
 .trace-spark.run.ok { stroke: var(--ok); }
 .trace-spark.run.err { stroke: var(--bad); }
 .trace-spark.run.held { stroke: var(--am); }
@@ -640,7 +852,6 @@ body.unwatched .pill.hot { animation-play-state: paused; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 1ms !important; }
   button:active { transform: none; }
-  .node.lit { transform: none; }
   /* A dash travelling a wire is the wrong idea when motion is unwelcome; the trace still says
      a call happened, by lighting along its whole length and fading. */
   .trace-spark.run { animation: flash 400ms ease; stroke-dasharray: none; stroke-dashoffset: 0; }
@@ -648,8 +859,25 @@ body.unwatched .pill.hot { animation-play-state: paused; }
 
   /* Fewer and gentler, not none: the flow still assembles in order, because that ordering is
      what explains the picture — it just arrives by fading rather than by moving. The two
-     ambient loops go entirely; neither carries information a still frame cannot. */
-  .tile, .chip { animation-name: fade-in; animation-duration: 200ms; }
+     ambient loops go entirely; neither carries information a still frame cannot.
+
+     `.tile-slot`, not `.tile`. The slot is what carries `tile-in-left`/`tile-in-right`, and both
+     are a `translateX`; `.tile` is the button inside it and has no animation to rename. Naming
+     the wrong one meant every tile kept sliding 12px under a preference that asked it not to —
+     measured, because a rule pointed at nothing looks exactly like a rule that works. The chip
+     was already correct: `.chip` is itself the animated element.
+
+     The rails are named explicitly, and that is the second half of the same bug rather than
+     belt-and-braces. `.rail.left .tile-slot` is specificity 0,3,0 and is what actually sets
+     `tile-in-left`; a bare `.tile-slot` here is 0,1,0 and loses, so the rename silently did
+     nothing while `animation-duration` — which no rail rule sets — appeared to work. The probe
+     read `tile-in-left` at 0.2s and a 7.9px slide: half-applied, which is the state that looks
+     most like success. Matching the rail selectors makes the two equal and source order decides.
+     See `reduced-motion.mjs`. */
+  .tile-slot,
+  .rail.left .tile-slot,
+  .rail.right .tile-slot,
+  .chip { animation-name: fade-in; animation-duration: var(--d-quick); }
   .trace { animation: none; stroke-dashoffset: 0; }
   .trace-drift { animation: none; opacity: 0; }
   .chip .dot.green::after { animation: none; opacity: 0; }
@@ -664,19 +892,19 @@ body.unwatched .pill.hot { animation-play-state: paused; }
    the same red that means "deny" — so a reader does not learn a second colour language. */
 
 .sev {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 10px;
+  font-family: var(--f-mono);
+  font-size: var(--t-micro);
   letter-spacing: .04em;
   text-transform: uppercase;
   padding: 1px 6px;
-  border-radius: 999px;
+  border-radius: var(--r-full);
   border: 1px solid;
   white-space: nowrap;
 }
 .sev-note   { color: var(--mut); border-color: var(--line-strong); }
-.sev-warn   { color: var(--am); border-color: color-mix(in srgb, var(--am) 40%, transparent);
+.sev-warn   { color: var(--am-tx); border-color: color-mix(in srgb, var(--am) 40%, transparent);
               background: color-mix(in srgb, var(--am) 10%, transparent); }
-.sev-danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+.sev-danger { color: var(--bad-tx); border-color: color-mix(in srgb, var(--bad) 45%, transparent);
               background: color-mix(in srgb, var(--bad) 12%, transparent); }
 
 .findings td { vertical-align: top; padding: var(--s2) var(--s2) var(--s2) 0; }
@@ -695,8 +923,8 @@ body.unwatched .pill.hot { animation-play-state: paused; }
   background: var(--in);
   border: 1px solid var(--line);
   border-radius: var(--r);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11.5px;
+  font-family: var(--f-mono);
+  font-size: var(--t-sm);
   line-height: 1.55;
   white-space: pre;
   color: var(--tx);
@@ -711,8 +939,8 @@ body.unwatched .pill.hot { animation-play-state: paused; }
   border: 1px solid var(--line);
   border-radius: var(--r);
   color: var(--tx);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font-family: var(--f-mono);
+  font-size: var(--t-sm);
   line-height: 1.55;
   tab-size: 2;
 }
@@ -721,8 +949,12 @@ body.unwatched .pill.hot { animation-play-state: paused; }
   border-color: var(--am);
 }
 
-/* Consent is a decision, so the box is a target you can hit, not a 13px tick beside a wall of
-   text. */
+/* ---- The tick box -------------------------------------------------------------------
+   Consent is a decision, so the box is a target you can hit, not a 13px tick beside a wall of
+   text. A native checkbox is 13px, under the 24×24 floor, so the padded label around it is the
+   target — which is also why this is the *default* shape rather than the opt-in one. Somebody
+   reaching for `.check` without thinking is usually gating a permission, and the safe shape has
+   to be the one you get for free; the reverse default fails silently and dangerously. */
 .check {
   display: flex;
   align-items: flex-start;
@@ -734,14 +966,28 @@ body.unwatched .pill.hot { animation-play-state: paused; }
   background: var(--panel-2);
   cursor: pointer;
   line-height: 1.5;
-  transition: border-color 160ms var(--ease-out);
+  transition: border-color var(--d-fast) var(--ease-out);
 }
 .check:hover { border-color: var(--line-strong); }
 .check:has(input:checked) { border-color: color-mix(in srgb, var(--am) 45%, transparent); }
-.check input { margin-top: 2px; flex: none; accent-color: var(--am); }
+.check input { margin-top: var(--s0); flex: none; accent-color: var(--am); }
 
-.pill.good { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent);
-             background: color-mix(in srgb, var(--ok) 10%, transparent); }
+/* The compact row, for a dense list of things you are ticking rather than a decision you are
+   consenting to — a tool picker, a filter, a view toggle. Borderless, baseline-aligned, and the
+   one place the `nowrap` ellipsis belongs: these rows are scanned down a column, so a long
+   description is truncated rather than allowed to reflow the list. */
+.check.compact {
+  align-items: baseline;
+  margin-top: 0;
+  padding: var(--s1) var(--s2);
+  border-color: transparent;
+  background: none;
+  transition: background var(--d-fast) var(--ease-out);
+}
+.check.compact:hover { background: var(--panel-2); border-color: transparent; }
+.check.compact:has(input:checked) { border-color: transparent; }
+.check.compact input { margin-top: 0; min-height: 0; }
+.check.compact .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- Two-level grant picker ---------------------------------------------------------
    The service is the unit of the decision; its tools stay individually revocable underneath.
@@ -772,25 +1018,19 @@ body.unwatched .pill.hot { animation-play-state: paused; }
 .grant-tools .check.sub:hover { border-color: var(--line); }
 .grant-tools .check.sub:has(input:checked) { border-color: color-mix(in srgb, var(--am) 30%, transparent); }
 
-.check .grow { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.check .grow { display: flex; flex-direction: column; gap: var(--s0); min-width: 0; }
 .check .grow code { word-break: break-all; }
 
-/* ---- Idle drift ---------------------------------------------------------------------
-   The wires are alive without anything being sent. Everything about this is chosen to stay
-   underneath a real call rather than compete with it: no dot, no accent colour, a third of the
-   line's own opacity, and gone entirely for as long as a call is crossing. Transform only, so
-   it costs a composite and nothing else however many wires there are. */
+/* The idle drift used to live here as `@keyframes drift`, a `translateX` from an earlier design
+   where the ambient motion was a single dot sliding along each wire. It was replaced by the
+   marching dash pattern up in `.trace-drift` — which needs no measurement and survives a resize —
+   but the keyframes stayed behind, and `.trace-spark.run` was still pointing at them. Both are
+   gone: the spark now sweeps its own dash, and this section's only remaining job was to explain
+   an animation nothing used.
 
-@keyframes drift {
-  from { transform: translateX(-34px); }
-  to   { transform: translateX(100cqw); }
-}
-/* A call outranks it. Hidden rather than dimmed: two things moving along one line at different
-   speeds is the one reading that would be worse than either alone. */
-/* A paused gateway is not carrying anything, and should not look as though it is. */
-
-@media (prefers-reduced-motion: reduce) {
-}
+   The empty `@media (prefers-reduced-motion: reduce) {}` that sat here is gone too. It never
+   reached a user — the bundler drops an empty block — but in the source it read as "this was
+   considered" when nothing was, which is worse than silence. */
 
 /* ---- Grant picker: the head row -----------------------------------------------------
    Two targets that mean different things sit side by side here — granting the whole service,
@@ -804,7 +1044,7 @@ body.unwatched .pill.hot { animation-play-state: paused; }
   display: flex; align-items: center; justify-content: center;
   border-radius: var(--r);
 }
-.grant-head .grant-twist .twist { width: auto; font-size: 11px; }
+.grant-head .grant-twist .twist { width: auto; font-size: var(--t-xs); }
 
 /* Bigger than the default box, and with room around it: this one grants a dozen tools at
    once. */
@@ -848,14 +1088,16 @@ body.unwatched .pill.hot { animation-play-state: paused; }
   position: fixed; inset: 0; z-index: 100;
   display: flex; align-items: center; justify-content: center;
   padding: var(--s5);
-  background: color-mix(in srgb, #000 52%, transparent);
+  /* A token, because 52% of black over a #f5f7fa page is a dark-mode scrim on a light page.
+     `--scrim` is 34% of #0b1017 in light. */
+  background: var(--scrim);
   backdrop-filter: blur(2px);
   opacity: 1;
-  transition: opacity 250ms var(--ease-out);
+  transition: opacity var(--d-enter) var(--ease-out);
 }
 .modal {
   background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
-  box-shadow: 0 24px 64px -24px rgba(0,0,0,.6), var(--shadow);
+  box-shadow: var(--shadow-3);
   padding: var(--s5);
   width: 100%; max-height: calc(100vh - var(--s6) * 2);
   display: flex; flex-direction: column; gap: var(--s3);
@@ -891,7 +1133,7 @@ body.unwatched .pill.hot { animation-play-state: paused; }
 .modal-step .kv td:first-child { width: 140px; }
 .modal-step .kv input, .modal-step .kv select { width: 100%; max-width: 460px; }
 
-.modal h3 { margin: 0; font-size: 15px; line-height: 1.4; }
+.modal h3 { margin: 0; font-size: var(--t-lg); line-height: 1.4; }
 .modal-p { margin: 0; color: var(--mut); line-height: 1.55; white-space: pre-wrap; }
 .modal-p + .modal-p { margin-top: calc(var(--s2) * -1); }
 
@@ -925,16 +1167,16 @@ body.unwatched .pill.hot { animation-play-state: paused; }
 }
 .modal-choice-text { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
 .modal-choice-label { font-weight: 600; }
-.modal-label { font-weight: 600; font-size: 12.5px; }
+.modal-label { font-weight: 600; font-size: var(--t-md); }
 .modal-label .req {
-  color: var(--mut); font-weight: 500; font-size: 10px; text-transform: uppercase;
+  color: var(--mut); font-weight: 500; font-size: var(--t-micro); text-transform: uppercase;
   letter-spacing: .05em; margin-left: var(--s1);
 }
-.modal-hint { color: var(--mut); font-size: 11.5px; line-height: 1.5; }
+.modal-hint { color: var(--mut); font-size: var(--t-sm); line-height: 1.5; }
 .modal-field input, .modal-field textarea { width: 100%; }
 .modal-field textarea {
   resize: vertical; min-height: 68px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  font-family: var(--f-mono); font-size: var(--t-sm);
 }
 
 .modal-foot {
