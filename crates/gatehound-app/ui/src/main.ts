@@ -236,7 +236,7 @@ const esc = (s: unknown): string =>
 /// so a refused call and a replayed one rendered identically. The arrow values could never have
 /// matched: `→` is escaped to `&#8594;` on its way into the attribute.
 ///
-/// Note that `ask` alone is the only amber here. `ask→denied` is red: the reader is not being
+/// Note that `ask` alone is the only accent here. `ask→denied` is red: the reader is not being
 /// asked to do anything about a refusal, so it is an outcome, not a pending state.
 const PILL_MEANING: Record<string, "ok" | "bad" | "waiting"> = {
   // Decisions, as `Decision::as_str` writes them.

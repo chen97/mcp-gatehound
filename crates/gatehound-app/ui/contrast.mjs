@@ -29,7 +29,7 @@ const PROBES = [
   { what: "pill — ok", sel: ".pill.ok", text: true },
   { what: "pill — bad", sel: ".pill.bad", text: true },
   { what: "pill — waiting", sel: ".pill.waiting", text: true },
-  { what: "pill — hot (filled amber)", sel: ".pill.hot", text: true },
+  { what: "pill — hot (filled accent)", sel: ".pill.hot", text: true },
   // `:not(nav button)` on every one of these. Without it the plain-button and ghost probes both
   // matched the first `button` in the document, which is a tab in the nav — `querySelector` is
   // DOM order, and the nav is above the content. Both reported 6.27:1, the same number as the
@@ -131,7 +131,7 @@ const hex = (c) => "#" + c.map((x) => x.toString(16).padStart(2, "0")).join("");
 
 /// Enough rows that every coloured thing this file asks about actually renders.
 ///
-/// One request per pill meaning — `allow` is green, `ask→denied` red, `ask` amber — plus a held
+/// One request per pill meaning — `allow` is green, `ask→denied` red, `ask` blue — plus a held
 /// call, which is what puts the approval card on screen with its primary, ghost and danger
 /// buttons. Without these the probe skips two thirds of its cases and reports a clean run.
 const POPULATED = {
