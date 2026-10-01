@@ -15,18 +15,20 @@ pub enum GatewayStatus {
     /// Listening, and something it fronts is not answering.
     ///
     /// This is not the gateway being unwell. It is up and accepting calls; a service behind it
-    /// is not. Amber rather than red for exactly that reason — red on the gateway reads as
+    /// is not. The accent rather than red for exactly that reason — red on the gateway reads as
     /// "the gateway is down", which is the opposite of true here.
     Degraded,
 }
 
 impl GatewayStatus {
-    /// Tray colour.
+    /// Which status dot the tray and window show, as a meaning rather than a hue. The
+    /// stylesheet decides what each one looks like; `Degraded` said "amber" here for a release
+    /// after the accent went blue, which is why none of these name a colour any more.
     pub fn colour(&self) -> &'static str {
         match self {
-            GatewayStatus::Listening => "green",
-            GatewayStatus::Paused => "grey",
-            GatewayStatus::Degraded => "amber",
+            GatewayStatus::Listening => "ok",
+            GatewayStatus::Paused => "paused",
+            GatewayStatus::Degraded => "degraded",
         }
     }
 }
@@ -84,12 +86,12 @@ mod tests {
         // The light on the gateway answers "is this up". It used to go red when something it
         // fronts stopped answering, which says the opposite of what was true: the gateway was
         // listening and taking calls the whole time.
-        assert_eq!(GatewayStatus::Listening.colour(), "green");
-        assert_eq!(GatewayStatus::Paused.colour(), "grey");
-        assert_eq!(GatewayStatus::Degraded.colour(), "amber");
+        assert_eq!(GatewayStatus::Listening.colour(), "ok");
+        assert_eq!(GatewayStatus::Paused.colour(), "paused");
+        assert_eq!(GatewayStatus::Degraded.colour(), "degraded");
         assert_ne!(
             GatewayStatus::Degraded.colour(),
-            "red",
+            "bad",
             "red on the gateway reads as the gateway being down"
         );
     }

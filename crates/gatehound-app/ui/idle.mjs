@@ -65,7 +65,7 @@ await page.waitForTimeout(500);
 await page.addStyleTag({ content: ".trace-drift { animation: none !important; }" });
 const noDrift = await sample("watched, drift off", WINDOW);
 
-await page.addStyleTag({ content: ".chip .dot.green::after, .chip .pill.hot::after { animation: none !important; }" });
+await page.addStyleTag({ content: ".chip .dot.ok::after, .chip .pill.hot::after { animation: none !important; }" });
 const nothing = await sample("watched, nothing moving", WINDOW);
 
 // ---- what the numbers say ----------------------------------------------------------------
