@@ -146,6 +146,12 @@ pub fn refresh(app: &AppHandle) {
 
 /// A native notification per new approval; clicking it opens the card.
 pub fn notify_pending(app: &AppHandle, row: &PendingRow) {
+    // Fired from the Debug tab: the person to ask is the one who just pressed Fire, and they
+    // are looking at the window. A notification would tell them what they did, and navigating
+    // would take them away from the screen that shows the wait.
+    if row.origin.is_some() {
+        return;
+    }
     let _ = app
         .notification()
         .builder()

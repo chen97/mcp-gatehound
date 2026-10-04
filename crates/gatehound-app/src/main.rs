@@ -154,6 +154,56 @@ fn request_detail(
     state.gateway.store.get_request(id).map_err(err)
 }
 
+/// What firing a tool from the Debug tab came to.
+#[derive(Serialize)]
+struct Fired {
+    /// The log row it wrote — marked as fired from here, and linked to the call it repeats.
+    log_id: Option<i64>,
+    decision: String,
+    duration_ms: i64,
+    ok: bool,
+    /// The tool's result, whole. The log keeps a redacted, truncated copy; this is the window
+    /// showing the operator what came back to their own call, and it is not stored.
+    response: Option<serde_json::Value>,
+    error: Option<String>,
+    code: Option<String>,
+}
+
+/// Fire a tool as the owner: the Debug tab, and "Run again" on a failed call.
+///
+/// Over IPC only, and through the core's one call path — see `Gateway::fire`. Refused while the
+/// gateway is paused, because a client could not make this call either, and a paused gateway
+/// has already released its approval queue.
+#[tauri::command]
+async fn fire_tool(
+    state: tauri::State<'_, AppState>,
+    tool: String,
+    arguments: serde_json::Value,
+    replay_of: Option<i64>,
+) -> Result<Fired, String> {
+    if !state.is_running() {
+        return Err("The gateway is paused. Resume it to fire a tool.".into());
+    }
+    let gateway = state.gateway.clone();
+    let out = gateway
+        .fire(&tool, arguments, replay_of)
+        .await
+        .map_err(err)?;
+    let (ok, response, error, code) = match out.result {
+        Ok(v) => (true, Some(v), None, None),
+        Err(f) => (false, None, Some(f.message), Some(f.code.to_string())),
+    };
+    Ok(Fired {
+        log_id: out.log_id,
+        decision: out.decision,
+        duration_ms: out.duration_ms,
+        ok,
+        response,
+        error,
+        code,
+    })
+}
+
 #[tauri::command]
 fn identities(state: tauri::State<'_, AppState>) -> Result<Vec<IdentityRule>, String> {
     state.gateway.identities().map_err(err)
@@ -1403,6 +1453,7 @@ fn add_script_tool(
         }),
         rate_limit: None,
         idempotent: false,
+        read_only: false,
     });
     if on_first_call == Decision::Deny {
         cfg.identities.push(gatehound_core::config::IdentitySeed {
@@ -1785,6 +1836,7 @@ fn main() {
             resolve,
             requests,
             request_detail,
+            fire_tool,
             identities,
             set_identity,
             forget_identity,

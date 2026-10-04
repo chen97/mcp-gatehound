@@ -334,6 +334,53 @@ async fn handle_mcp(State(gw): State<Arc<Gateway>>, headers: HeaderMap, body: St
 
 const DISCOVER_INSTRUCTIONS: &str = "Tools are bound to fixed actions by the gateway's configuration; a caller names a tool and never chooses an action. Every call is checked against a per-identity policy and recorded, a tool the policy holds waits for a human decision, and a tool marked idempotent requires an idempotency_key — repeating one replays the first result instead of acting again.";
 
+/// Where a tool call came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A client, over `POST /mcp`, past both auth factors.
+    Client,
+    /// The operator, from the window's Debug tab — optionally firing a logged call again.
+    Debug { replay_of: Option<i64> },
+}
+
+impl Origin {
+    /// What the log's `origin` column says. `None` for a client, which is every call there was
+    /// before this column existed.
+    pub fn label(&self) -> Option<&'static str> {
+        match self {
+            Origin::Client => None,
+            Origin::Debug { .. } => Some("debug"),
+        }
+    }
+
+    fn replay_of(&self) -> Option<i64> {
+        match self {
+            Origin::Client => None,
+            Origin::Debug { replay_of } => *replay_of,
+        }
+    }
+}
+
+/// Why a call did not produce a result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallFailure {
+    pub message: String,
+    /// Machine-readable, so a client can tell "try again" from "never". `unknown_tool` is
+    /// reported to a client as a JSON-RPC error rather than a tool error, as it always was.
+    pub code: &'static str,
+}
+
+/// One tool call, decided, run and logged.
+#[derive(Debug, Clone)]
+pub struct CallOutcome {
+    /// The log row this call wrote, when the log could be written.
+    pub log_id: Option<i64>,
+    /// What decided it, exactly as the log records it.
+    pub decision: String,
+    pub duration_ms: i64,
+    pub result: Result<Value, CallFailure>,
+}
+
 #[allow(clippy::too_many_arguments)] // One JSON-RPC call's worth of context, named.
 async fn call_tool(
     gw: &Arc<Gateway>,
@@ -344,31 +391,107 @@ async fn call_tool(
     args: Value,
     era: &Era,
 ) -> Value {
+    let outcome = run_call(gw, identity, token_id, name, args, Origin::Client).await;
+    match outcome.result {
+        Ok(payload) => tool_ok(gw, era, id, payload),
+        Err(f) if f.code == "unknown_tool" => rpc_error(id, -32602, &f.message),
+        Err(f) => tool_err(gw, era, id, &f.message, f.code),
+    }
+}
+
+/// Decide, run and log one tool call. The single path every call takes, whoever made it.
+///
+/// A call fired from the Debug tab comes through here too, which is the point: it meets the same
+/// policy, the same approval queue, the same rate limits and idempotency keys, and the same
+/// action guards as a client's — nothing it could do is reachable any other way. Two things
+/// differ, and both make it stricter or plainer, never looser:
+///
+/// * **A tool not marked `read_only` waits in Approvals every time it is fired by hand**,
+///   whatever the policy says. A standing allow was given to a client for its own calls; it does
+///   not cover the operator re-running a write, and neither does an earlier approval.
+/// * A read-only tool fired by hand runs at once unless the policy denies it. Asking the person
+///   who just pressed Fire whether they meant it would be a second click, not a second check.
+///
+/// The row it writes says `origin = debug` either way, so it is never read as an agent's call.
+pub async fn run_call(
+    gw: &Arc<Gateway>,
+    identity: &str,
+    token_id: Option<&str>,
+    name: &str,
+    args: Value,
+    origin: Origin,
+) -> CallOutcome {
     let started = Instant::now();
     let args_for_log = redact::for_log(&args, redact::LOG_BYTES);
-
-    let Some(tool) = gw.cfg.tool(name) else {
-        gw.log(NewRequestLog {
-            identity: Some(identity.into()),
-            method: Some("tools/call".into()),
-            tool: Some(name.into()),
-            args_json: Some(args_for_log),
-            decision: Some("unknown_tool".into()),
-            status: Some("error".into()),
-            error: Some("unknown tool".into()),
-            duration_ms: Some(started.elapsed().as_millis() as i64),
-            token_id: token_id.map(str::to_string),
-            ..Default::default()
-        });
-        return rpc_error(id, -32602, &format!("unknown tool: {name}"));
+    let elapsed = |started: Instant| started.elapsed().as_millis() as i64;
+    let row = |decision: &str| NewRequestLog {
+        identity: Some(identity.into()),
+        method: Some("tools/call".into()),
+        tool: Some(name.into()),
+        args_json: Some(args_for_log.clone()),
+        decision: Some(decision.into()),
+        token_id: token_id.map(str::to_string),
+        origin: origin.label().map(str::to_string),
+        replay_of: origin.replay_of(),
+        ..Default::default()
     };
 
+    let Some(tool) = gw.cfg.tool(name) else {
+        let duration_ms = elapsed(started);
+        let log_id = gw.log(NewRequestLog {
+            status: Some("error".into()),
+            error: Some("unknown tool".into()),
+            duration_ms: Some(duration_ms),
+            ..row("unknown_tool")
+        });
+        return CallOutcome {
+            log_id,
+            decision: "unknown_tool".into(),
+            duration_ms,
+            result: Err(CallFailure {
+                message: format!("unknown tool: {name}"),
+                code: "unknown_tool",
+            }),
+        };
+    };
+    let fail = |decision: String, message: String, code: &'static str| {
+        let duration_ms = elapsed(started);
+        let log_id = gw.log(NewRequestLog {
+            action_type: Some(tool.action.kind().into()),
+            upstream: tool.action.upstream().map(str::to_string),
+            status: Some("error".into()),
+            error: Some(redact::truncate(&message, redact::LOG_BYTES)),
+            duration_ms: Some(duration_ms),
+            ..row(&decision)
+        });
+        CallOutcome {
+            log_id,
+            decision,
+            duration_ms,
+            result: Err(CallFailure { message, code }),
+        }
+    };
+
+    let by_hand = origin != Origin::Client;
     let mut decision = gw.policy.resolve(identity, name);
     let mut decision_label = decision.as_str().to_string();
 
+    if by_hand && decision != Decision::Deny {
+        if tool.read_only {
+            decision = Decision::Allow;
+            decision_label = "read-only".into();
+        } else {
+            // Whatever the policy said: a write fired by hand is always a fresh question.
+            decision = Decision::Ask;
+        }
+    }
+
     if decision == Decision::Ask {
         let preview = redact::for_log(&args, redact::PREVIEW_BYTES);
-        let outcome = gw.approvals.hold(identity, name, &preview).await;
+        let outcome = gw
+            .approvals
+            .hold_from(identity, name, &preview, origin.label())
+            .await;
         decision_label = outcome.log_decision().to_string();
         match outcome {
             Outcome::Allowed => decision = Decision::Allow,
@@ -381,82 +504,37 @@ async fn call_tool(
                     ),
                     _ => "the gateway is shutting down".to_string(),
                 };
-                gw.log(NewRequestLog {
-                    identity: Some(identity.into()),
-                    method: Some("tools/call".into()),
-                    tool: Some(name.into()),
-                    args_json: Some(args_for_log),
-                    decision: Some(decision_label),
-                    action_type: Some(tool.action.kind().into()),
-                    upstream: tool.action.upstream().map(str::to_string),
-                    status: Some("error".into()),
-                    error: Some(message.clone()),
-                    duration_ms: Some(started.elapsed().as_millis() as i64),
-                    token_id: token_id.map(str::to_string),
-                    ..Default::default()
-                });
-                return tool_err(gw, era, id, &message, other.error_code());
+                return fail(decision_label, message, other.error_code());
             }
         }
     }
 
     if decision == Decision::Deny {
         let message = format!("'{identity}' is not permitted to call {name}");
-        gw.log(NewRequestLog {
-            identity: Some(identity.into()),
-            method: Some("tools/call".into()),
-            tool: Some(name.into()),
-            args_json: Some(args_for_log),
-            decision: Some(decision_label),
-            action_type: Some(tool.action.kind().into()),
-            upstream: tool.action.upstream().map(str::to_string),
-            status: Some("error".into()),
-            error: Some(message.clone()),
-            duration_ms: Some(started.elapsed().as_millis() as i64),
-            token_id: token_id.map(str::to_string),
-            ..Default::default()
-        });
-        return tool_err(gw, era, id, &message, "not_permitted");
+        return fail(decision_label, message, "not_permitted");
     }
 
     match gw.engine.dispatch(tool, &args).await {
         Ok(payload) => {
-            gw.log(NewRequestLog {
-                identity: Some(identity.into()),
-                method: Some("tools/call".into()),
-                tool: Some(name.into()),
-                args_json: Some(args_for_log),
-                decision: Some(decision_label),
+            let duration_ms = elapsed(started);
+            let log_id = gw.log(NewRequestLog {
                 action_type: Some(tool.action.kind().into()),
                 upstream: tool.action.upstream().map(str::to_string),
                 status: Some("ok".into()),
-                duration_ms: Some(started.elapsed().as_millis() as i64),
+                duration_ms: Some(duration_ms),
                 response_json: Some(redact::for_log(&payload, redact::LOG_BYTES)),
-                token_id: token_id.map(str::to_string),
                 // The engine already tells the caller whether this acted or replayed; read it
                 // back off the payload rather than plumbing a second return value for it.
                 replayed: payload.get("duplicate").and_then(Value::as_bool),
-                ..Default::default()
+                ..row(&decision_label)
             });
-            tool_ok(gw, era, id, payload)
+            CallOutcome {
+                log_id,
+                decision: decision_label,
+                duration_ms,
+                result: Ok(payload),
+            }
         }
-        Err(e) => {
-            let message = e.to_string();
-            gw.log(NewRequestLog {
-                identity: Some(identity.into()),
-                method: Some("tools/call".into()),
-                tool: Some(name.into()),
-                args_json: Some(args_for_log),
-                decision: Some(decision_label),
-                action_type: Some(tool.action.kind().into()),
-                upstream: tool.action.upstream().map(str::to_string),
-                status: Some("error".into()),
-                error: Some(redact::truncate(&message, redact::LOG_BYTES)),
-                duration_ms: Some(started.elapsed().as_millis() as i64),
-                token_id: token_id.map(str::to_string),
-                ..Default::default()
-            });
-            tool_err(gw, era, id, &message, "action_failed")
-        }
+        Err(e) => fail(decision_label, e.to_string(), "action_failed"),
     }
 }

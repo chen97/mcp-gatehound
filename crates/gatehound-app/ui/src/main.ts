@@ -42,6 +42,17 @@ interface ToolInfo {
   command: string | null;
   rate_limit: { per_hour: number; min_spacing_secs: number } | null;
   idempotent: boolean;
+  /// The JSON Schema a caller sees, which is what the Debug tab fills its arguments from.
+  schema: JsonSchema;
+  /// Fired from the Debug tab, a read-only tool runs at once; anything else waits in Approvals.
+  read_only: boolean;
+}
+
+interface JsonSchema {
+  type?: string;
+  description?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
 }
 
 interface Applied {
@@ -186,6 +197,8 @@ interface Pending {
   identity: string;
   tool: string;
   args_preview: string | null;
+  /// `debug` when the operator fired this from the Debug tab. Null for a client's call.
+  origin: string | null;
 }
 
 interface RequestLog {
@@ -209,6 +222,11 @@ interface RequestLog {
   /// For an idempotent tool: whether this call acted, or replayed an earlier result. Null when
   /// the tool is not idempotent and the question does not arise.
   replayed: boolean | null;
+  /// `debug` when the operator fired this from the Debug tab. Null for a client's call — which
+  /// is every call that arrived over the wire.
+  origin: string | null;
+  /// The logged request this one was fired again from.
+  replay_of: number | null;
 }
 
 interface IdentityRule {
@@ -246,6 +264,8 @@ const PILL_MEANING: Record<string, "ok" | "bad" | "waiting"> = {
   // Decisions a held call resolves to, as `Outcome::log_decision` writes them.
   "ask→allowed": "ok",
   "ask→denied": "bad",
+  // A read-only tool fired from the Debug tab, which runs without asking.
+  "read-only": "ok",
   timeout: "bad",
   shutdown: "bad",
   // Calls that never reached a policy decision.
@@ -266,6 +286,22 @@ function pill(value: string | null | undefined, label?: string): string {
   const text = label ?? value ?? "—";
   const meaning = value ? PILL_MEANING[value] : undefined;
   return `<span class="pill${meaning ? ` ${meaning}` : ""}">${esc(text)}</span>`;
+}
+
+/// The mark on a call the operator fired from the Debug tab.
+///
+/// Grey on purpose. It is not a status, and colour carries exactly three meanings here; what it
+/// has to do is stop a call fired by hand being read as one an agent made — which, logged under
+/// the owner's identity, it would otherwise look exactly like.
+function firedByHand(r: { origin: string | null }): string {
+  return r.origin === "debug"
+    ? ` <span class="pill" title="You fired this from the Debug tab. No client made it.">debug</span>`
+    : "";
+}
+
+/// Whether a logged call can be fired again: a tool call that did not succeed.
+function canRunAgain(r: RequestLog): boolean {
+  return r.status === "error" && r.method === "tools/call" && !!r.tool;
 }
 
 /// A relative time that updates itself without redrawing the screen around it.
@@ -410,7 +446,7 @@ function recentHtml(rows: RequestLog[]): string {
       .map(
         (r) => `<tr class="clickable" data-id="${r.id}">
           <td class="meta">${ago(r.ts)}</td>
-          <td><code>${esc(r.identity ?? "—")}</code></td>
+          <td><code>${esc(r.identity ?? "—")}</code>${firedByHand(r)}</td>
           <td><code>${esc(r.tool ?? r.method ?? "")}</code></td>
           <td>${pill(r.decision)}</td>
           <td>${r.replayed ? pill(null, "replayed") : pill(r.status)}</td>
@@ -631,6 +667,7 @@ const TAB_NAMES: Record<string, string> = {
   actions: "Downstream",
   network: "Network",
   log: "Live log",
+  debug: "Debug",
 };
 
 /// Line icons, one weight, drawn on a 20x20 box. Inline because half a dozen files of two
@@ -1184,23 +1221,38 @@ function approvalsHtml(rows: Pending[]): string {
               <p>A call from an identity with no rule is held here until you decide.</p>
             </div>`;
   }
-  return rows
-    .map(
-      (p) => `
+  return rows.map(approvalCard).join("");
+}
+
+/// One held call.
+///
+/// A call fired from the Debug tab gets the same card with two differences. It says who fired
+/// it, so it is not mistaken for a client asking; and it offers only the one-off answers,
+/// because the core writes no rule from such a hold — "Always allow" there would be a button
+/// that quietly did the same as "Allow once".
+function approvalCard(p: Pending): string {
+  const byHand = p.origin === "debug";
+  return `
       <div class="card approval" data-id="${esc(p.id)}">
-        <h3><code>${esc(p.identity)}</code> wants to run <code>${esc(p.tool)}</code></h3>
-        <div class="meta">Waiting since ${ago(p.ts)}</div>
+        <h3>${
+          byHand
+            ? `You fired <code>${esc(p.tool)}</code> from Debug${firedByHand(p)}`
+            : `<code>${esc(p.identity)}</code> wants to run <code>${esc(p.tool)}</code>`
+        }</h3>
+        <div class="meta">Waiting since ${ago(p.ts)}${
+          byHand
+            ? ". This tool is not marked read-only, so it waits for a fresh answer every time it is fired by hand. Your answer covers this call only."
+            : ""
+        }</div>
         <pre>${esc(pretty(p.args_preview))}</pre>
         <div class="row">
           <button class="primary" data-act="allow_once">Allow once</button>
-          <button data-act="allow_always">Always allow this</button>
+          ${byHand ? "" : `<button data-act="allow_always">Always allow this</button>`}
           <span style="flex:1"></span>
           <button class="ghost" data-act="reject">Reject</button>
-          <button class="danger" data-act="reject_always">Never allow this</button>
+          ${byHand ? "" : `<button class="danger" data-act="reject_always">Never allow this</button>`}
         </div>
-      </div>`,
-    )
-    .join("");
+      </div>`;
 }
 
 /// What each approval button says while it is working.
@@ -1215,8 +1267,8 @@ const RESOLVING_LABEL: Record<Resolution, string> = {
   reject_always: "Rejecting…",
 };
 
-function wireApprovals(): void {
-  $("#approvals").querySelectorAll<HTMLButtonElement>("button[data-act]").forEach((btn) => {
+function wireApprovals(where = "#approvals"): void {
+  $(where).querySelectorAll<HTMLButtonElement>("button[data-act]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const id = btn.closest<HTMLElement>("[data-id]")!.dataset.id!;
       const resolution = btn.dataset.act as Resolution;
@@ -1285,19 +1337,24 @@ async function renderLog(): Promise<void> {
         : `<table>
              <thead><tr>
                <th>When</th><th>Identity</th><th>Method</th><th>Tool</th>
-               <th>Decision</th><th>Action</th><th>Status</th><th>Took</th>
+               <th>Decision</th><th>Action</th><th>Status</th><th>Took</th><th></th>
              </tr></thead>
              <tbody>${filtered
                .map(
                  (r) => `<tr class="clickable" data-id="${r.id}">
                    <td>${ago(r.ts)}</td>
-                   <td>${esc(r.identity ?? "—")}</td>
+                   <td>${esc(r.identity ?? "—")}${firedByHand(r)}</td>
                    <td>${esc(r.method ?? "")}</td>
                    <td>${esc(r.tool ?? "")}</td>
                    <td>${pill(r.decision)}</td>
                    <td>${esc(r.action_type ?? "")}${r.upstream ? ` → ${esc(r.upstream)}` : ""}</td>
                    <td>${pill(r.status)}${r.replayed ? ` ${pill(null, "replayed")}` : ""}</td>
                    <td>${r.duration_ms ?? ""}</td>
+                   <td>${
+                     canRunAgain(r)
+                       ? `<button class="ghost rq-again" data-id="${r.id}">Run again</button>`
+                       : ""
+                   }</td>
                  </tr>`,
                )
                .join("")}</tbody>
@@ -1324,6 +1381,13 @@ async function renderLog(): Promise<void> {
   document.querySelectorAll<HTMLTableRowElement>("#log tr.clickable").forEach((tr) => {
     tr.addEventListener("click", () => void showRequest(Number(tr.dataset.id)));
   });
+  // Inside a row that opens the request, so the click must stop here: one press, one action.
+  document.querySelectorAll<HTMLButtonElement>("#log .rq-again").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void runAgain(Number(b.dataset.id));
+    });
+  });
 }
 
 /// The arguments or the response, whole.
@@ -1341,6 +1405,9 @@ function payloadHtml(text: string): string {
 /// and refreshes itself every five seconds, so a panel at the bottom was somewhere you had to
 /// be sent to and which moved while you read it. A request is also a finished thing — read it
 /// and close it — which is what a dialog is for.
+/// A request the open one points at, to open once it closes — "Fired again from #12".
+let nextRequest: number | null = null;
+
 async function showRequest(id: number): Promise<void> {
   let row: RequestLog | null;
   try {
@@ -1365,6 +1432,16 @@ async function showRequest(id: number): Promise<void> {
       <table class="kv"><tbody>
         <tr><td class="meta">Method</td><td><code>${esc(r.method ?? "—")}</code></td></tr>
         ${r.tool ? `<tr><td class="meta">Tool</td><td><code>${esc(r.tool)}</code></td></tr>` : ""}
+        ${
+          r.origin === "debug"
+            ? `<tr><td class="meta">Fired by</td><td>${firedByHand(r)}
+                 <span class="meta">you, from the Debug tab — not a client</span>${
+                   r.replay_of != null
+                     ? ` <button id="rq-orig" class="ghost">Fired again from #${r.replay_of}</button>`
+                     : ""
+                 }</td></tr>`
+            : ""
+        }
         <tr><td class="meta">Decision</td><td>${pill(r.decision)}</td></tr>
         <tr><td class="meta">Went to</td><td>${esc(r.action_type ?? "—")}${
           r.upstream ? ` → <code>${esc(r.upstream)}</code>` : ""
@@ -1390,10 +1467,19 @@ async function showRequest(id: number): Promise<void> {
 
       <div class="row modal-foot">
         <button id="rq-copy" class="ghost">Copy as JSON</button>
+        ${canRunAgain(r) ? `<button id="rq-again">Run again…</button>` : ""}
         <button id="rq-done" class="primary">Done</button>
       </div>`,
     () => {
       $("#rq-done")?.addEventListener("click", () => endStep());
+      $("#rq-again")?.addEventListener("click", () => {
+        endStep();
+        void runAgain(r.id);
+      });
+      $("#rq-orig")?.addEventListener("click", () => {
+        nextRequest = r.replay_of;
+        endStep();
+      });
       // The whole row, because what gets pasted into a bug report is never only the half you
       // happened to have selected.
       $("#rq-copy")?.addEventListener("click", (e) =>
@@ -1401,6 +1487,353 @@ async function showRequest(id: number): Promise<void> {
       );
     },
   );
+  if (nextRequest != null) {
+    const next = nextRequest;
+    nextRequest = null;
+    await showRequest(next);
+  }
+}
+
+// ---- Debug -----------------------------------------------------------------
+// Fire any tool by hand and see exactly what came back.
+//
+// Not a second way in. The core runs a fire through the same path a client's call takes —
+// policy, Approvals, rate limits, idempotency keys and the action's own guards — over the
+// window's own IPC, with no listener of its own. A tool not marked read-only waits in Approvals
+// every time it is fired from here, whatever any rule says; its card shows on this screen as
+// well as on Home, because this is where the person who pressed Fire is looking.
+
+interface Fired {
+  log_id: number | null;
+  decision: string;
+  duration_ms: number;
+  ok: boolean;
+  response: unknown;
+  error: string | null;
+  code: string | null;
+}
+
+/// What the form holds. Kept here rather than read back off the DOM, so a repaint puts it back.
+let debugDraft: {
+  tool: string;
+  args: string;
+  /// The logged request "Run again" filled this from.
+  replayOf: number | null;
+  /// What the log could not give back: arguments it cut short or redacted.
+  notes: string[];
+} = { tool: "", args: "{}", replayOf: null, notes: [] };
+
+/// The arguments the form last filled in by itself, so changing tool can tell whether the
+/// reader has typed anything that a fresh template would throw away.
+let debugTemplate = "{}";
+let debugArgsError: string | null = null;
+let debugFiring = false;
+let debugResult: {
+  tool: string;
+  replayOf: number | null;
+  fired: Fired | null;
+  /// The fire never reached the tool — the gateway is paused, say.
+  error: string | null;
+} | null = null;
+/// Put the keyboard in the arguments once the screen has painted. Set by "Run again", which
+/// arrives here to have them checked.
+let debugFocusArgs = false;
+
+/// A blank value for each required argument, of the type the schema asks for. Optional ones
+/// are left out: an empty string is still a value, and a tool may treat it as one.
+function argsTemplate(t: ToolInfo | undefined): string {
+  const props = t?.schema?.properties ?? {};
+  const blank: Record<string, unknown> = {};
+  for (const name of t?.schema?.required ?? []) {
+    const kind = props[name]?.type;
+    blank[name] =
+      kind === "number" || kind === "integer"
+        ? 0
+        : kind === "boolean"
+          ? false
+          : kind === "array"
+            ? []
+            : kind === "object"
+              ? {}
+              : "";
+  }
+  return JSON.stringify(blank, null, 2);
+}
+
+/// The arguments a tool takes, as a reference beside the box they are typed into.
+function argumentsReference(t: ToolInfo | undefined): string {
+  const props = Object.entries(t?.schema?.properties ?? {});
+  if (!t) return "";
+  if (props.length === 0) return `<div class="meta">Takes no arguments. Fire it with <code>{}</code>.</div>`;
+  const required = new Set(t.schema?.required ?? []);
+  return `<table class="kv"><tbody>${props
+    .map(
+      ([name, p]) => `<tr>
+        <td><code>${esc(name)}</code></td>
+        <td class="meta">${esc(p.type ?? "any")} · ${required.has(name) ? "required" : "optional"}${
+          p.description ? ` — ${esc(p.description)}` : ""
+        }</td>
+      </tr>`,
+    )
+    .join("")}</tbody></table>`;
+}
+
+function debugFormHtml(snap: Snapshot, tools: ToolInfo[], held: boolean): string {
+  const t = tools.find((x) => x.name === debugDraft.tool);
+  const missing = debugDraft.tool && !t;
+  const options =
+    tools
+      .map(
+        (x) =>
+          `<option value="${esc(x.name)}"${x.name === debugDraft.tool ? " selected" : ""}>${esc(x.name)}</option>`,
+      )
+      .join("") +
+    (missing
+      ? `<option value="${esc(debugDraft.tool)}" selected>${esc(debugDraft.tool)} (not on this gateway)</option>`
+      : "");
+  const replay =
+    debugDraft.replayOf == null
+      ? ""
+      : `<div class="notice${debugDraft.notes.length ? " warn" : ""}">
+           <strong>Filled from request #${debugDraft.replayOf}, which failed.</strong>
+           ${debugDraft.notes.map((n) => `<div class="meta">${esc(n)}</div>`).join("")}
+           <div class="meta">Check the arguments, then fire. The new call is logged as fired by you, and linked to #${debugDraft.replayOf}.</div>
+         </div>`;
+  const label = debugFiring ? (held ? "Waiting for your answer…" : "Firing…") : "Fire";
+  return `<div class="card">
+    <h3>Fire a tool</h3>
+    <div class="meta">
+      It takes the same path as a client's call: policy, Approvals, rate limits and the tool's own
+      checks. The call is logged, and marked as fired by you.
+    </div>
+    ${replay}
+    <table class="kv"><tbody>
+      <tr>
+        <td class="meta"><label for="dbg-tool">Tool</label></td>
+        <td><select id="dbg-tool">${options}</select>
+          ${t?.description ? `<div class="meta">${esc(t.description)}</div>` : ""}</td>
+      </tr>
+      <tr>
+        <td class="meta">When you fire it</td>
+        <td>${
+          !t
+            ? `<span class="meta">This tool is not on this gateway any more, so the call will fail.</span>`
+            : t.read_only
+              ? `<span class="pill">read-only</span> <span class="meta">Runs at once.</span>`
+              : `<span class="pill">writes</span> <span class="meta">Waits in Approvals every time, whatever the rules say. If it only reads, mark it <code>read_only = true</code> in the config file.</span>`
+        }</td>
+      </tr>
+    </tbody></table>
+
+    <h4><label for="dbg-args">Arguments</label></h4>
+    <div class="field${debugArgsError ? " invalid" : ""}">
+      <textarea id="dbg-args" class="script-edit-area debug-args" spellcheck="false"${
+        debugArgsError ? ` aria-invalid="true" aria-describedby="dbg-args-error"` : ""
+      }>${esc(debugDraft.args)}</textarea>
+      ${debugArgsError ? `<div class="error" id="dbg-args-error" role="alert">${esc(debugArgsError)}</div>` : ""}
+    </div>
+    ${argumentsReference(t)}
+
+    <div class="row">
+      <button id="dbg-fire" class="primary"${debugFiring || !snap.running ? " disabled" : ""}>${label}</button>
+      ${snap.running ? "" : `<span class="meta">The gateway is paused. Resume it to fire a tool.</span>`}
+    </div>
+  </div>`;
+}
+
+function debugResultHtml(): string {
+  const r = debugResult;
+  if (!r) return "";
+  if (!r.fired) {
+    return `<div class="notice error" role="alert">
+      <strong>The call was not made.</strong>
+      <div class="meta">${esc(r.error)}</div>
+    </div>`;
+  }
+  const f = r.fired;
+  return `<div class="card">
+    <h3>Result</h3>
+    <table class="kv"><tbody>
+      <tr><td class="meta">Tool</td><td><code>${esc(r.tool)}</code></td></tr>
+      <tr><td class="meta">Decision</td><td>${pill(f.decision)}</td></tr>
+      <tr><td class="meta">Outcome</td><td>${pill(f.ok ? "ok" : "error")}${
+        f.code ? ` <code>${esc(f.code)}</code>` : ""
+      } <span class="meta">in ${f.duration_ms}ms</span></td></tr>
+      <tr><td class="meta">Logged as</td><td>${
+        f.log_id != null
+          ? `<button id="dbg-open" class="ghost" data-id="${f.log_id}">Request #${f.log_id}</button>`
+          : `<span class="meta">The log could not be written.</span>`
+      }${r.replayOf != null ? ` <span class="meta">fired again from #${r.replayOf}</span>` : ""}</td></tr>
+    </tbody></table>
+    ${f.error ? `<div class="notice error" role="alert"><strong>${esc(f.error)}</strong></div>` : ""}
+    ${
+      f.ok
+        ? `<h4>Response</h4>
+           <div class="meta">Whole, as the tool returned it. The log keeps a redacted, shortened copy.</div>
+           ${payloadHtml(JSON.stringify(f.response, null, 2))}`
+        : ""
+    }
+  </div>`;
+}
+
+/// The reader is typing arguments, and a repaint would throw the cursor away.
+function debugIsBeingEdited(): boolean {
+  const el = document.activeElement;
+  const form = document.querySelector("#debug-form");
+  return !!form && el instanceof HTMLElement && form.contains(el) && isTyping(el);
+}
+
+async function renderDebug(snap: Snapshot): Promise<void> {
+  const tools = [...snap.tools].sort((a, b) => a.name.localeCompare(b.name));
+  if (tools.length === 0 && !debugDraft.tool) {
+    // Two of the three parts and the one action: there is nothing to fire until a tool exists,
+    // and the place that makes one is Downstream.
+    if (paint(
+      $("#debug"),
+      `<div class="empty">
+         <h4>No tools to fire.</h4>
+         <p>This gateway exposes no tools yet. Add a downstream and choose what it exposes.</p>
+         <div class="row"><button class="primary" id="dbg-add">Go to Downstream</button></div>
+       </div>`,
+    )) {
+      $("#dbg-add")?.addEventListener("click", () => void show("actions"));
+    }
+    return;
+  }
+  if (!debugDraft.tool) {
+    debugDraft.tool = tools[0].name;
+    debugTemplate = debugDraft.args = argsTemplate(tools[0]);
+  }
+  const held = (await invoke<Pending[]>("pending")).filter((p) => p.origin === "debug");
+
+  paint(
+    $("#debug"),
+    `<div id="debug-form"></div><div id="debug-held"></div><div id="debug-result"></div>`,
+  );
+  if (!debugIsBeingEdited() && paint($("#debug-form"), debugFormHtml(snap, tools, held.length > 0))) {
+    wireDebugForm(snap);
+  }
+  if (paint($("#debug-held"), held.map(approvalCard).join(""))) wireApprovals("#debug-held");
+  if (paint($("#debug-result"), debugResultHtml())) {
+    $("#dbg-open")?.addEventListener("click", (e) =>
+      void showRequest(Number((e.currentTarget as HTMLElement).dataset.id)),
+    );
+  }
+  if (debugFocusArgs) {
+    debugFocusArgs = false;
+    const area = document.querySelector<HTMLTextAreaElement>("#dbg-args");
+    if (area) {
+      area.focus({ preventScroll: true });
+      area.scrollIntoView({ block: "nearest", behavior: scrollBehaviour() });
+    }
+  }
+}
+
+function wireDebugForm(snap: Snapshot): void {
+  const select = $<HTMLSelectElement>("#dbg-tool");
+  select?.addEventListener("change", async () => {
+    const name = select.value;
+    // A template replacing what somebody typed is their work gone, so ask first.
+    const typed = debugDraft.args.trim() !== debugTemplate.trim();
+    if (typed && !(await ask(`Replace the arguments you typed with a blank set for ${name}?`))) {
+      select.value = debugDraft.tool;
+      return;
+    }
+    debugTemplate = argsTemplate(snap.tools.find((t) => t.name === name));
+    // A different tool is not a replay of the call it was filled from any more.
+    debugDraft = { tool: name, args: debugTemplate, replayOf: null, notes: [] };
+    debugArgsError = null;
+    await refresh();
+    $<HTMLSelectElement>("#dbg-tool")?.focus();
+  });
+  $<HTMLTextAreaElement>("#dbg-args")?.addEventListener("input", (e) => {
+    debugDraft.args = (e.target as HTMLTextAreaElement).value;
+  });
+  $<HTMLButtonElement>("#dbg-fire")?.addEventListener("click", () => void fireDebug());
+}
+
+async function fireDebug(): Promise<void> {
+  let args: unknown;
+  try {
+    args = JSON.parse(debugDraft.args);
+  } catch (e) {
+    args = undefined;
+    debugArgsError = `These arguments are not valid JSON (${String(e).replace(/^SyntaxError: /, "")}). Write an object, like {"path": "Notes/a.md"}, or {} for none.`;
+  }
+  if (args !== undefined && (args === null || typeof args !== "object" || Array.isArray(args))) {
+    debugArgsError = `Arguments are an object, like {"path": "Notes/a.md"}, or {} for none.`;
+    args = undefined;
+  }
+  if (args === undefined) {
+    await refresh();
+    document.querySelector<HTMLTextAreaElement>("#dbg-args")?.focus();
+    return;
+  }
+  if (
+    debugDraft.args.includes("«redacted»") &&
+    !(await ask(
+      "The arguments still contain «redacted», which the log wrote in place of a secret. The tool will receive that text as the value. Fire anyway?",
+    ))
+  ) {
+    return;
+  }
+  debugArgsError = null;
+  debugFiring = true;
+  debugResult = null;
+  const tool = debugDraft.tool;
+  const replayOf = debugDraft.replayOf;
+  await refresh();
+  try {
+    const fired = await invoke<Fired>("fire_tool", { tool, arguments: args, replayOf });
+    debugResult = { tool, replayOf, fired, error: null };
+  } catch (e) {
+    debugResult = { tool, replayOf, fired: null, error: String(e) };
+  } finally {
+    debugFiring = false;
+  }
+  await refresh();
+  // The answer is what the reader pressed Fire for, so take them to it.
+  document
+    .querySelector("#debug-result > *")
+    ?.scrollIntoView({ block: "nearest", behavior: scrollBehaviour() });
+}
+
+/// "Run again" on a failed call: the Debug tab, filled in from the log.
+///
+/// Filled in rather than fired straight away, because the log is not a recording. It keeps the
+/// first 4 KB of the arguments with secret-looking values replaced, so what it holds is not
+/// always what was sent — and a write fired from a guess would be worse than no button.
+async function runAgain(id: number): Promise<void> {
+  let r: RequestLog | null;
+  try {
+    r = await invoke<RequestLog | null>("request_detail", { id });
+  } catch (e) {
+    void say(String(e));
+    return;
+  }
+  if (!r?.tool) return;
+  const notes: string[] = [];
+  let args = r.args_json ?? "{}";
+  try {
+    args = JSON.stringify(JSON.parse(args), null, 2);
+  } catch {
+    notes.push(
+      "The log keeps only the first 4 KB of a call's arguments, and these were cut short. Complete them before you fire.",
+    );
+  }
+  if (args.includes("«redacted»")) {
+    notes.push(
+      "The log hides secret-looking values as «redacted». Put the real values back before you fire.",
+    );
+  }
+  debugDraft = { tool: r.tool, args, replayOf: r.id, notes };
+  debugTemplate = args;
+  debugArgsError = null;
+  debugResult = null;
+  debugFocusArgs = true;
+  const form = document.querySelector("#debug-form");
+  if (form) forgetPainted(form);
+  await show("debug");
 }
 
 // ---- Downstream ------------------------------------------------------------
@@ -4900,6 +5333,7 @@ async function refresh(): Promise<void> {
       else if (screen === "log") await renderLog();
       else if (screen === "actions") await renderActions(snap);
       else if (screen === "network") await renderNetwork();
+      else if (screen === "debug") await renderDebug(snap);
       tickTimes();
       applyPendingFocus();
       applyPendingReveal();

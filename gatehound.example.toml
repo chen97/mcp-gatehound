@@ -165,10 +165,14 @@ type = "integer"
 description = "How many to return. Defaults to the tracker's own page size."
 required = false
 
+# `read_only = true` says the tool only reads. It changes one thing: firing it by hand from the
+# app's Debug tab runs at once. A tool not marked is taken to write, and waits in Approvals every
+# time it is fired from there — whatever the rules say. A client's calls are unaffected.
 [[tool]]
 name = "get_issue"
 description = "Read one issue by id."
 action = { type = "proxy", upstream = "tracker", op = "get_issue" }
+read_only = true
 
 [[tool.argument]]
 name = "id"

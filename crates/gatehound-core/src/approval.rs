@@ -114,10 +114,31 @@ impl ApprovalQueue {
 
     /// Park the caller until someone decides, or the timeout expires.
     pub async fn hold(&self, identity: &str, tool: &str, args_preview: &str) -> Outcome {
+        self.hold_from(identity, tool, args_preview, None).await
+    }
+
+    /// Park a call that did not come from a client — `origin` says where it came from, and the
+    /// card says so too.
+    ///
+    /// Such a hold never writes a rule. "Always allow" on a call the operator fired by hand from
+    /// the Debug tab would grant the owner a standing permission nobody asked for, and the next
+    /// fire would skip the queue on the strength of an answer given to a different call. So the
+    /// "always" answers are taken as their one-off forms: allowed this once, or refused this once.
+    pub async fn hold_from(
+        &self,
+        identity: &str,
+        tool: &str,
+        args_preview: &str,
+        origin: Option<&str>,
+    ) -> Outcome {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
+        let remember = origin.is_none();
 
-        if let Err(e) = self.store.add_pending(&id, identity, tool, args_preview) {
+        if let Err(e) = self
+            .store
+            .add_pending(&id, identity, tool, args_preview, origin)
+        {
             tracing::error!(error = %e, "could not record pending approval; denying");
             return Outcome::Denied;
         }
@@ -129,12 +150,13 @@ impl ApprovalQueue {
             identity: identity.to_string(),
             tool: tool.to_string(),
             args_preview: Some(args_preview.to_string()),
+            origin: origin.map(str::to_string),
         };
         self.events.emit(GatewayEvent::PendingAdded(row));
 
         let outcome = match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(resolution)) => {
-                if let Some(decision) = resolution.persisted() {
+                if let Some(decision) = resolution.persisted().filter(|_| remember) {
                     if let Err(e) = self.store.set_decision(identity, tool, decision) {
                         tracing::error!(error = %e, "could not persist approval decision");
                     }
@@ -283,6 +305,41 @@ mod tests {
         wait_for_pending(&q).await;
         q.cancel_all();
         assert_eq!(held.await.unwrap(), Outcome::ShuttingDown);
+    }
+
+    #[tokio::test]
+    async fn an_always_answer_on_a_hand_fired_call_writes_no_rule() {
+        // A call fired from the Debug tab is answered for that call only. Persisting "always"
+        // would let the next fire skip the queue on an answer given to a different call.
+        let q = queue(30);
+        let q2 = q.clone();
+        let held = tokio::spawn(async move {
+            q2.hold_from("bearer", "brain_create", "{}", Some("debug"))
+                .await
+        });
+        let id = wait_for_pending(&q).await;
+        assert_eq!(q.list().unwrap()[0].origin.as_deref(), Some("debug"));
+        q.resolve(&id, Resolution::AllowAlways).unwrap();
+        assert_eq!(held.await.unwrap(), Outcome::Allowed);
+        assert!(q
+            .store
+            .decision_for("bearer", "brain_create")
+            .unwrap()
+            .is_none());
+
+        let q2 = q.clone();
+        let held = tokio::spawn(async move {
+            q2.hold_from("bearer", "brain_create", "{}", Some("debug"))
+                .await
+        });
+        let id = wait_for_pending(&q).await;
+        q.resolve(&id, Resolution::RejectAlways).unwrap();
+        assert_eq!(held.await.unwrap(), Outcome::Denied);
+        assert!(q
+            .store
+            .decision_for("bearer", "brain_create")
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

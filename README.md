@@ -511,8 +511,8 @@ WAL.
 
 The tray is the primary surface: green listening, grey paused, red an upstream is not
 answering, with a badge counting waiting approvals. "Pause gateway" stops only the listener
-and leaves the app open. The window has five screens — Home, Upstream, Downstream, Network,
-Live log — and holds no state of record; it reads everything from the core and re-reads whenever
+and leaves the app open. The window has six screens — Home, Upstream, Downstream, Network,
+Live log, Debug — and holds no state of record; it reads everything from the core and re-reads whenever
 the core pushes an event. **Home** is one picture of the gateway: callers on the left, the
 services it calls on the right, and a dot crossing a wire when a call actually crosses it.
 The motion is driven by logged requests and nothing else — an idle gateway is a still picture,
@@ -524,6 +524,31 @@ for access, "allow always" writes the rule on its row, and a credential shown ap
 permissions answers half a question. **Downstream** is what the gateway calls out to, each
 service's tools folded underneath it. **Network** is reachability, with a form to change it,
 because the alternative was telling an operator to find a TOML file.
+
+### Firing a tool by hand: Debug, and "Run again"
+
+**Debug** fires any tool in the catalog and shows what came back — the decision, the outcome,
+how long it took, and the whole response. A failed call in **Live log** carries a **Run again**
+button, which opens Debug with that tool and the logged arguments filled in. It fills in rather
+than fires, because the log is not a recording: it keeps the first 4 KB of the arguments with
+secret-looking values replaced by `«redacted»`, and the form says so when either happened.
+
+It is not a second way in. A fire reaches the core over the window's own IPC — there is no new
+listener and no new endpoint — and from there takes the path a client's call takes: policy, the
+approval queue, rate limits, idempotency keys and the action's own guards. Two rules are
+stricter than a client's:
+
+- **A tool not marked `read_only = true` waits in Approvals every time it is fired by hand**,
+  whatever the rules say. A standing allow covers a client's own calls; it does not cover the
+  operator re-running a write, and neither does an earlier approval. The card for such a call
+  offers only *Allow once* and *Reject*, and nothing about it is remembered. Unmarked means
+  "writes" because that is the reading that cannot go wrong.
+- A read-only tool fired by hand runs at once, unless the policy denies it to the owner.
+
+A fire runs as the owner (`auth.bearer_identity`) and is refused while the gateway is paused. Its
+log row carries `origin = debug` — shown as a **debug** mark wherever the call is listed — and,
+for "Run again", `replay_of` naming the call it repeats, so a call fired by hand is never read as
+one an agent made.
 
 ### The stack, in a picture
 
@@ -596,7 +621,8 @@ which of them was used), the method and tool, the policy decision, the action an
 it reached, the outcome, how long it took, and redacted, truncated copies of the arguments and
 response. For a tool marked idempotent it also records whether the call **acted or replayed**
 an earlier result (`replayed`), so the promise that repeating a key does not act twice is one
-you can check rather than take on trust.
+you can check rather than take on trust. A call fired from the Debug tab records `origin = debug`
+and, when it was fired again from a logged call, `replay_of`.
 
 Every change an operator makes records itself the same way, under `admin/<action>`:
 

@@ -34,7 +34,14 @@ CREATE TABLE IF NOT EXISTS requests (
   -- not idempotent, where the question does not arise. Without it a replay is indistinguishable
   -- from a fresh call in the log — which defeats the point of promising that repeating a key
   -- does not act twice, because nobody can check.
-  replayed INTEGER
+  replayed INTEGER,
+  -- Who fired the call when it was not a client: 'debug' for the window's Debug tab. NULL for
+  -- every call that came in over /mcp. Kept as a column rather than inferred from the identity,
+  -- because the operator's own identity is also the one the super token authenticates as, and a
+  -- call fired by hand must never be mistaken for one an agent made.
+  origin TEXT,
+  -- The logged request this one was fired again from, when it was.
+  replay_of INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
 CREATE INDEX IF NOT EXISTS idx_requests_identity_ts ON requests(identity, ts);
@@ -53,7 +60,8 @@ CREATE TABLE IF NOT EXISTS pending (
   ts TEXT NOT NULL,
   identity TEXT NOT NULL,
   tool TEXT NOT NULL,
-  args_preview TEXT
+  args_preview TEXT,
+  origin TEXT
 );
 
 -- Idempotent calls. Named `sends` because it was built for message sending, and renamed in
@@ -108,6 +116,10 @@ pub struct RequestLog {
     pub response_json: Option<String>,
     pub token_id: Option<String>,
     pub replayed: Option<bool>,
+    /// `debug` when the operator fired this from the window. `None` for a client's call.
+    pub origin: Option<String>,
+    /// The request this was fired again from.
+    pub replay_of: Option<i64>,
 }
 
 /// A row being written to the log. `id` is assigned by SQLite.
@@ -127,6 +139,10 @@ pub struct NewRequestLog {
     pub response_json: Option<String>,
     pub token_id: Option<String>,
     pub replayed: Option<bool>,
+    /// `debug` when the operator fired this from the window. `None` for a client's call.
+    pub origin: Option<String>,
+    /// The request this was fired again from.
+    pub replay_of: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +170,9 @@ pub struct PendingRow {
     pub identity: String,
     pub tool: String,
     pub args_preview: Option<String>,
+    /// `debug` when the held call was fired from the window rather than by a client.
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 /// One idempotency key and what it produced.
@@ -224,10 +243,30 @@ fn migrate(conn: &Connection) -> Result<()> {
     if !req.contains("replayed") {
         conn.execute_batch("ALTER TABLE requests ADD COLUMN replayed INTEGER")?;
     }
+    if !req.contains("origin") {
+        conn.execute_batch("ALTER TABLE requests ADD COLUMN origin TEXT")?;
+    }
+    if !req.contains("replay_of") {
+        conn.execute_batch("ALTER TABLE requests ADD COLUMN replay_of INTEGER")?;
+    }
+
+    // `pending` is emptied on every start, but an older file still has the older shape.
+    let mut pend = std::collections::HashSet::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(pending)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for r in rows {
+            pend.insert(r?);
+        }
+    }
+    // An empty set is a table that does not exist yet, which SCHEMA creates in the new shape.
+    if !pend.is_empty() && !pend.contains("origin") {
+        conn.execute_batch("ALTER TABLE pending ADD COLUMN origin TEXT")?;
+    }
     Ok(())
 }
 
-const REQ_COLS: &str = "id, ts, identity, client_name, method, tool, args_json, decision, action_type, upstream, status, error, duration_ms, response_json, token_id, replayed";
+const REQ_COLS: &str = "id, ts, identity, client_name, method, tool, args_json, decision, action_type, upstream, status, error, duration_ms, response_json, token_id, replayed, origin, replay_of";
 
 fn row_to_request(r: &Row<'_>) -> rusqlite::Result<RequestLog> {
     Ok(RequestLog {
@@ -247,6 +286,8 @@ fn row_to_request(r: &Row<'_>) -> rusqlite::Result<RequestLog> {
         response_json: r.get("response_json")?,
         token_id: r.get("token_id")?,
         replayed: r.get("replayed")?,
+        origin: r.get("origin")?,
+        replay_of: r.get("replay_of")?,
     })
 }
 
@@ -283,8 +324,8 @@ impl Store {
     pub fn log_request(&self, r: NewRequestLog) -> Result<i64> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO requests(ts, identity, client_name, method, tool, args_json, decision, action_type, upstream, status, error, duration_ms, response_json, token_id, replayed)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            "INSERT INTO requests(ts, identity, client_name, method, tool, args_json, decision, action_type, upstream, status, error, duration_ms, response_json, token_id, replayed, origin, replay_of)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![
                 now(),
                 r.identity,
@@ -300,7 +341,9 @@ impl Store {
                 r.duration_ms,
                 r.response_json,
                 r.token_id,
-                r.replayed
+                r.replayed,
+                r.origin,
+                r.replay_of
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -541,6 +584,8 @@ impl Store {
             response_json: Some(detail.to_string()),
             token_id: None,
             replayed: None,
+            origin: None,
+            replay_of: None,
         })
     }
 
@@ -684,11 +729,19 @@ impl Store {
 
     // ---- pending approvals ----------------------------------------------
 
-    pub fn add_pending(&self, id: &str, identity: &str, tool: &str, preview: &str) -> Result<()> {
+    pub fn add_pending(
+        &self,
+        id: &str,
+        identity: &str,
+        tool: &str,
+        preview: &str,
+        origin: Option<&str>,
+    ) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO pending(id, ts, identity, tool, args_preview) VALUES (?1,?2,?3,?4,?5)",
-            params![id, now(), identity, tool, preview],
+            "INSERT INTO pending(id, ts, identity, tool, args_preview, origin) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![id, now(), identity, tool, preview, origin],
         )?;
         Ok(())
     }
@@ -701,8 +754,9 @@ impl Store {
 
     pub fn list_pending(&self) -> Result<Vec<PendingRow>> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare("SELECT id, ts, identity, tool, args_preview FROM pending ORDER BY ts")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, identity, tool, args_preview, origin FROM pending ORDER BY ts",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok(PendingRow {
                 id: r.get(0)?,
@@ -710,6 +764,7 @@ impl Store {
                 identity: r.get(2)?,
                 tool: r.get(3)?,
                 args_preview: r.get(4)?,
+                origin: r.get(5)?,
             })
         })?;
         let mut out = Vec::new();
@@ -996,13 +1051,19 @@ mod tests {
                response_json TEXT);
              CREATE TABLE sends (
                idempotency_key TEXT PRIMARY KEY, chat_id TEXT NOT NULL, text_hash TEXT NOT NULL,
-               message_id TEXT, ts TEXT NOT NULL, completed_at TEXT, response_json TEXT);",
+               message_id TEXT, ts TEXT NOT NULL, completed_at TEXT, response_json TEXT);
+             CREATE TABLE pending (
+               id TEXT PRIMARY KEY, ts TEXT NOT NULL, identity TEXT NOT NULL,
+               tool TEXT NOT NULL, args_preview TEXT);",
         )
         .unwrap();
 
         migrate(&conn).unwrap();
         assert!(columns(&conn, "requests").contains("token_id"));
         assert!(columns(&conn, "requests").contains("replayed"));
+        assert!(columns(&conn, "requests").contains("origin"));
+        assert!(columns(&conn, "requests").contains("replay_of"));
+        assert!(columns(&conn, "pending").contains("origin"));
         assert!(columns(&conn, "sends").contains("tool"));
 
         // And again on the migrated database, because it runs on every open.
@@ -1065,13 +1126,23 @@ mod tests {
     #[test]
     fn pending_rows_round_trip_and_clear() {
         let s = Store::open_memory().unwrap();
-        s.add_pending("p1", "stranger", "send_message", "{\"chat_id\":\"c\"}")
-            .unwrap();
+        s.add_pending(
+            "p1",
+            "stranger",
+            "send_message",
+            "{\"chat_id\":\"c\"}",
+            None,
+        )
+        .unwrap();
         assert_eq!(s.list_pending().unwrap().len(), 1);
         s.remove_pending("p1").unwrap();
         assert!(s.list_pending().unwrap().is_empty());
 
-        s.add_pending("p2", "x", "y", "z").unwrap();
+        s.add_pending("p2", "x", "y", "z", Some("debug")).unwrap();
+        assert_eq!(
+            s.list_pending().unwrap()[0].origin.as_deref(),
+            Some("debug")
+        );
         assert_eq!(s.clear_pending().unwrap(), 1);
     }
 
