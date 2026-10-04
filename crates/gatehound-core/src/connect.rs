@@ -206,6 +206,7 @@ impl NewConnection {
                 action,
                 rate_limit: None,
                 idempotent: false,
+                read_only: false,
             });
         }
 

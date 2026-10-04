@@ -1315,6 +1315,7 @@ action = { type = "script", script = "absent", args = [] }
             },
             rate_limit: None,
             idempotent: false,
+            read_only: false,
         });
         cfg.tools.push(ToolConfig {
             name: "search".into(),
@@ -1327,6 +1328,7 @@ action = { type = "script", script = "absent", args = [] }
             },
             rate_limit: None,
             idempotent: false,
+            read_only: false,
         });
         cfg.identities.push(IdentitySeed {
             identity: "laptop".into(),
@@ -1483,6 +1485,7 @@ action = { type = "exec", cmd = 'definitely-not-a-real-binary-xyz', args = ["que
             }),
             rate_limit: None,
             idempotent: false,
+            read_only: false,
         });
         let clashing: Pack = toml::from_str(
             r#"

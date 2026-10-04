@@ -992,6 +992,9 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
   outline: none;
   border-color: var(--ac);
 }
+/* The Debug tab's arguments: a JSON object of a few fields, not a program, so it starts shorter
+   and still grows by hand. */
+.script-edit-area.debug-args { min-height: 160px; }
 
 /* ---- The tick box -------------------------------------------------------------------
    Consent is a decision, so the box is a target you can hit, not a 13px tick beside a wall of

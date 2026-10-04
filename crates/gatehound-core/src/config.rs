@@ -250,6 +250,12 @@ pub struct ToolConfig {
     /// Requires an idempotency key; repeats return the first result instead of acting again.
     #[serde(default)]
     pub idempotent: bool,
+    /// The tool only reads. Firing it from the window's Debug tab then runs at once; a tool
+    /// not marked is taken to write, and waits in Approvals every time it is fired from there.
+    /// Unmarked means "writes" because that is the reading that cannot go wrong: a read held
+    /// for a click costs a click, a write let through costs whatever it wrote.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 impl ToolConfig {
@@ -1237,6 +1243,7 @@ mod tests {
                 }),
                 rate_limit: None,
                 idempotent: false,
+                read_only: false,
             }],
             ..Default::default()
         };
@@ -1307,6 +1314,7 @@ mod tests {
                 }),
                 rate_limit: None,
                 idempotent: false,
+                read_only: false,
             }],
             ..Default::default()
         };
@@ -1342,6 +1350,7 @@ mod tests {
                 }),
                 rate_limit: None,
                 idempotent: false,
+                read_only: false,
             }],
             ..Default::default()
         };
@@ -1450,6 +1459,7 @@ decision = "allow"
             },
             rate_limit: None,
             idempotent: false,
+            read_only: false,
         });
         assert!(cfg.validate().is_err(), "unknown upstream");
 
@@ -1572,6 +1582,7 @@ decision = "allow"
             }),
             rate_limit: None,
             idempotent: false,
+            read_only: false,
         }
     }
 

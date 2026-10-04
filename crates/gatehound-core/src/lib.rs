@@ -273,16 +273,57 @@ impl Gateway {
         })
     }
 
-    /// Write a log row and push it to any attached shell. Logging must never fail a request.
-    pub fn log(&self, entry: NewRequestLog) {
+    /// Write a log row and push it to any attached shell. Logging must never fail a request,
+    /// so a failure is reported and swallowed; the row's id comes back when there is one.
+    pub fn log(&self, entry: NewRequestLog) -> Option<i64> {
         match self.store.log_request(entry) {
             Ok(id) => {
                 if let Ok(Some(row)) = self.store.get_request(id) {
                     self.events.emit(GatewayEvent::RequestLogged(Box::new(row)));
                 }
+                Some(id)
             }
-            Err(e) => tracing::error!(error = %e, "could not write the audit log"),
+            Err(e) => {
+                tracing::error!(error = %e, "could not write the audit log");
+                None
+            }
         }
+    }
+
+    /// Fire a tool from the window, as the owner — the Debug tab, and "Run again" on a logged
+    /// call, which is the same thing pre-filled.
+    ///
+    /// There is no listener on this path and no new one: the window reaches it over the shell's
+    /// own IPC, and from there it takes exactly the path a client's call takes through
+    /// [`mcp::run_call`] — policy, the approval queue, rate limits, idempotency and the action's
+    /// own guards. A tool not marked `read_only` waits in Approvals every time; see `run_call`.
+    ///
+    /// `replay_of` names the logged request this was fired again from. It must exist: a link to
+    /// nothing would be an audit trail that points nowhere.
+    pub async fn fire(
+        self: &Arc<Self>,
+        tool: &str,
+        args: serde_json::Value,
+        replay_of: Option<i64>,
+    ) -> Result<mcp::CallOutcome> {
+        if !args.is_object() {
+            anyhow::bail!("arguments must be a JSON object, like {{\"path\": \"Notes/a.md\"}}");
+        }
+        if let Some(id) = replay_of {
+            if self.store.get_request(id)?.is_none() {
+                anyhow::bail!("request #{id} is not in the log any more");
+            }
+        }
+        let owner = self.cfg.auth.bearer_identity.clone();
+        Ok(mcp::run_call(
+            self,
+            &owner,
+            None,
+            tool,
+            args,
+            mcp::Origin::Debug { replay_of },
+        )
+        .await)
     }
 
     // ---- the API a shell drives ------------------------------------------
@@ -372,6 +413,10 @@ impl Gateway {
                     "command": command,
                     "rate_limit": t.rate_limit,
                     "idempotent": t.idempotent,
+                    // What the Debug tab needs to fire it: the arguments it takes, and whether
+                    // a fire runs at once or waits in Approvals.
+                    "schema": t.schema(),
+                    "read_only": t.read_only,
                 })
             })
             .collect()

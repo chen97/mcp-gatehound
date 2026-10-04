@@ -76,6 +76,7 @@ fn echo_tool() -> ToolConfig {
         }),
         rate_limit: None,
         idempotent: false,
+        read_only: false,
     }
 }
 
@@ -97,6 +98,7 @@ fn secret_tool() -> ToolConfig {
         }),
         rate_limit: None,
         idempotent: false,
+        read_only: false,
     }
 }
 
@@ -119,6 +121,7 @@ fn once_tool() -> ToolConfig {
         }),
         rate_limit: None,
         idempotent: true,
+        read_only: false,
     }
 }
 
@@ -127,8 +130,17 @@ async fn start(identities: Vec<IdentitySeed>) -> Harness {
 }
 
 async fn start_with(tools: Vec<ToolConfig>, identities: Vec<IdentitySeed>) -> Harness {
+    start_tuned(tools, identities, |_| {}).await
+}
+
+/// `start_with`, with a last word on the config before the gateway is built.
+async fn start_tuned(
+    tools: Vec<ToolConfig>,
+    identities: Vec<IdentitySeed>,
+    tune: impl FnOnce(&mut Config),
+) -> Harness {
     let dir = tempdir::TempDir::new();
-    let cfg = Config {
+    let mut cfg = Config {
         listen_addr: "127.0.0.1:0".into(),
         approval_timeout_secs: 5,
         auth: AuthConfig {
@@ -140,6 +152,7 @@ async fn start_with(tools: Vec<ToolConfig>, identities: Vec<IdentitySeed>) -> Ha
         identities,
         ..Default::default()
     };
+    tune(&mut cfg);
     let gateway = Gateway::build(cfg, Some(dir.path().join("gatehound.db"))).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -903,6 +916,238 @@ async fn wait_for_pending(h: &Harness) -> String {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("no approval was queued");
+}
+
+// ---- firing a tool by hand, from the Debug tab ---------------------------------
+
+/// `echo`, declared read-only.
+fn read_tool() -> ToolConfig {
+    ToolConfig {
+        name: "peek".into(),
+        read_only: true,
+        ..echo_tool()
+    }
+}
+
+#[tokio::test]
+async fn a_read_only_tool_fired_by_hand_runs_at_once_and_is_marked() {
+    // No rules at all: a client's call to this would be held. The operator firing a read
+    // is not asked whether they meant to.
+    let h = start_with(vec![echo_tool(), read_tool()], vec![]).await;
+    let out = h
+        .gateway
+        .fire("peek", json!({ "word": "now" }), None)
+        .await
+        .unwrap();
+    assert_eq!(out.decision, "read-only");
+    assert_eq!(out.result.unwrap()["stdout"], "now");
+    assert!(h.gateway.pending().unwrap().is_empty());
+
+    let row = h
+        .gateway
+        .store
+        .get_request(out.log_id.unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.origin.as_deref(),
+        Some("debug"),
+        "never read as an agent's call"
+    );
+    assert_eq!(row.identity.as_deref(), Some("bearer"));
+    assert_eq!(row.status.as_deref(), Some("ok"));
+}
+
+#[tokio::test]
+async fn a_write_fired_by_hand_waits_even_when_the_policy_allows_it() {
+    // The owner may call everything. That rule was for a client's own calls; a write fired
+    // again by hand still waits for a fresh answer.
+    let h = start(allow_all("bearer")).await;
+    let gw = h.gateway.clone();
+    let fired = tokio::spawn(async move { gw.fire("echo", json!({ "word": "w" }), None).await });
+
+    let id = wait_for_pending(&h).await;
+    let held = h.gateway.pending().unwrap();
+    assert_eq!(held[0].origin.as_deref(), Some("debug"));
+    h.gateway
+        .resolve_approval(&id, Resolution::AllowAlways)
+        .unwrap();
+
+    let out = fired.await.unwrap().unwrap();
+    assert_eq!(out.decision, "ask→allowed");
+    assert_eq!(out.result.unwrap()["stdout"], "w");
+
+    // "Always" on a hand-fired call wrote nothing, so the next fire waits again.
+    let gw = h.gateway.clone();
+    let fired = tokio::spawn(async move { gw.fire("echo", json!({ "word": "w" }), None).await });
+    let id = wait_for_pending(&h).await;
+    h.gateway.resolve_approval(&id, Resolution::Reject).unwrap();
+    let out = fired.await.unwrap().unwrap();
+    assert_eq!(out.result.unwrap_err().code, "approval_denied");
+
+    // And a client's own call is untouched by any of it: still allowed, still unmarked.
+    let v = h.call("echo", json!({ "word": "client" })).await;
+    assert_eq!(v["result"]["structuredContent"]["stdout"], "client");
+    let latest = &h.gateway.recent_requests(1).unwrap()[0];
+    assert_eq!(latest.origin, None);
+}
+
+#[tokio::test]
+async fn a_replay_links_to_the_call_it_repeats() {
+    let h = start_with(vec![echo_tool(), read_tool()], allow_all("bearer")).await;
+    // Fail one first: `peek` with no word cannot fill its placeholder.
+    let v = h.call("peek", json!({})).await;
+    assert_eq!(v["result"]["isError"], true);
+    let original = h.gateway.recent_requests(1).unwrap()[0].id;
+
+    let out = h
+        .gateway
+        .fire("peek", json!({ "word": "fixed" }), Some(original))
+        .await
+        .unwrap();
+    assert!(out.result.is_ok());
+    let row = h
+        .gateway
+        .store
+        .get_request(out.log_id.unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.replay_of, Some(original));
+    assert_eq!(row.origin.as_deref(), Some("debug"));
+
+    // A link to nothing is refused rather than written.
+    assert!(h
+        .gateway
+        .fire("peek", json!({ "word": "x" }), Some(original + 1000))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn a_fire_meets_the_same_deny_and_unknown_tool_as_a_client() {
+    let h = start_with(
+        vec![echo_tool(), read_tool()],
+        vec![IdentitySeed {
+            identity: "bearer".into(),
+            tool: "peek".into(),
+            decision: Decision::Deny,
+        }],
+    )
+    .await;
+    let out = h
+        .gateway
+        .fire("peek", json!({ "word": "x" }), None)
+        .await
+        .unwrap();
+    assert_eq!(out.result.unwrap_err().code, "not_permitted");
+    assert!(
+        h.gateway.pending().unwrap().is_empty(),
+        "a deny is not a question"
+    );
+
+    let out = h.gateway.fire("nope", json!({}), None).await.unwrap();
+    assert_eq!(out.result.unwrap_err().code, "unknown_tool");
+
+    assert!(
+        h.gateway.fire("peek", json!(["x"]), None).await.is_err(),
+        "arguments are an object"
+    );
+}
+
+/// `read_only` only changes a hand fire. An agent's `tools/call` over HTTP gets the same
+/// decision, the same result and the same `tools/list` with the flag on as with it off, under
+/// every kind of rule: none (held), allow and deny.
+#[tokio::test]
+async fn read_only_changes_nothing_for_an_agents_call() {
+    let rule = |decision| {
+        vec![IdentitySeed {
+            identity: "bearer".into(),
+            tool: "peek".into(),
+            decision,
+        }]
+    };
+    for rules in [vec![], rule(Decision::Allow), rule(Decision::Deny)] {
+        let mut seen = Vec::new();
+        for flag in [false, true] {
+            let peek = ToolConfig {
+                read_only: flag,
+                ..read_tool()
+            };
+            let h = start_with(vec![peek], rules.clone()).await;
+            let listed = h.rpc("tools/list", json!({})).await["result"].clone();
+
+            // With no rule the call is held: a read-only tool is held just the same, and is
+            // answered here so the call can finish.
+            let call = {
+                let base = h.base.clone();
+                tokio::spawn(async move {
+                    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": { "name": "peek", "arguments": { "word": "x" } } });
+                    reqwest::Client::new()
+                        .post(format!("{base}/mcp"))
+                        .bearer_auth(TOKEN)
+                        .header("content-type", "application/json")
+                        .body(body.to_string())
+                        .send()
+                        .await
+                        .unwrap()
+                        .json::<Value>()
+                        .await
+                        .unwrap()
+                })
+            };
+            let held = if rules.is_empty() {
+                let id = wait_for_pending(&h).await;
+                h.gateway.resolve_approval(&id, Resolution::Reject).unwrap();
+                true
+            } else {
+                false
+            };
+            let reply = call.await.unwrap();
+            let row = h.gateway.recent_requests(1).unwrap()[0].clone();
+            seen.push((
+                listed,
+                held,
+                reply["result"].clone(),
+                row.decision,
+                row.status,
+                row.origin,
+            ));
+        }
+        assert_eq!(
+            seen[0], seen[1],
+            "rules {rules:?}: read_only changed an agent's call"
+        );
+    }
+}
+
+/// A hand fire runs the same action an agent's call does, so the gateway's call deadline
+/// (CHE-212) stops it too: a slow tool fired from Debug comes back as the deadline error,
+/// not after the tool's own, longer timeout.
+#[tokio::test]
+async fn a_fire_obeys_the_gateway_call_deadline() {
+    let mut slow = read_tool();
+    slow.name = "slow".into();
+    if let Action::Exec(spec) = &mut slow.action {
+        spec.args = vec!["sleep".into(), "30".into()];
+        spec.timeout_secs = 20;
+    }
+    let h = start_tuned(vec![slow], vec![], |cfg| cfg.call_deadline_secs = Some(1)).await;
+
+    let started = std::time::Instant::now();
+    let out = h
+        .gateway
+        .fire("slow", json!({ "word": "x" }), None)
+        .await
+        .unwrap();
+    let err = out.result.unwrap_err();
+    assert_eq!(err.code, "action_failed");
+    assert!(
+        err.message.contains("call_deadline_secs"),
+        "{}",
+        err.message
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 // ---- protocol revision 2026-07-28 -----------------------------------------------

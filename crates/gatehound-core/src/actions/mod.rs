@@ -267,6 +267,7 @@ mod tests {
             }),
             rate_limit: None,
             idempotent: false,
+            read_only: false,
         }
     }
 
@@ -421,6 +422,7 @@ mod tests {
             }),
             rate_limit: None,
             idempotent: false,
+            read_only: false,
         };
 
         let cfg = Config {
@@ -474,6 +476,7 @@ mod tests {
             }),
             rate_limit: None,
             idempotent: false,
+            read_only: false,
         };
         let cfg = Config {
             auth: crate::config::AuthConfig {
@@ -583,6 +586,7 @@ mod tests {
             },
             rate_limit: None,
             idempotent: false,
+            read_only: false,
         };
         let (e, _) = engine(vec![tool.clone()]);
         assert!(e.dispatch(&tool, &json!({ "chat_id": "c" })).await.is_err());
