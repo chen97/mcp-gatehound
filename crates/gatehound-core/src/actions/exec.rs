@@ -11,6 +11,9 @@
 use crate::config::ExecSpec;
 use anyhow::{anyhow, bail, Result};
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -224,6 +227,85 @@ pub fn preview_argv(spec: &ExecSpec, declared: &[crate::config::ArgumentDef]) ->
     argv
 }
 
+/// The PATH a child starts with: the inherited one, with the folder `cmd` lives in put first.
+///
+/// A gateway started by launchd — a Login Item, Finder, a menubar app — gets the system PATH,
+/// not the shell's, and a `#!/usr/bin/env node` script then exits 127 even though `node` sits
+/// in the same folder as the script. That is where nvm, a venv, pipx and Homebrew all put the
+/// interpreter beside what they install, so searching the command's own folder first covers
+/// the class rather than one tool. Nothing is taken from a login shell: a shell's environment
+/// can hold tokens, and no tool should inherit them.
+///
+/// The folder as written, not with symlinks resolved: nvm's `bin/qmd` is a link into
+/// `lib/node_modules`, and `node` is beside the link, not beside its target. `None` when there
+/// is nothing to change — a bare or relative command, or a folder that is already first.
+fn child_path(cmd: &str, inherited: Option<&OsStr>) -> Option<OsString> {
+    let cmd = Path::new(cmd);
+    if !cmd.is_absolute() {
+        return None;
+    }
+    let dir = cmd.parent()?;
+    let mut dirs: Vec<PathBuf> = inherited
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    if dirs.first().is_some_and(|d| d == dir) {
+        return None;
+    }
+    dirs.retain(|d| d != dir);
+    dirs.insert(0, dir.to_path_buf());
+    std::env::join_paths(dirs).ok()
+}
+
+/// The interpreter a script's `#!` line names: `node` for `#!/usr/bin/env node` (or
+/// `env -S node --flag`), the path itself for `#!/usr/local/bin/python3`. `None` for a binary.
+fn interpreter(program: &Path) -> Option<String> {
+    let mut head = [0u8; 256];
+    let n = std::fs::File::open(program).ok()?.read(&mut head).ok()?;
+    let line = head[..n].strip_prefix(b"#!")?;
+    let line = line.split(|b| *b == b'\n').next()?;
+    let line = String::from_utf8_lossy(line);
+    let mut words = line.split_whitespace();
+    let first = words.next()?;
+    if Path::new(first).file_name().is_some_and(|n| n == "env") {
+        words
+            .find(|w| !w.starts_with('-') && !w.contains('='))
+            .map(str::to_string)
+    } else {
+        Some(first.to_string())
+    }
+}
+
+/// Where `name` would be found on `path`, if anywhere. A name with a separator is a path.
+fn find_on(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    if name.contains(std::path::MAIN_SEPARATOR) || name.contains('/') {
+        let p = PathBuf::from(name);
+        return p.is_file().then_some(p);
+    }
+    std::env::split_paths(path?)
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+}
+
+/// The error for a command that could not be found — 127 from the child, or `ENOENT` from a
+/// spawn of a file that is plainly there. Either way the message names what was missing and
+/// the PATH it was looked for on, because "env: node: No such file or directory" says neither
+/// which PATH was searched nor that the script itself was found.
+fn not_found(cmd: &str, path: Option<&OsStr>, detail: &str) -> anyhow::Error {
+    let searched = path
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<unset>".into());
+    let what = match find_on(cmd, path).as_deref().and_then(interpreter) {
+        Some(i) if find_on(&i, path).is_none() => {
+            format!("its interpreter '{i}' was not found")
+        }
+        _ => "a program it needs was not found".to_string(),
+    };
+    anyhow!(
+        "{cmd}: {what} (PATH searched: {searched}): {}",
+        detail.chars().take(500).collect::<String>()
+    )
+}
+
 pub struct ExecRunner {
     spec: ExecSpec,
     /// The tool's declared arguments, if it has any. Held here rather than on `ExecSpec`
@@ -294,16 +376,38 @@ impl ExecRunner {
         for k in &self.withheld {
             cmd.env_remove(k);
         }
+        // The PATH the child gets, kept for the error if it cannot find something on it. A
+        // withheld PATH stays withheld, and a tool that sets its own PATH gets it verbatim.
+        let mut path = if self.withheld.iter().any(|k| k == "PATH") {
+            None
+        } else {
+            std::env::var_os("PATH")
+        };
+        if path.is_some() {
+            if let Some(p) = child_path(&self.spec.cmd, path.as_deref()) {
+                cmd.env("PATH", &p);
+                path = Some(p);
+            }
+        }
         for (k, v) in &self.spec.env {
             cmd.env(k, v);
+            if k == "PATH" {
+                path = Some(v.into());
+            }
         }
         if let Some(dir) = &self.spec.cwd {
             cmd.current_dir(dir);
         }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow!("spawning {}: {e}", self.spec.cmd))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            // A script whose `#!` names an interpreter that is not there fails to spawn with
+            // ENOENT, which reads as though the script itself were missing.
+            if e.kind() == std::io::ErrorKind::NotFound && Path::new(&self.spec.cmd).is_file() {
+                not_found(&self.spec.cmd, path.as_deref(), &e.to_string())
+            } else {
+                anyhow!("spawning {}: {e}", self.spec.cmd)
+            }
+        })?;
 
         if let (Some(mut sink), Some(data)) = (child.stdin.take(), stdin_data) {
             // Write on its own task: a child that never drains stdin must not deadlock us.
@@ -354,6 +458,10 @@ impl ExecRunner {
         let stdout_text = String::from_utf8_lossy(&out).to_string();
         let stderr_text = String::from_utf8_lossy(&err).to_string();
 
+        // 127 is "command not found", from `env` or a shell, on every Unix.
+        if status.code() == Some(127) {
+            return Err(not_found(&self.spec.cmd, path.as_deref(), &stderr_text));
+        }
         if !status.success() {
             bail!(
                 "{} exited with {status}: {}",
@@ -640,9 +748,14 @@ mod tests {
         // PATH, because it is already set on every platform: the test needs a variable the
         // child would inherit, and making one with set_var would mutate the environment of
         // the whole process while other tests spawn children and resolve hosts beside it.
-        // The helper is started by absolute path, so it runs with PATH withheld.
-        let expected = std::env::var("PATH").expect("PATH is set");
+        // The helper is started by absolute path, so it runs with PATH withheld. Inherited, it
+        // arrives with the helper's own folder in front — see `child_path`.
         let mut s = spec(&["env", "PATH"], None);
+        let inherited = std::env::var_os("PATH").expect("PATH is set");
+        let expected = child_path(&s.cmd, Some(&inherited))
+            .unwrap_or(inherited)
+            .into_string()
+            .unwrap();
         // Room for a real PATH. The helper spec caps output at 1KB, and a CI runner's PATH is
         // several times that — it came back cut off, and the test compared half a PATH.
         s.max_output_bytes = 1 << 20;
@@ -769,6 +882,104 @@ mod tests {
             "two 1s runs finished in {:?}; they were not serialized",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn the_commands_own_folder_goes_first_on_the_childs_path() {
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        let dir = format!("{root}opt{}bin", std::path::MAIN_SEPARATOR);
+        let cmd = format!("{dir}{}qmd", std::path::MAIN_SEPARATOR);
+        let sys = format!("{root}usr{sep}{root}bin");
+
+        let p = child_path(&cmd, Some(OsStr::new(&sys))).unwrap();
+        assert_eq!(p.to_str().unwrap(), format!("{dir}{sep}{sys}"));
+        // Already on PATH but behind another folder: moved to the front, not added twice.
+        let behind = format!("{sys}{sep}{dir}");
+        let p = child_path(&cmd, Some(OsStr::new(&behind))).unwrap();
+        assert_eq!(p.to_str().unwrap(), format!("{dir}{sep}{sys}"));
+        // Already first, a bare name, or a relative path: nothing to change.
+        assert!(child_path(&cmd, Some(OsStr::new(&format!("{dir}{sep}{sys}")))).is_none());
+        assert!(child_path("qmd", Some(OsStr::new(&sys))).is_none());
+        assert!(child_path("bin/qmd", Some(OsStr::new(&sys))).is_none());
+    }
+
+    #[test]
+    fn a_shebang_names_its_interpreter() {
+        let dir = stub_dir("shebang");
+        for (line, want) in [
+            ("#!/usr/bin/env node", Some("node")),
+            ("#!/usr/bin/env -S node --no-warnings", Some("node")),
+            ("#!/usr/bin/env FOO=1 python3", Some("python3")),
+            (
+                "#!/usr/local/bin/python3 -u",
+                Some("/usr/local/bin/python3"),
+            ),
+            ("\x7fELF", None),
+        ] {
+            let f = dir.join("s");
+            std::fs::write(&f, format!("{line}\nrest\n")).unwrap();
+            assert_eq!(interpreter(&f).as_deref(), want, "{line}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A fresh folder for stub scripts. No tempfile crate here, so pid and time keep it unique.
+    fn stub_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let d =
+            std::env::temp_dir().join(format!("gatehound-{name}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(unix)]
+    fn executable(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The CHE-205 shape: a `#!/usr/bin/env <interp>` script whose interpreter lives beside it
+    /// and nowhere on the gateway's PATH, the way nvm lays out `bin/qmd` and `bin/node`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_script_finds_the_interpreter_installed_beside_it() {
+        let dir = stub_dir("beside");
+        let interp = "gatehound-stub-interp";
+        executable(&dir.join(interp), "#!/bin/sh\necho ran-by-stub\n");
+        let script = dir.join("tool");
+        executable(&script, &format!("#!/usr/bin/env {interp}\n"));
+
+        let mut s = spec(&[], None);
+        s.cmd = script.display().to_string();
+        let out = ExecRunner::new(s).run(&vars(&[])).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(out.unwrap().stdout.trim(), "ran-by-stub");
+    }
+
+    /// Exit 127 says which interpreter was missing and which PATH was searched for it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_missing_interpreter_is_named_with_the_path_searched() {
+        let dir = stub_dir("missing");
+        let script = dir.join("tool");
+        executable(&script, "#!/usr/bin/env gatehound-no-such-interpreter\n");
+
+        let mut s = spec(&[], None);
+        s.cmd = script.display().to_string();
+        s.env.insert("PATH".into(), "/usr/bin:/bin".into());
+        let err = ExecRunner::new(s).run(&vars(&[])).await.unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("interpreter 'gatehound-no-such-interpreter' was not found"),
+            "{msg}"
+        );
+        assert!(msg.contains("PATH searched: /usr/bin:/bin"), "{msg}");
     }
 
     #[tokio::test]
