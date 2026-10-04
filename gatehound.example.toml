@@ -16,6 +16,13 @@ listen_addr = "127.0.0.1:8790"
 # reach the caller anyway.
 approval_timeout_secs = 60
 
+# The longest an exec or script tool call may take, end to end, including time spent waiting for
+# an earlier call to the same tool. Past it the process is killed and the caller gets an error
+# saying so. Set it under the shortest timeout of any client: Paperclip's tool gateway gives up
+# at 10s and then drops every tool on the connection, so 8 leaves room. Unset, only each tool's
+# own timeout_secs applies.
+# call_deadline_secs = 8
+
 # Audit rows older than this are pruned on startup.
 log_retention_days = 30
 
