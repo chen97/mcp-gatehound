@@ -920,17 +920,15 @@ mod tests {
         let mut s = spec(&["sleep", "30"], None);
         s.max_concurrency = 1;
         s.timeout_secs = 20;
-        let runner = Arc::new(ExecRunner::new(s).within(Some(Duration::from_secs(2))));
-        let first = {
-            let r = runner.clone();
-            tokio::spawn(async move { r.run(&BTreeMap::new()).await })
-        };
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let runner = ExecRunner::new(s).within(Some(Duration::from_secs(1)));
+        // Hold the only slot the way a slow earlier call would. A real earlier call shares the
+        // same deadline, so it is killed first and hands the slot over — which tests the run,
+        // not the queue.
+        let _held = runner.permits.clone().acquire_owned().await.unwrap();
         let started = std::time::Instant::now();
         let err = runner.run(&BTreeMap::new()).await.unwrap_err();
         assert!(err.to_string().contains("was not started"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(5));
-        assert!(first.await.unwrap().is_err());
     }
 
     #[tokio::test]
