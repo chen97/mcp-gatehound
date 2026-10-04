@@ -578,6 +578,15 @@ pub struct Config {
     pub db_path: Option<String>,
     #[serde(default = "default_approval_timeout")]
     pub approval_timeout_secs: u64,
+    /// The longest any `exec` or `script` tool call may take, end to end, waiting for a free
+    /// slot included. Unset means only each tool's own `timeout_secs` applies.
+    ///
+    /// Set it under the shortest limit of any client that calls this gateway. A client that
+    /// gives up first may treat the connection as broken — Paperclip's gateway stops at 10s and
+    /// then drops every tool on the connection (CHE-212) — so a slow call has to come back as
+    /// this gateway's own error while the client is still listening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_deadline_secs: Option<u64>,
     #[serde(default = "default_retention")]
     pub log_retention_days: i64,
     #[serde(default = "default_server_name")]
@@ -651,6 +660,7 @@ impl Default for Config {
             listen_addr: default_listen(),
             db_path: None,
             approval_timeout_secs: default_approval_timeout(),
+            call_deadline_secs: None,
             log_retention_days: default_retention(),
             server_name: default_server_name(),
             auth: AuthConfig::default(),

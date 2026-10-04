@@ -314,6 +314,8 @@ pub struct ExecRunner {
     permits: Arc<Semaphore>,
     /// Inherited variables removed before the child starts. See [`GATEWAY_SECRET_VARS`].
     withheld: Vec<String>,
+    /// How long a whole call may take, queue included. See [`ExecRunner::within`].
+    deadline: Option<Duration>,
 }
 
 impl ExecRunner {
@@ -328,7 +330,22 @@ impl ExecRunner {
             declared,
             permits,
             withheld: GATEWAY_SECRET_VARS.iter().map(|s| s.to_string()).collect(),
+            deadline: None,
         }
+    }
+
+    /// Bound a whole call — the wait for a free slot as well as the run — by the gateway's
+    /// call deadline, whatever the tool's own `timeout_secs` says.
+    ///
+    /// A client gives up on a call at its own limit, and Paperclip's gateway then drops the
+    /// connection's whole tool catalog (CHE-212). `timeout_secs` cannot prevent that: it is
+    /// per tool, it starts only once the call has a slot, and with `max_concurrency = 1` a
+    /// call queued behind a slow one has already used up the client's limit before its own
+    /// clock starts. Past the deadline the child is killed and the caller gets an error that
+    /// says so, while the client is still listening.
+    pub fn within(mut self, deadline: Option<Duration>) -> Self {
+        self.deadline = deadline.filter(|d| !d.is_zero());
+        self
     }
 
     /// Withhold more inherited variables — the ones this configuration names for its own
@@ -354,14 +371,27 @@ impl ExecRunner {
             None => None,
         };
 
+        // The deadline's clock starts here, before the queue: the caller is already waiting.
+        let started = tokio::time::Instant::now();
+
         // Serialize spawns. Each `claude -p` is a Node process start; running several at once
         // is slower than running them in turn and burns through usage limits.
-        let _permit = self
-            .permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| anyhow!("exec semaphore closed"))?;
+        let acquire = self.permits.clone().acquire_owned();
+        let permit = match self.deadline {
+            Some(d) => match tokio::time::timeout(d, acquire).await {
+                Ok(p) => p,
+                Err(_) => {
+                    bail!(
+                        "{} was not started: an earlier call to this tool was still running \
+                         when the gateway's {}s call deadline (call_deadline_secs) ran out",
+                        self.spec.cmd,
+                        d.as_secs()
+                    );
+                }
+            },
+            None => acquire.await,
+        };
+        let _permit = permit.map_err(|_| anyhow!("exec semaphore closed"))?;
 
         let mut cmd = tokio::process::Command::new(&self.spec.cmd);
         cmd.args(&argv)
@@ -443,17 +473,30 @@ impl ExecRunner {
             Ok::<_, std::io::Error>((out, truncated, err, status))
         };
 
-        let timeout = Duration::from_secs(self.spec.timeout_secs.max(1));
-        let (out, truncated, err, status) = match tokio::time::timeout(timeout, collect).await {
-            Ok(r) => r?,
-            Err(_) => {
-                bail!(
-                    "{} timed out after {}s",
-                    self.spec.cmd,
-                    self.spec.timeout_secs
-                );
-            }
-        };
+        // Whichever ends first: the tool's own timeout, or what is left of the call deadline.
+        let own = Duration::from_secs(self.spec.timeout_secs.max(1));
+        let left = self
+            .deadline
+            .map(|d| d.saturating_sub(started.elapsed()))
+            .filter(|left| *left < own);
+        let (out, truncated, err, status) =
+            match tokio::time::timeout(left.unwrap_or(own), collect).await {
+                Ok(r) => r?,
+                // Returning drops the child, and `kill_on_drop` kills it.
+                Err(_) => match self.deadline {
+                    Some(d) if left.is_some() => bail!(
+                        "{} was stopped: it did not finish within the gateway's {}s call \
+                         deadline (call_deadline_secs)",
+                        self.spec.cmd,
+                        d.as_secs()
+                    ),
+                    _ => bail!(
+                        "{} timed out after {}s",
+                        self.spec.cmd,
+                        self.spec.timeout_secs
+                    ),
+                },
+            };
 
         let stdout_text = String::from_utf8_lossy(&out).to_string();
         let stderr_text = String::from_utf8_lossy(&err).to_string();
@@ -851,6 +894,43 @@ mod tests {
         let err = ExecRunner::new(s).run(&vars(&[])).await.unwrap_err();
         assert!(err.to_string().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// `brain_search` had a 60s timeout behind a client that gives up at 10s, and the client
+    /// dropped the whole tool catalog when it did (CHE-212). The call deadline wins over the
+    /// tool's own, longer timeout, and says which limit it was.
+    #[tokio::test]
+    async fn the_call_deadline_stops_a_command_before_its_own_timeout() {
+        let mut s = spec(&["sleep", "30"], None);
+        s.timeout_secs = 20;
+        let started = std::time::Instant::now();
+        let err = ExecRunner::new(s)
+            .within(Some(Duration::from_secs(1)))
+            .run(&vars(&[]))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("call_deadline_secs"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// With `max_concurrency = 1`, a call queued behind a slow one used to start its own clock
+    /// only once it had the slot, so it reached the client's limit before it could time out.
+    #[tokio::test]
+    async fn a_call_queued_behind_a_slow_one_gives_up_at_the_deadline() {
+        let mut s = spec(&["sleep", "30"], None);
+        s.max_concurrency = 1;
+        s.timeout_secs = 20;
+        let runner = Arc::new(ExecRunner::new(s).within(Some(Duration::from_secs(2))));
+        let first = {
+            let r = runner.clone();
+            tokio::spawn(async move { r.run(&BTreeMap::new()).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let started = std::time::Instant::now();
+        let err = runner.run(&BTreeMap::new()).await.unwrap_err();
+        assert!(err.to_string().contains("was not started"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(first.await.unwrap().is_err());
     }
 
     #[tokio::test]

@@ -35,13 +35,15 @@ impl ActionEngine {
         // The variable an operator chose for the tunnel token is as much the gateway's own
         // credential as the fixed names the runner already withholds.
         let withheld: Vec<String> = cfg.publish.cloudflare.token_env.iter().cloned().collect();
+        let deadline = cfg.call_deadline_secs.map(std::time::Duration::from_secs);
         for tool in &cfg.tools {
             match &tool.action {
                 Action::Exec(spec) => {
                     execs.insert(
                         tool.name.clone(),
                         ExecRunner::with_arguments(spec.clone(), tool.arguments.clone())
-                            .withholding(withheld.clone()),
+                            .withholding(withheld.clone())
+                            .within(deadline),
                     );
                 }
                 // A script action becomes an exec here, once, at build time — so it inherits
@@ -60,7 +62,8 @@ impl ActionEngine {
                     execs.insert(
                         tool.name.clone(),
                         ExecRunner::with_arguments(lowered, tool.arguments.clone())
-                            .withholding(withheld.clone()),
+                            .withholding(withheld.clone())
+                            .within(deadline),
                     );
                 }
                 Action::Proxy { .. } => {}
