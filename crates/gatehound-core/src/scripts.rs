@@ -729,6 +729,7 @@ impl ScriptSpec {
             max_concurrency: self.max_concurrency,
             env: self.env.clone(),
             cwd: self.cwd.clone(),
+            fallback: None,
         })
     }
 }

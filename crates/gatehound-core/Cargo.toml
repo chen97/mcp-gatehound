@@ -25,5 +25,9 @@ tracing.workspace = true
 uuid.workspace = true
 base64 = "0.22"
 
+# Stopping a timed-out command's whole process group: see `KillGroup` in actions/exec.rs.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tracing-subscriber.workspace = true

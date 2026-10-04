@@ -39,6 +39,8 @@ pub struct ExecOutput {
     pub stdout: String,
     pub stderr: String,
     pub truncated: bool,
+    /// The fallback's label, when the answer came from it instead of the command.
+    pub fallback: Option<String>,
 }
 
 /// Substitute `{name}` placeholders. An undeclared placeholder is a hard error: filling it
@@ -370,10 +372,50 @@ impl ExecRunner {
             Some(t) => Some(render(t, vars)?),
             None => None,
         };
+        // Built before anything runs, so a fallback that cannot be filled fails the call now
+        // rather than at the moment it was needed.
+        let fallback = match &self.spec.fallback {
+            Some(f) => {
+                let spec = ExecSpec {
+                    args: f.args.clone(),
+                    fallback: None,
+                    ..self.spec.clone()
+                };
+                Some((f, build_argv(&spec, &self.declared, vars)?))
+            }
+            None => None,
+        };
 
         // The deadline's clock starts here, before the queue: the caller is already waiting.
         let started = tokio::time::Instant::now();
 
+        let Some((f, fallback_argv)) = fallback else {
+            return self.run_queued(argv, stdin_data, started).await;
+        };
+        let budget = Duration::from_secs(f.after_secs);
+        match tokio::time::timeout(budget, self.run_queued(argv, stdin_data.clone(), started)).await
+        {
+            Ok(done) => done,
+            // Dropping the command's future gives its slot back and, by `kill_on_drop`, stops
+            // it. The fallback does not queue for that slot: it is the quick answer, and a call
+            // stuck behind a slow one is exactly the call that needs it.
+            Err(_) => {
+                let mut out = self
+                    .spawn_collect(fallback_argv, stdin_data, started)
+                    .await?;
+                out.fallback = Some(f.label.clone());
+                Ok(out)
+            }
+        }
+    }
+
+    /// Wait for a free slot, within the call deadline, then run.
+    async fn run_queued(
+        &self,
+        argv: Vec<String>,
+        stdin_data: Option<String>,
+        started: tokio::time::Instant,
+    ) -> Result<ExecOutput> {
         // Serialize spawns. Each `claude -p` is a Node process start; running several at once
         // is slower than running them in turn and burns through usage limits.
         let acquire = self.permits.clone().acquire_owned();
@@ -392,7 +434,17 @@ impl ExecRunner {
             None => acquire.await,
         };
         let _permit = permit.map_err(|_| anyhow!("exec semaphore closed"))?;
+        self.spawn_collect(argv, stdin_data, started).await
+    }
 
+    /// Start the command and collect what it says, within its own timeout and what is left of
+    /// the call deadline.
+    async fn spawn_collect(
+        &self,
+        argv: Vec<String>,
+        stdin_data: Option<String>,
+        started: tokio::time::Instant,
+    ) -> Result<ExecOutput> {
         let mut cmd = tokio::process::Command::new(&self.spec.cmd);
         cmd.args(&argv)
             .stdin(if stdin_data.is_some() {
@@ -428,6 +480,9 @@ impl ExecRunner {
         if let Some(dir) = &self.spec.cwd {
             cmd.current_dir(dir);
         }
+        // Its own process group, so that stopping it stops everything it started.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let mut child = cmd.spawn().map_err(|e| {
             // A script whose `#!` names an interpreter that is not there fails to spawn with
@@ -438,6 +493,10 @@ impl ExecRunner {
                 anyhow!("spawning {}: {e}", self.spec.cmd)
             }
         })?;
+        // Declared after `child`, so on an early return it is dropped first, while the group's
+        // leader is still unreaped and the group id cannot belong to anyone else.
+        #[cfg(unix)]
+        let mut group = KillGroup(child.id());
 
         if let (Some(mut sink), Some(data)) = (child.stdin.take(), stdin_data) {
             // Write on its own task: a child that never drains stdin must not deadlock us.
@@ -481,8 +540,13 @@ impl ExecRunner {
             .filter(|left| *left < own);
         let (out, truncated, err, status) =
             match tokio::time::timeout(left.unwrap_or(own), collect).await {
-                Ok(r) => r?,
-                // Returning drops the child, and `kill_on_drop` kills it.
+                Ok(r) => {
+                    // It finished. Anything it left running on purpose is its own business.
+                    #[cfg(unix)]
+                    group.disarm();
+                    r?
+                }
+                // Returning drops the child, and `kill_on_drop` kills it; the group goes with it.
                 Err(_) => match self.deadline {
                     Some(d) if left.is_some() => bail!(
                         "{} was stopped: it did not finish within the gateway's {}s call \
@@ -516,7 +580,36 @@ impl ExecRunner {
             stdout: stdout_text,
             stderr: stderr_text,
             truncated,
+            fallback: None,
         })
+    }
+}
+
+/// Kills a command's whole process group when dropped before the command finished.
+///
+/// `kill_on_drop` reaches only the process the gateway started. `qmd` is a launcher that starts
+/// a second `node` process to do the search, so a stopped `brain_search` used to leave that
+/// worker running, models loaded, slowing every call after it (CHE-215).
+#[cfg(unix)]
+struct KillGroup(Option<u32>);
+
+#[cfg(unix)]
+impl KillGroup {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for KillGroup {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0.and_then(|p| libc::pid_t::try_from(p).ok()) {
+            // SAFETY: kill(2) takes plain integers and touches no memory of ours. The id is the
+            // group this runner created, and its leader has not been reaped yet.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
     }
 }
 
@@ -576,6 +669,7 @@ mod tests {
             max_concurrency: 1,
             env: BTreeMap::new(),
             cwd: None,
+            fallback: None,
         }
     }
 
@@ -928,6 +1022,76 @@ mod tests {
         let started = std::time::Instant::now();
         let err = runner.run(&BTreeMap::new()).await.unwrap_err();
         assert!(err.to_string().contains("was not started"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    fn with_fallback(mut s: ExecSpec, after_secs: u64, args: &[&str]) -> ExecSpec {
+        s.fallback = Some(crate::config::ExecFallback {
+            after_secs,
+            args: args.iter().map(|a| a.to_string()).collect(),
+            label: "keyword_only".into(),
+        });
+        s
+    }
+
+    /// `brain_search`'s full mode missed Paperclip's limit on every live call (CHE-214). Past
+    /// `after_secs` the quick command answers instead, and says it was the quick one.
+    #[tokio::test]
+    async fn a_slow_command_is_answered_by_its_fallback_and_labelled() {
+        let mut s = with_fallback(spec(&["sleep", "30"], None), 1, &["print", "{word}"]);
+        s.timeout_secs = 20;
+        let started = std::time::Instant::now();
+        let out = ExecRunner::with_arguments(s, vec![arg("word", true)])
+            .within(Some(Duration::from_secs(8)))
+            .run(&vars(&[("word", "quick")]))
+            .await
+            .unwrap();
+        assert_eq!(out.stdout, "quick");
+        assert_eq!(out.fallback.as_deref(), Some("keyword_only"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A stopped command's own children stop with it. `qmd` hands the search to a second
+    /// process, which used to run on after the gateway gave up on it (CHE-215).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_a_command_stops_what_it_started() {
+        let marker = std::env::temp_dir().join(format!(
+            "gatehound-worker-{}-{:?}",
+            std::process::id(),
+            std::time::Instant::now()
+        ));
+        let marker_arg = marker.display().to_string();
+        let s = spec(&["spawn", "2", &marker_arg], None);
+        let err = ExecRunner::new(s)
+            .within(Some(Duration::from_secs(1)))
+            .run(&vars(&[]))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("call_deadline_secs"), "{err}");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!marker.exists(), "the worker outlived the command");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_finishes_in_time_never_runs_its_fallback() {
+        let s = with_fallback(spec(&["print", "full"], None), 5, &["print", "quick"]);
+        let out = ExecRunner::new(s).run(&vars(&[])).await.unwrap();
+        assert_eq!(out.stdout, "full");
+        assert_eq!(out.fallback, None);
+    }
+
+    /// A call stuck behind a slow one is the call that most needs the quick answer, so the
+    /// fallback does not wait for the slot.
+    #[tokio::test]
+    async fn a_queued_call_gets_the_fallback_without_waiting_for_the_slot() {
+        let s = with_fallback(spec(&["sleep", "30"], None), 1, &["print", "quick"]);
+        let runner = ExecRunner::new(s).within(Some(Duration::from_secs(8)));
+        let _held = runner.permits.clone().acquire_owned().await.unwrap();
+        let started = std::time::Instant::now();
+        let out = runner.run(&BTreeMap::new()).await.unwrap();
+        assert_eq!(out.stdout, "quick");
+        assert_eq!(out.fallback.as_deref(), Some("keyword_only"));
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 

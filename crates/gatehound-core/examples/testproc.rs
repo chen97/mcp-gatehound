@@ -61,6 +61,26 @@ fn main() {
             writeln!(f, "x").expect("writing the marker file");
             print!("{{}}");
         }
+        // A launcher, the way `qmd` is one: starts a worker that writes `path` after `secs`,
+        // then waits on it. Stopping only the launcher leaves the worker to write.
+        Some("spawn") => {
+            let secs = rest.first().expect("spawn needs seconds");
+            let path = rest.get(1).expect("spawn needs a path");
+            let exe = std::env::current_exe().expect("own path");
+            let mut worker = std::process::Command::new(exe)
+                .args(["later", secs, path])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("starting the worker");
+            let _ = worker.wait();
+        }
+        Some("later") => {
+            let secs: u64 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(1);
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            std::fs::write(rest.get(1).expect("later needs a path"), "x").expect("writing");
+        }
         Some("fail") => {
             eprint!("{}", rest.join(" "));
             let _ = std::io::stderr().flush();

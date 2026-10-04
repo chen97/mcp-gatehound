@@ -163,10 +163,16 @@ impl ActionEngine {
                     .ok_or_else(|| anyhow!("no exec runner for {}", tool.name))?;
                 let vars = scalar_vars(args)?;
                 let out = runner.run(&vars).await?;
-                Ok(json!({
+                let mut result = json!({
                     "stdout": answered(&out.stdout),
                     "truncated": out.truncated
-                }))
+                });
+                // Said beside the answer, not inside it: a caller should not have to know the
+                // tool's own output format to learn that it got the lesser one.
+                if let Some(label) = out.fallback {
+                    result["fallback"] = Value::String(label);
+                }
+                Ok(result)
             }
         }
     }
@@ -264,6 +270,7 @@ mod tests {
                 max_concurrency: 1,
                 env: BTreeMap::new(),
                 cwd: None,
+                fallback: None,
             }),
             rate_limit: None,
             idempotent: false,

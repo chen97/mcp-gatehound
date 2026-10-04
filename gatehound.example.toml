@@ -208,6 +208,29 @@ name = "disk_free"
 description = "Free space on the machine running the gateway."
 action = { type = "exec", cmd = "/bin/df", args = ["-h", "/"], timeout_secs = 10, max_output_bytes = 8192 }
 
+# A command with a quicker one to fall back on. If the search has not finished `after_secs`
+# after the call arrived, it is stopped and the fallback answers instead, with
+# `"fallback": "keyword_only"` beside the result so the caller knows it got the lesser answer.
+# Keep `after_secs` under call_deadline_secs, with room for the fallback to run.
+#
+#   [[tool]]
+#   name = "brain_search"
+#   description = "Search the vault by meaning."
+#
+#   [[tool.argument]]
+#   name = "query"
+#   description = "What you are looking for."
+#
+#   [tool.action]
+#   type = "exec"
+#   cmd = "/path/to/qmd"
+#   args = ["query", "{query}", "-c", "brain", "--format", "json", "--no-rerank"]
+#
+#   [tool.action.fallback]
+#   after_secs = 6
+#   args = ["search", "{query}", "-c", "brain", "--format", "json"]
+#   label = "keyword_only"
+
 # A script you write, exposed as a tool. Write it in the app — it saves the file under
 # `scripts/`, records its digest here, and refuses to start if the file changes behind its
 # back — or drop a file in `scripts/` and add the `[[script]]` block by hand:
