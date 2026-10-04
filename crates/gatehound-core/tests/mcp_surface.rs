@@ -1054,6 +1054,73 @@ async fn a_fire_meets_the_same_deny_and_unknown_tool_as_a_client() {
     );
 }
 
+/// `read_only` only changes a hand fire. An agent's `tools/call` over HTTP gets the same
+/// decision, the same result and the same `tools/list` with the flag on as with it off, under
+/// every kind of rule: none (held), allow and deny.
+#[tokio::test]
+async fn read_only_changes_nothing_for_an_agents_call() {
+    let rule = |decision| {
+        vec![IdentitySeed {
+            identity: "bearer".into(),
+            tool: "peek".into(),
+            decision,
+        }]
+    };
+    for rules in [vec![], rule(Decision::Allow), rule(Decision::Deny)] {
+        let mut seen = Vec::new();
+        for flag in [false, true] {
+            let peek = ToolConfig {
+                read_only: flag,
+                ..read_tool()
+            };
+            let h = start_with(vec![peek], rules.clone()).await;
+            let listed = h.rpc("tools/list", json!({})).await["result"].clone();
+
+            // With no rule the call is held: a read-only tool is held just the same, and is
+            // answered here so the call can finish.
+            let call = {
+                let base = h.base.clone();
+                tokio::spawn(async move {
+                    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": { "name": "peek", "arguments": { "word": "x" } } });
+                    reqwest::Client::new()
+                        .post(format!("{base}/mcp"))
+                        .bearer_auth(TOKEN)
+                        .header("content-type", "application/json")
+                        .body(body.to_string())
+                        .send()
+                        .await
+                        .unwrap()
+                        .json::<Value>()
+                        .await
+                        .unwrap()
+                })
+            };
+            let held = if rules.is_empty() {
+                let id = wait_for_pending(&h).await;
+                h.gateway.resolve_approval(&id, Resolution::Reject).unwrap();
+                true
+            } else {
+                false
+            };
+            let reply = call.await.unwrap();
+            let row = h.gateway.recent_requests(1).unwrap()[0].clone();
+            seen.push((
+                listed,
+                held,
+                reply["result"].clone(),
+                row.decision,
+                row.status,
+                row.origin,
+            ));
+        }
+        assert_eq!(
+            seen[0], seen[1],
+            "rules {rules:?}: read_only changed an agent's call"
+        );
+    }
+}
+
 /// A hand fire runs the same action an agent's call does, so the gateway's call deadline
 /// (CHE-212) stops it too: a slow tool fired from Debug comes back as the deadline error,
 /// not after the tool's own, longer timeout.
