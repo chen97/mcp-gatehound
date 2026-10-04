@@ -1056,11 +1056,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn stopping_a_command_stops_what_it_started() {
-        let marker = std::env::temp_dir().join(format!(
-            "gatehound-worker-{}-{:?}",
-            std::process::id(),
-            std::time::Instant::now()
-        ));
+        // No braces in the name: it is an argv template, and `{…}` would be a placeholder.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let marker =
+            std::env::temp_dir().join(format!("gatehound-worker-{}-{nanos}", std::process::id()));
         let marker_arg = marker.display().to_string();
         let s = spec(&["spawn", "2", &marker_arg], None);
         let err = ExecRunner::new(s)
