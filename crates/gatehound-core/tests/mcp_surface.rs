@@ -130,8 +130,17 @@ async fn start(identities: Vec<IdentitySeed>) -> Harness {
 }
 
 async fn start_with(tools: Vec<ToolConfig>, identities: Vec<IdentitySeed>) -> Harness {
+    start_tuned(tools, identities, |_| {}).await
+}
+
+/// `start_with`, with a last word on the config before the gateway is built.
+async fn start_tuned(
+    tools: Vec<ToolConfig>,
+    identities: Vec<IdentitySeed>,
+    tune: impl FnOnce(&mut Config),
+) -> Harness {
     let dir = tempdir::TempDir::new();
-    let cfg = Config {
+    let mut cfg = Config {
         listen_addr: "127.0.0.1:0".into(),
         approval_timeout_secs: 5,
         auth: AuthConfig {
@@ -143,6 +152,7 @@ async fn start_with(tools: Vec<ToolConfig>, identities: Vec<IdentitySeed>) -> Ha
         identities,
         ..Default::default()
     };
+    tune(&mut cfg);
     let gateway = Gateway::build(cfg, Some(dir.path().join("gatehound.db"))).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1042,6 +1052,35 @@ async fn a_fire_meets_the_same_deny_and_unknown_tool_as_a_client() {
         h.gateway.fire("peek", json!(["x"]), None).await.is_err(),
         "arguments are an object"
     );
+}
+
+/// A hand fire runs the same action an agent's call does, so the gateway's call deadline
+/// (CHE-212) stops it too: a slow tool fired from Debug comes back as the deadline error,
+/// not after the tool's own, longer timeout.
+#[tokio::test]
+async fn a_fire_obeys_the_gateway_call_deadline() {
+    let mut slow = read_tool();
+    slow.name = "slow".into();
+    if let Action::Exec(spec) = &mut slow.action {
+        spec.args = vec!["sleep".into(), "30".into()];
+        spec.timeout_secs = 20;
+    }
+    let h = start_tuned(vec![slow], vec![], |cfg| cfg.call_deadline_secs = Some(1)).await;
+
+    let started = std::time::Instant::now();
+    let out = h
+        .gateway
+        .fire("slow", json!({ "word": "x" }), None)
+        .await
+        .unwrap();
+    let err = out.result.unwrap_err();
+    assert_eq!(err.code, "action_failed");
+    assert!(
+        err.message.contains("call_deadline_secs"),
+        "{}",
+        err.message
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 // ---- protocol revision 2026-07-28 -----------------------------------------------
