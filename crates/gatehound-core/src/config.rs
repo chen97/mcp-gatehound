@@ -59,6 +59,25 @@ pub struct ExecSpec {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// A quicker command to answer with when this one is too slow. See [`ExecFallback`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<ExecFallback>,
+}
+
+/// What an `exec` tool answers with when its own command would not finish in time.
+///
+/// A search whose full mode can outrun the client is better answered by its keyword mode than
+/// by an error: the caller gets something, labelled as less than it asked for (CHE-215).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExecFallback {
+    /// Seconds after the call arrives — the wait for a free slot included, as with
+    /// `call_deadline_secs` — at which the command is stopped and the fallback run instead.
+    /// Leave the fallback room to finish under `call_deadline_secs`.
+    pub after_secs: u64,
+    /// The argv for the same `cmd`, with the same placeholders as `args`.
+    pub args: Vec<String>,
+    /// What the answer says it is, in the result's `fallback` field, e.g. `keyword_only`.
+    pub label: String,
 }
 
 fn default_exec_timeout() -> u64 {
@@ -85,6 +104,7 @@ impl Default for ExecSpec {
             max_concurrency: default_exec_concurrency(),
             env: BTreeMap::new(),
             cwd: None,
+            fallback: None,
         }
     }
 }
@@ -459,7 +479,12 @@ fn validate_arguments(t: &ToolConfig) -> Result<()> {
 
     // A placeholder naming an argument that was never declared.
     let templates: Vec<&String> = match &t.action {
-        Action::Exec(spec) => spec.args.iter().chain(spec.stdin.iter()).collect(),
+        Action::Exec(spec) => spec
+            .args
+            .iter()
+            .chain(spec.stdin.iter())
+            .chain(spec.fallback.iter().flat_map(|f| f.args.iter()))
+            .collect(),
         Action::Script(spec) => spec.args.iter().chain(spec.stdin.iter()).collect(),
         Action::Proxy { .. } => Vec::new(),
     };
@@ -1147,6 +1172,23 @@ impl Config {
                 if spec.max_concurrency == 0 {
                     bail!("tool '{}' has max_concurrency = 0", t.name);
                 }
+                if let Some(f) = &spec.fallback {
+                    if f.after_secs == 0 || f.label.trim().is_empty() {
+                        bail!(
+                            "tool '{}': [tool.action.fallback] needs after_secs above 0 and a label",
+                            t.name
+                        );
+                    }
+                    // A fallback that starts after the deadline has passed never answers.
+                    if let Some(d) = self.call_deadline_secs.filter(|d| f.after_secs >= *d) {
+                        bail!(
+                            "tool '{}': fallback after_secs ({}) must be under \
+                             call_deadline_secs ({d}), with room for the fallback to run",
+                            t.name,
+                            f.after_secs
+                        );
+                    }
+                }
                 // A tool naming an upstream op that does not exist already fails here. An exec
                 // tool naming a binary that is not on this machine used to fail at the first
                 // call instead, which is the wrong time to find out: a pack imports cleanly and
@@ -1438,6 +1480,32 @@ decision = "allow"
         let cfg: Config = toml::from_str(&broken).unwrap();
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("does not declare"), "{err}");
+    }
+
+    #[test]
+    fn a_fallback_must_start_before_the_call_deadline() {
+        let mut cfg: Config = toml::from_str(sample()).unwrap();
+        if let Action::Exec(spec) = &mut cfg.tools[1].action {
+            spec.cmd = std::env::current_exe().unwrap().display().to_string();
+            spec.fallback = Some(ExecFallback {
+                after_secs: 8,
+                args: vec!["quick".into()],
+                label: "keyword_only".into(),
+            });
+        }
+        cfg.call_deadline_secs = Some(8);
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("must be under call_deadline_secs"), "{err}");
+
+        // Read from the file, the section says the same thing.
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        let Action::Exec(spec) = &back.tools[1].action else {
+            panic!("still an exec")
+        };
+        assert_eq!(spec.fallback.as_ref().unwrap().label, "keyword_only");
+
+        cfg.call_deadline_secs = Some(9);
+        cfg.validate().unwrap();
     }
 
     #[test]

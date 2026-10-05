@@ -1808,6 +1808,22 @@ fn setup_app(app: &mut tauri::App) -> Result<()> {
     Ok(())
 }
 
+/// Tell macOS this app is doing work someone is waiting on, so App Nap leaves it alone.
+///
+/// The app spends its life with no window showing, which is what App Nap looks for, and a
+/// napped app runs at background priority. The gateway answers callers who give up at 10s, and
+/// the tools it starts do their work in that time: a `qmd` search measured 4.5–5.6s at normal
+/// priority and 16–17s at background priority on the same index (CHE-215). Idle system sleep
+/// is still allowed — this asks for priority, not for the machine to stay awake.
+#[cfg(target_os = "macos")]
+fn keep_off_app_nap() -> impl Sized {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+        &NSString::from_str("Answering MCP tool calls"),
+    )
+}
+
 fn main() {
     let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()
@@ -1816,6 +1832,10 @@ fn main() {
         )
         .with_target(false)
         .init();
+
+    // Held until `main` returns, which is when the app quits.
+    #[cfg(target_os = "macos")]
+    let _awake = keep_off_app_nap();
 
     tauri::Builder::default()
         // One instance only: two would fight over the listen port and the database.
