@@ -120,7 +120,7 @@ console.log("every piece of screen state that starts as null is written somewher
 //
 // Not a masked, shortened or prefixed form of it: a client pastes exactly this into its own
 // config, and a near-miss authenticates as nothing. Lifted out of the source like the above.
-const copyHandler = src.match(/\$\("#copy-super"\)\?\.addEventListener\("click", \(e\) => \{\n([^}]*)\}/);
+const copyHandler = src.match(/\$\("#copy-super"\)\?\.addEventListener\("click", \(e\) => \{\s*([^}]*)\}/);
 if (!copyHandler || !/copy\(lastAccess\.super_token, /.test(copyHandler[1])) {
   console.error("\nthe super token's Copy button no longer copies lastAccess.super_token as it is");
   process.exit(1);
