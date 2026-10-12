@@ -95,3 +95,39 @@ if (problems.length) {
   process.exit(1);
 }
 console.log("no screen redraws itself on a timer");
+
+// --- state a handler reads must be written somewhere ------------------------
+//
+// A screen keeps what it last drew in a module-level `let x = null`, and its buttons read it
+// back. Drop the one line that writes it and nothing fails: `if (x)` is false, the button does
+// nothing, and the window looks fine. That is how the super token's Copy button stopped copying
+// (CHE-349) — the clipboard kept whatever was on it before, and a client was handed that.
+
+const neverSet = [];
+for (const m of src.matchAll(/^let (\w+)\b[^=\n]*= null;/gm)) {
+  const name = m[1];
+  // Not the declaration itself: its type annotation sits between the name and the `=`.
+  const writes = src.match(new RegExp(`(^|[^.\\w])${name}\\s*=(?!=)`, "gm")) ?? [];
+  if (writes.length === 0) neverSet.push(name);
+}
+if (neverSet.length) {
+  console.error(`\nread but never written, so whatever reads them sees null: ${neverSet.join(", ")}`);
+  process.exit(1);
+}
+console.log("every piece of screen state that starts as null is written somewhere");
+
+// --- the super token's Copy button hands over the token itself --------------
+//
+// Not a masked, shortened or prefixed form of it: a client pastes exactly this into its own
+// config, and a near-miss authenticates as nothing. Lifted out of the source like the above.
+const copyHandler = src.match(/\$\("#copy-super"\)\?\.addEventListener\("click", \(e\) => \{\n([^}]*)\}/);
+if (!copyHandler || !/copy\(lastAccess\.super_token, /.test(copyHandler[1])) {
+  console.error("\nthe super token's Copy button no longer copies lastAccess.super_token as it is");
+  process.exit(1);
+}
+const upstream = grab("renderUpstream");
+if (!/\blastAccess = access;/.test(upstream)) {
+  console.error("\nrenderUpstream no longer records the Access it drew, so Copy has nothing to copy");
+  process.exit(1);
+}
+console.log("the super token's Copy button copies the token the screen drew");

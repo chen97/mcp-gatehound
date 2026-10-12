@@ -8,7 +8,7 @@
 // points at one installed elsewhere, CHROME at a browser you already downloaded, and both are
 // optional: with neither set this uses whatever `playwright` resolves to.
 //
-//   node spark.mjs / reduced-motion.mjs / idle.mjs
+//   node spark.mjs / reduced-motion.mjs / idle.mjs / copy-key.mjs
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";

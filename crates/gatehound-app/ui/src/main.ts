@@ -4484,6 +4484,9 @@ async function renderUpstream(snap: Snapshot): Promise<void> {
     invoke<IdentityRule[]>("identities"),
     invoke<Access>("access"),
   ]);
+  // The super token's Copy button and the revoke prompt both read this. Lost once when Access
+  // folded into Upstream, and nothing failed: Copy just left the clipboard as it was.
+  lastAccess = access;
 
   // Composed and written as one string. Painting the parts separately would mean the wrapper's
   // own HTML never matching what is in the DOM, so the screen would rebuild every five seconds
