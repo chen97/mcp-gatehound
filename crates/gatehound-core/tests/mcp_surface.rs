@@ -765,6 +765,76 @@ async fn an_unanswered_hold_times_out_with_a_retryable_code() {
     assert_eq!(v["result"]["structuredContent"]["code"], "approval_timeout");
 }
 
+/// The call deadline covers the wait for approval (CHE-385): a write nobody approves comes back
+/// as the gateway's own `approval_timeout` a second before the deadline, not after the queue's
+/// longer timeout, by which point a client such as Paperclip has hung up.
+#[tokio::test]
+async fn an_unanswered_hold_returns_inside_the_call_deadline() {
+    let h = start_tuned(vec![echo_tool()], vec![], |cfg| {
+        cfg.approval_timeout_secs = 60;
+        cfg.call_deadline_secs = Some(3);
+    })
+    .await;
+
+    let started = std::time::Instant::now();
+    let v = h.call("echo", json!({ "word": "ghost" })).await;
+    let took = started.elapsed();
+    assert_eq!(v["result"]["isError"], true);
+    assert_eq!(v["result"]["structuredContent"]["code"], "approval_timeout");
+    assert!(
+        took < Duration::from_secs(3),
+        "the hold outlived the deadline: {took:?}"
+    );
+    assert!(
+        took >= Duration::from_millis(1500),
+        "the hold ended too soon: {took:?}"
+    );
+    assert!(h.gateway.pending().unwrap().is_empty());
+}
+
+/// A client that hangs up mid-hold takes its card with it. Before CHE-385 the `pending` row stayed
+/// until the next restart, and answering it reached nobody.
+#[tokio::test]
+async fn a_client_that_hangs_up_leaves_no_pending_row() {
+    let h = start(vec![]).await;
+    let call = {
+        let base = h.base.clone();
+        let body = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "echo", "arguments": { "word": "gone" } }
+        });
+        tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{base}/mcp"))
+                .header("content-type", "application/json")
+                .bearer_auth(TOKEN)
+                .timeout(Duration::from_millis(500))
+                .body(body.to_string())
+                .send()
+                .await
+        })
+    };
+    let id = wait_for_pending(&h).await;
+    assert!(
+        call.await.unwrap().is_err(),
+        "the client should have given up"
+    );
+
+    // Well inside the queue's own 5s timeout, so only the hang-up can have cleared it.
+    let started = std::time::Instant::now();
+    while !h.gateway.pending().unwrap().is_empty() {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the card outlived the client that asked for it"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(h
+        .gateway
+        .resolve_approval(&id, Resolution::AllowOnce)
+        .is_err());
+}
+
 #[tokio::test]
 async fn every_call_is_logged_with_secrets_redacted() {
     let h = start(allow_all("bearer")).await;
