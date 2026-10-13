@@ -1286,7 +1286,12 @@ function wireApprovals(where = "#approvals"): void {
         // The refresh below repaints from scratch on success, so restoring the label only
         // matters on the path where it does not — a failed resolve leaves the card in place,
         // and a card stuck on "Allowing…" reads as still working.
+        // The buttons come back too: when the card's markup is unchanged `paint` skips the
+        // repaint, so a card left disabled here stays dead with no way to try again (CHE-385).
         btn.textContent = pressed;
+        btn.closest<HTMLElement>(".card")!
+          .querySelectorAll("button")
+          .forEach((b) => (b.disabled = false));
         void say(String(e));
       }
       await refresh();
