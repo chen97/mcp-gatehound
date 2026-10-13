@@ -112,25 +112,42 @@ impl ApprovalQueue {
         self.store.list_pending()
     }
 
+    /// How long a hold may wait: the queue's own timeout, or `within` when that is shorter.
+    pub fn wait_for(&self, within: Option<Duration>) -> Duration {
+        within.map_or(self.timeout, |w| w.min(self.timeout))
+    }
+
     /// Park the caller until someone decides, or the timeout expires.
     pub async fn hold(&self, identity: &str, tool: &str, args_preview: &str) -> Outcome {
-        self.hold_from(identity, tool, args_preview, None).await
+        self.hold_from(identity, tool, args_preview, None, None)
+            .await
     }
 
     /// Park a call that did not come from a client — `origin` says where it came from, and the
-    /// card says so too.
+    /// card says so too. `within` cuts the wait short of the queue's timeout, so a caller with
+    /// its own deadline hears `approval_timeout` while it is still listening.
     ///
     /// Such a hold never writes a rule. "Always allow" on a call the operator fired by hand from
     /// the Debug tab would grant the owner a standing permission nobody asked for, and the next
     /// fire would skip the queue on the strength of an answer given to a different call. So the
     /// "always" answers are taken as their one-off forms: allowed this once, or refused this once.
+    ///
+    /// The card is cleared however the hold ends, including when the future is dropped mid-wait
+    /// because the caller hung up. Before this the cleanup ran only after the wait returned, so
+    /// a dropped hold left its card and `pending` row behind until the next restart (CHE-383).
     pub async fn hold_from(
         &self,
         identity: &str,
         tool: &str,
         args_preview: &str,
         origin: Option<&str>,
+        within: Option<Duration>,
     ) -> Outcome {
+        let wait = self.wait_for(within);
+        // No time left to ask in: say so now rather than flash a card nobody can answer.
+        if wait.is_zero() {
+            return Outcome::TimedOut;
+        }
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         let remember = origin.is_none();
@@ -143,9 +160,14 @@ impl ApprovalQueue {
             return Outcome::Denied;
         }
         self.waiters.lock().unwrap().insert(id.clone(), tx);
+        let mut held = Held {
+            queue: self,
+            id: id.clone(),
+            outcome: "cancelled",
+        };
 
         let row = PendingRow {
-            id: id.clone(),
+            id,
             ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             identity: identity.to_string(),
             tool: tool.to_string(),
@@ -154,7 +176,7 @@ impl ApprovalQueue {
         };
         self.events.emit(GatewayEvent::PendingAdded(row));
 
-        let outcome = match tokio::time::timeout(self.timeout, rx).await {
+        let outcome = match tokio::time::timeout(wait, rx).await {
             Ok(Ok(resolution)) => {
                 if let Some(decision) = resolution.persisted().filter(|_| remember) {
                     if let Err(e) = self.store.set_decision(identity, tool, decision) {
@@ -184,15 +206,7 @@ impl ApprovalQueue {
             Ok(Err(_)) => Outcome::ShuttingDown,
             Err(_) => Outcome::TimedOut,
         };
-
-        self.waiters.lock().unwrap().remove(&id);
-        if let Err(e) = self.store.remove_pending(&id) {
-            tracing::warn!(error = %e, "could not clear pending row");
-        }
-        self.events.emit(GatewayEvent::PendingResolved {
-            id,
-            outcome: outcome.log_decision().to_string(),
-        });
+        held.outcome = outcome.log_decision();
         outcome
     }
 
@@ -214,6 +228,32 @@ impl ApprovalQueue {
         if let Err(e) = self.store.clear_pending() {
             tracing::warn!(error = %e, "could not clear the pending table");
         }
+    }
+}
+
+/// One held call's card, waiter and `pending` row, cleared on drop — whether the hold returned
+/// or was dropped mid-wait. `outcome` stays "cancelled" unless the hold got as far as an answer.
+struct Held<'a> {
+    queue: &'a ApprovalQueue,
+    id: String,
+    outcome: &'static str,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        // Never panic here: this can run while a panic is already unwinding.
+        self.queue
+            .waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.id);
+        if let Err(e) = self.queue.store.remove_pending(&self.id) {
+            tracing::warn!(error = %e, "could not clear pending row");
+        }
+        self.queue.events.emit(GatewayEvent::PendingResolved {
+            id: std::mem::take(&mut self.id),
+            outcome: self.outcome.to_string(),
+        });
     }
 }
 
@@ -314,7 +354,7 @@ mod tests {
         let q = queue(30);
         let q2 = q.clone();
         let held = tokio::spawn(async move {
-            q2.hold_from("bearer", "brain_create", "{}", Some("debug"))
+            q2.hold_from("bearer", "brain_create", "{}", Some("debug"), None)
                 .await
         });
         let id = wait_for_pending(&q).await;
@@ -329,7 +369,7 @@ mod tests {
 
         let q2 = q.clone();
         let held = tokio::spawn(async move {
-            q2.hold_from("bearer", "brain_create", "{}", Some("debug"))
+            q2.hold_from("bearer", "brain_create", "{}", Some("debug"), None)
                 .await
         });
         let id = wait_for_pending(&q).await;
@@ -340,6 +380,68 @@ mod tests {
             .decision_for("bearer", "brain_create")
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_shorter_budget_ends_the_hold_early() {
+        // The caller's deadline wins over the queue's own timeout (CHE-385).
+        let q = queue(60);
+        let started = Instant::now();
+        let outcome = q
+            .hold_from(
+                "bearer",
+                "brain_create",
+                "{}",
+                None,
+                Some(Duration::from_millis(300)),
+            )
+            .await;
+        assert_eq!(outcome, Outcome::TimedOut);
+        assert_eq!(outcome.error_code(), "approval_timeout");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(q.list().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_budget_left_times_out_without_a_card() {
+        let q = queue(60);
+        let mut events = q.events.subscribe();
+        let outcome = q
+            .hold_from("bearer", "brain_create", "{}", None, Some(Duration::ZERO))
+            .await;
+        assert_eq!(outcome, Outcome::TimedOut);
+        assert!(q.list().unwrap().is_empty());
+        assert!(
+            events.try_recv().is_err(),
+            "a card was raised with no time to answer it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_hold_leaves_no_orphan() {
+        // The caller hangs up mid-wait, so the hold's future is dropped before it returns. The
+        // card and the `pending` row must go with it, not wait for the next restart (CHE-383).
+        let q = queue(60);
+        let mut events = q.events.subscribe();
+        let q2 = q.clone();
+        let held = tokio::spawn(async move { q2.hold("bearer", "brain_create", "{}").await });
+        let id = wait_for_pending(&q).await;
+
+        held.abort();
+        assert!(held.await.unwrap_err().is_cancelled());
+
+        assert!(
+            q.list().unwrap().is_empty(),
+            "the pending row outlived its caller"
+        );
+        assert!(q.resolve(&id, Resolution::AllowOnce).is_err());
+        let mut resolved = None;
+        while let Ok(event) = events.try_recv() {
+            if let GatewayEvent::PendingResolved { id: rid, outcome } = event {
+                resolved = Some((rid, outcome));
+            }
+        }
+        assert_eq!(resolved, Some((id, "cancelled".to_string())));
     }
 
     #[tokio::test]

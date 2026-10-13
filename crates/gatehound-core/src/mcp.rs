@@ -27,7 +27,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Legacy revisions, kept for clients that open with `initialize`. The modern, stateless
 /// revisions live in [`protocol::MODERN_VERSIONS`].
@@ -488,16 +488,35 @@ pub async fn run_call(
 
     if decision == Decision::Ask {
         let preview = redact::for_log(&args, redact::PREVIEW_BYTES);
+        // A client's call deadline covers the wait for approval too, with a second spare to
+        // send the answer. Otherwise a write nobody approves outlasts the client — Paperclip
+        // hangs up at 10s and drops every tool on the connection (CHE-212, CHE-383). A hand
+        // fire keeps the full wait: the operator is the one approving, and nobody hangs up.
+        let within = gw
+            .cfg
+            .call_deadline_secs
+            .filter(|_| origin == Origin::Client)
+            .map(|d| {
+                Duration::from_secs(d)
+                    .saturating_sub(Duration::from_secs(1))
+                    .saturating_sub(started.elapsed())
+            });
         let outcome = gw
             .approvals
-            .hold_from(identity, name, &preview, origin.label())
+            .hold_from(identity, name, &preview, origin.label(), within)
             .await;
         decision_label = outcome.log_decision().to_string();
         match outcome {
             Outcome::Allowed => decision = Decision::Allow,
             other => {
+                let waited = gw.approvals.wait_for(within);
                 let message = match other {
                     Outcome::Denied => format!("'{identity}' is not permitted to call {name}"),
+                    Outcome::TimedOut if waited < gw.approvals.timeout() => format!(
+                        "nobody approved this call within {:.0}s, all the gateway's call deadline \
+                         (call_deadline_secs) leaves for approval",
+                        waited.as_secs_f32()
+                    ),
                     Outcome::TimedOut => format!(
                         "nobody approved this call within {}s",
                         gw.approvals.timeout().as_secs()
