@@ -212,13 +212,30 @@ impl ApprovalQueue {
 
     /// Deliver a human decision. Fails if the id is unknown, which happens when the caller
     /// already timed out.
+    ///
+    /// When the answer cannot be delivered, the card it was given on is cleared too. Otherwise
+    /// a card whose caller is gone stays on screen and every press on it fails the same way
+    /// (CHE-385: "Always allow this" on the 09:58 orphan went dark and did nothing).
     pub fn resolve(&self, id: &str, resolution: Resolution) -> Result<()> {
-        let tx =
-            self.waiters.lock().unwrap().remove(id).ok_or_else(|| {
-                anyhow!("no pending approval {id} (it may have already timed out)")
-            })?;
-        tx.send(resolution)
-            .map_err(|_| anyhow!("the caller for {id} is gone"))
+        let tx = self.waiters.lock().unwrap().remove(id);
+        let delivered = match tx {
+            Some(tx) => tx.send(resolution).is_ok(),
+            None => false,
+        };
+        if delivered {
+            return Ok(());
+        }
+        if let Err(e) = self.store.remove_pending(id) {
+            tracing::warn!(error = %e, "could not clear an undeliverable approval");
+        }
+        self.events.emit(GatewayEvent::PendingResolved {
+            id: id.to_string(),
+            outcome: "gone".to_string(),
+        });
+        Err(anyhow!(
+            "this call already ended, so there was nothing left to answer: the client that \
+             asked gave up or timed out. Nothing ran, and the card has been cleared."
+        ))
     }
 
     /// Shutdown: drop every waiter so held calls return `ShuttingDown` instead of hanging
@@ -434,14 +451,42 @@ mod tests {
             q.list().unwrap().is_empty(),
             "the pending row outlived its caller"
         );
-        assert!(q.resolve(&id, Resolution::AllowOnce).is_err());
         let mut resolved = None;
         while let Ok(event) = events.try_recv() {
             if let GatewayEvent::PendingResolved { id: rid, outcome } = event {
                 resolved = Some((rid, outcome));
             }
         }
-        assert_eq!(resolved, Some((id, "cancelled".to_string())));
+        assert_eq!(resolved, Some((id.clone(), "cancelled".to_string())));
+        assert!(q.resolve(&id, Resolution::AllowOnce).is_err());
+    }
+
+    #[tokio::test]
+    async fn answering_a_card_whose_caller_is_gone_clears_it() {
+        // A row with no waiter behind it: what a crash, or the pre-CHE-385 hang-up, left behind.
+        let q = queue(30);
+        q.store
+            .add_pending("orphan", "bearer", "brain_create", "{}", None)
+            .unwrap();
+        let mut events = q.events.subscribe();
+
+        let err = q.resolve("orphan", Resolution::AllowAlways).unwrap_err();
+        assert!(err.to_string().contains("already ended"), "{err}");
+        assert!(
+            q.list().unwrap().is_empty(),
+            "the dead card is still listed"
+        );
+        assert!(
+            q.store
+                .decision_for("bearer", "brain_create")
+                .unwrap()
+                .is_none(),
+            "an answer nobody received must not write a rule"
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Ok(GatewayEvent::PendingResolved { ref outcome, .. }) if outcome == "gone"
+        ));
     }
 
     #[tokio::test]
