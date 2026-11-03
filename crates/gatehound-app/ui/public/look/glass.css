@@ -1,0 +1,313 @@
+/* Design system v2.0 — the canonical look layer, "Soft glass". Loaded after the site's own
+   component CSS on every page; every value comes from tokens.css. Its source is public/glass.css
+   in chen97/todo: edit it there, never in a copy. Other repos copy this file and tokens.css as-is
+   with tools/sync-look.sh, some of them public, so keep people's names, hostnames and issue keys
+   out of every comment here. Rules for todo's own parts (rows, habits, pets,
+   the shop) sit here too: in another site they match nothing and cost nothing.
+
+   Performance: a card does not overlap other content, and the mesh behind it is already soft, so a
+   blur under a card would change nothing you can see. Cards are translucent with NO backdrop blur.
+   Only what floats over content blurs: the tab bar, the More sheet, a dialog, the toast and the
+   pets' stats over the jungle. Scrolling stays a plain composited scroll on a phone. */
+
+/* ------------------------------------------------------------ shell geometry */
+
+:root { --tabbar-h: 64px; --side-w: 256px; }
+
+/* Reduced transparency: no blur anywhere (tokens.css makes every surface solid and drops the mesh). */
+@media (prefers-reduced-transparency: reduce) {
+  *, *::before, *::after { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+}
+
+/* ------------------------------------------------------------ the page */
+
+/* The mesh is a fixed layer of its own, so it never repaints on scroll (iOS ignores
+   background-attachment: fixed). */
+body { background: var(--bg); }
+body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: var(--mesh); pointer-events: none; }
+
+.glass-float {
+  background: var(--bar-glass); border: 1px solid var(--glass-line); box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6); backdrop-filter: blur(24px) saturate(1.6);
+}
+
+/* ------------------------------------------------------------ header */
+
+.top { align-items: flex-end; }
+.top-title { display: flex; flex-direction: column; }
+.top h1 { font-size: var(--t-4xl); font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
+.top .meta.eyebrow {
+  order: -1; margin-bottom: var(--s1);
+  font-size: var(--t-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+}
+.top .meta:not(.eyebrow) { margin-top: var(--s1); }
+.top-actions { align-self: center; }
+.top .back { align-self: center; }
+
+/* The person switch: a frosted segmented control. */
+.segmented { background: var(--in); border: 0; border-radius: 14px; padding: 2px; }
+.segmented a, .segmented button { border-radius: 12px; font-weight: 600; }
+.segmented a[aria-current="page"],
+.segmented button[aria-pressed="true"], .segmented button[aria-checked="true"] {
+  background: var(--glass-2); border-color: transparent; box-shadow: 0 2px 8px rgba(40, 50, 120, .12);
+}
+:root[data-theme="dark"] .segmented :is(a[aria-current="page"], button[aria-pressed="true"], button[aria-checked="true"]) { background: rgba(255, 255, 255, .16); box-shadow: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .segmented :is(a[aria-current="page"], button[aria-pressed="true"], button[aria-checked="true"]) { background: rgba(255, 255, 255, .16); box-shadow: none; }
+}
+@media (min-width: 761px) { .who { background: var(--glass); border: 1px solid var(--glass-line); } }
+
+/* ------------------------------------------------------------ cards */
+
+.card, .notice, .empty {
+  background: var(--glass); border: 1px solid var(--glass-line); box-shadow: var(--glass-shadow);
+  border-radius: var(--r-card);
+}
+.card { padding: var(--s4) 18px var(--s2); margin-bottom: var(--s4); }   /* 18: the mockup's inset, between --s4 and --s5 */
+.card.quickadd { padding: 6px 6px 6px var(--s3); border-radius: 18px; }
+.card.pet-scene { padding: 0; }
+.card h3, .card-head h3 { font-size: var(--t-xl); font-weight: 700; letter-spacing: -0.015em; }
+@media (max-width: 760px) { .card h3, .card-head h3 { font-size: var(--t-2xl); } }
+.card-head { align-items: center; margin-bottom: var(--s1); }
+.card-head h3 .badge, .card h3 .badge { background: var(--in); color: var(--mut); padding: 1px 8px; font-size: var(--t-xs); vertical-align: 2px; }
+.card-head a { font-size: var(--t-md); font-weight: 500; }
+.card .empty { background: none; box-shadow: none; border: 0; }
+
+/* Notices keep their status edge, on glass. The left edge is the status mark (non-text, ≥3:1). */
+.notice { border-radius: 20px; padding: 14px var(--s4); }
+.notice.error { border-left: 3px solid var(--bad); background: color-mix(in srgb, var(--bad) 8%, var(--glass)); }
+.notice.warn { border-left: 3px solid var(--ac); }
+
+.empty { border-style: solid; }
+.empty.failed { border-color: color-mix(in srgb, var(--bad) 40%, var(--glass-line)); }
+
+/* ------------------------------------------------------------ rows */
+
+.task { border-bottom-color: var(--line); }
+.task-title { font-size: var(--t-lg); font-weight: 500; }
+.task-body { padding: 12px 0; }   /* 12 = --s3; a 56px row at default size */
+.task-meta { font-size: var(--t-sm); }
+
+/* The category: a soft dot, then its name. The name carries the meaning; the dot is decoration. */
+.cat { display: inline-flex; align-items: center; gap: 6px; }
+.cat > i { width: 8px; height: 8px; border-radius: var(--r-full); background: var(--mut); flex: none; }
+.cat-money > i { background: var(--cat-1); }
+.cat-life_admin > i { background: var(--cat-2); }
+.cat-housework > i { background: var(--cat-3); }
+.cat-workout_health > i { background: var(--cat-4); }
+.cat-social > i { background: var(--cat-5); }
+.cat-travel > i { background: var(--cat-6); }
+.cat-work > i { background: var(--cat-7); }
+.cat-ai_team > i { background: var(--cat-8); }
+
+/* The due state, the only coloured words on a row: red when late, indigo when due soon. */
+.due { font-weight: 600; color: var(--mut); }
+.due.bad { color: var(--bad-tx); }
+.due.waiting { color: var(--ac-tx); }
+
+/* EXP: a small indigo capsule with a spark. */
+.pill.exp {
+  display: inline-flex; align-items: center; gap: 3px;
+  border: 0; padding: 2px 8px; background: color-mix(in srgb, var(--ac) 12%, transparent);
+  color: var(--ac-tx); font-weight: 600;
+}
+.pill.exp::before {
+  content: ""; width: 11px; height: 11px; flex: none; background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2l2.3 6.7L21 11l-6.7 2.3L12 20l-2.3-6.7L3 11l6.7-2.3z'/%3E%3C/svg%3E") center / contain no-repeat;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2l2.3 6.7L21 11l-6.7 2.3L12 20l-2.3-6.7L3 11l6.7-2.3z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.pill.exp.imp { color: var(--ac-tx); font-weight: 700; }
+.pill.exp.spent { border: 1px dashed color-mix(in srgb, var(--ac) 45%, transparent); background: none; }
+.task .pill.waiting, .notice .pill.waiting { background: color-mix(in srgb, var(--ac) 12%, transparent); }
+.task .pill.bad, .notice .pill.bad { background: color-mix(in srgb, var(--bad) 12%, transparent); }
+.badge { background: var(--in); }
+/* Counts sit on stacked glass (a chip, a pressed tab): their ink leans toward --tx so they keep 4.5:1
+   on the brightest bed, measured. */
+.badge, .msg-count { color: color-mix(in srgb, var(--tx) 45%, var(--mut)); }
+
+/* The tick: a 22px circle; done fills with the indigo gradient and springs. */
+.task-tick input, .habit-chip input, .yday-mark {
+  width: 22px; height: 22px; border: 1.75px solid var(--mut); background: color-mix(in srgb, var(--panel) 50%, transparent);
+}
+.task-tick input:checked, .habit-chip input:checked, .yday[aria-pressed="true"] .yday-mark {
+  background: var(--grad); border-color: var(--ac-fill);
+}
+/* The spring plays for the tick just made (it holds focus), not for every done row a re-render draws. */
+.task-tick input:checked:focus, .habit-chip input:checked:focus {
+  animation: tick-spring 220ms var(--ease-out), tick-glow 600ms var(--ease-out);
+}
+.yday .yday-mark { width: 16px; height: 16px; }
+@keyframes tick-spring { 0% { transform: scale(.9); } 60% { transform: scale(1.06); } 100% { transform: none; } }
+@keyframes tick-glow {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ac) 45%, transparent); }
+  100% { box-shadow: 0 0 0 8px transparent; }
+}
+
+/* The pass button: quiet until hovered. */
+.pass-btn { border-radius: var(--r-full); }
+
+/* ------------------------------------------------------------ buttons and fields */
+
+button { border-radius: var(--r-full); }
+button.primary { background: var(--grad); box-shadow: 0 6px 16px -6px var(--ac-fill); }
+button.primary:hover { background: var(--grad); filter: brightness(.94); }
+button.primary:disabled { background: var(--in); box-shadow: none; filter: none; }
+button.ghost { background: var(--in); border-color: transparent; color: var(--tx); }
+button.ghost:hover { background: var(--line-strong); }
+a.button { border-radius: var(--r-full); background: var(--in); border-color: transparent; color: var(--tx); }
+.icon-btn { border-radius: var(--r-full); }
+.segmented button { background: transparent; }
+.day-picks button[aria-pressed="true"], .textsize button[aria-pressed="true"] { background: var(--grad); }
+.swatches button, .pet-poke { background: none; }
+
+input:not(:where([type="checkbox"], [type="radio"])), select, textarea {
+  background: color-mix(in srgb, var(--panel) 70%, transparent); border-color: var(--line-strong); border-radius: 12px;
+}
+.quickadd .qa-field input { background: transparent; border-color: transparent; }
+.quickadd .qa-field input:focus-visible { border-color: var(--ac); }
+.quickadd .qa-main button.primary { padding-inline: 18px; }
+.check { background: var(--glass-2); border-color: var(--line); border-radius: 14px; }
+
+/* ------------------------------------------------------------ habits strip, principle */
+
+.habit-chip { background: var(--glass-2); border-color: var(--line); }
+.habit-chip:has(input:checked) { border-color: color-mix(in srgb, var(--ac) 35%, var(--line)); }
+.potd:not(.compact) { border-left: 3px solid var(--ac); }
+.potd-text { font-weight: 650; }
+
+/* ------------------------------------------------------------ pets on Today */
+
+.card.pet-scene { border-radius: 26px; overflow: hidden; }
+.scene-stage { border-radius: 26px 26px 0 0; }
+.pet-scene .jungle, .pet-scene .jungle-corner { filter: blur(1.4px) saturate(1.15); }
+.scene-stage::after {
+  content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background: linear-gradient(180deg, transparent 55%, color-mix(in srgb, var(--bg) 35%, transparent));
+}
+.pet-scene .pet-frame.scene svg { filter: drop-shadow(0 6px 8px rgba(30, 40, 90, .22)); }
+.scene-tags { border-top: 0; gap: var(--s2); padding: var(--s2); }
+.pet-tag, .pet-tag:first-child, .pet-tag:last-child {
+  border-radius: 18px; background: var(--glass-2); border: 1px solid var(--glass-line);
+}
+.pet-tag + .pet-tag { border-left: 1px solid var(--glass-line); }
+/* This page's pet: an indigo ring round its card (form), as well as its ring in the scene. */
+.pet-tag.mine { box-shadow: 0 0 0 2px var(--ac); }
+.progress { background: var(--in); }
+.progress > span { background: var(--grad-soft); }
+
+/* The Pet page and the shop. */
+.gear { background: var(--glass-2); border-color: var(--line); border-radius: 16px; }
+.gear-well { background: var(--in); border-radius: 12px; }
+.gear.worn { border-color: color-mix(in srgb, var(--ac) 45%, transparent); }
+
+/* ------------------------------------------------------------ the shell: phone and tablet */
+
+.side {
+  left: max(12px, env(safe-area-inset-left)); right: max(12px, env(safe-area-inset-right));
+  bottom: max(12px, calc(env(safe-area-inset-bottom) - 8px));
+  height: var(--tabbar-h); padding: 6px; border-radius: 32px; border-top: 1px solid var(--glass-line);
+  background: var(--bar-glass); border: 1px solid var(--glass-line); box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(24px) saturate(1.8); backdrop-filter: blur(24px) saturate(1.8);
+  box-sizing: border-box; display: flex;
+}
+main { padding-bottom: calc(var(--tabbar-h) + var(--s6) + env(safe-area-inset-bottom)); }
+.toast-host { bottom: calc(var(--tabbar-h) + var(--s5) + env(safe-area-inset-bottom)); }
+.side .in-more, .side .nav-settings { display: none; }
+.nav-item {
+  flex: 1 1 0; min-height: 52px; border-radius: 26px; position: relative;
+  font-size: var(--t-xs); font-weight: 600; gap: 2px; background: none; border: 0; padding: 0; color: var(--mut);
+}
+.nav-item svg { width: 24px; height: 24px; padding: 0; stroke-width: 1.8; }
+@media (max-width: 1023px) { .nav-item svg { padding-inline: 0; } }
+.nav-item:hover { background: none; }
+.nav-item[aria-current="page"], .nav-more.on { color: var(--ac-tx); background: var(--glass-2); }
+.nav-item[aria-current="page"] svg { color: currentColor; background: none; }
+.more-dot {
+  position: absolute; top: 6px; left: calc(50% + 7px); width: 9px; height: 9px; border-radius: var(--r-full);
+  background: var(--ac-fill); box-shadow: 0 0 0 2px var(--panel);
+}
+.nav-count { display: none; }
+
+/* The More sheet: a frosted sheet over the tab bar. */
+.more-sheet {
+  margin: auto auto max(12px, env(safe-area-inset-bottom)); width: min(420px, calc(100% - 24px)); box-sizing: border-box;
+  padding: var(--s2); border-radius: 28px; color: var(--tx);
+  background: var(--bar-glass); border: 1px solid var(--glass-line); box-shadow: var(--shadow-3);
+  -webkit-backdrop-filter: blur(24px) saturate(1.8); backdrop-filter: blur(24px) saturate(1.8);
+}
+.more-sheet[open] { animation: sheet-in var(--d-enter) var(--ease-out); }
+.more-sheet::backdrop { background: var(--scrim); }
+@keyframes sheet-in { from { transform: translateY(16px); opacity: 0; } to { transform: none; opacity: 1; } }
+.more-list { display: flex; flex-direction: column; }
+.more-link {
+  display: flex; align-items: center; gap: var(--s3); min-height: 52px; padding: 0 var(--s4);
+  border-radius: 18px; color: var(--tx); text-decoration: none; font-size: var(--t-lg); font-weight: 550;
+}
+.more-link svg { width: 22px; height: 22px; fill: none; stroke: var(--mut); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.more-link[aria-current="page"] { background: var(--glass-2); color: var(--ac-tx); }
+.more-link[aria-current="page"] svg { stroke: currentColor; }
+.more-count { margin-left: auto; min-width: 22px; padding: 1px 8px; box-sizing: border-box; text-align: center; border-radius: var(--r-full);
+              background: var(--ac-fill); color: var(--on-accent); font-size: var(--t-sm); font-weight: 650; font-variant-numeric: tabular-nums; }
+.more-count:empty { display: none; }
+@media (hover: hover) and (pointer: fine) { .more-link:hover { background: var(--in); } }
+.more-sheet form { margin: var(--s1) 0 0; }
+.more-close { width: 100%; min-height: 48px; background: var(--in) !important; border: 0 !important; font-size: var(--t-lg); font-weight: 600; }
+
+/* ------------------------------------------------------------ the shell: desktop */
+
+@media (min-width: 1024px) {
+  .app { grid-template-columns: calc(var(--side-w) + 24px) minmax(0, 1fr); }
+  .side {
+    position: sticky; top: 12px; left: auto; right: auto; bottom: auto; margin: 12px;
+    height: calc(100vh - 24px); border-radius: 26px; padding: 28px var(--s4) 20px;
+    background: var(--glass); -webkit-backdrop-filter: none; backdrop-filter: none;
+    flex-direction: column; gap: 2px;
+  }
+  .side .in-more { display: flex; }
+  .side .nav-more { display: none; }
+  .side .brand { display: flex; align-items: center; gap: 10px; padding: 0 var(--s3) var(--s5); font-size: var(--t-xl); font-weight: 700; }
+  .nav-item {
+    flex: none; flex-direction: row; justify-content: flex-start; gap: var(--s3);
+    min-height: 40px; padding: 0 var(--s3); border-radius: 12px;
+    font-size: var(--t-base); font-weight: 500; color: var(--tx);
+  }
+  .nav-item svg { width: 20px; height: 20px; color: var(--mut); }
+  .nav-item[aria-current="page"] { background: var(--glass-2); color: var(--tx); font-weight: 650; box-shadow: 0 2px 8px rgba(40, 50, 120, .08); }
+  .nav-item[aria-current="page"] svg { color: var(--ac-tx); }
+  .nav-item[aria-current="page"]::before { content: none; }
+  @media (hover: hover) and (pointer: fine) { .nav-item:hover:not([aria-current="page"]) { background: var(--in); } }
+  .nav-count { display: block; margin-left: auto; color: var(--mut); font-size: var(--t-xs); }
+  .nav-count:empty { display: none; }
+  main { padding: 36px var(--s6) var(--s6); }
+  .toast-host { left: calc(var(--side-w) + 24px); bottom: var(--s5); }
+}
+.brand-mark { display: none; }
+@media (min-width: 1024px) {
+  .brand-mark { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 9px; background: var(--grad); color: #fff; }
+  .brand-mark svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+}
+
+/* ------------------------------------------------------------ floating surfaces */
+
+.modal { background: var(--panel); border-color: var(--glass-line); border-radius: 26px; }
+.modal-back { -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+@media (max-width: 760px) { .modal-sheet { border-radius: 0; } }
+.toast {
+  border-radius: 20px; background: var(--bar-glass); border-color: var(--glass-line);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6); backdrop-filter: blur(24px) saturate(1.6);
+}
+.reward-chip { background: var(--panel); border-color: var(--glass-line); color: var(--ac-tx); }
+
+/* ------------------------------------------------------------ reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+  .task-tick input:checked:focus, .habit-chip input:checked:focus { animation: none; }
+  .more-sheet[open] { animation: none; }
+}
+
+/* A wrapped meta line never starts with a stray "·": the separator hangs in the gap before its
+   item, and the line's own left edge clips the one that would start a line. */
+.task-meta { overflow: hidden; column-gap: 14px; }
+.task-meta > * + * { position: relative; }
+.task-meta > * + *::before { position: absolute; left: -10px; margin: 0; }
+.task-meta > .exp-pay { overflow: visible; }

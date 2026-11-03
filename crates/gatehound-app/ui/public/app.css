@@ -1,166 +1,22 @@
-/* MCP Gatehound — the window's visual system.
+/* MCP Gatehound — the window's components.
  *
- * Dark-first, because it lives in a menubar and is usually opened next to a terminal. The
- * rules that matter and are easy to lose:
+ * Design system v2.0, the to-do "Soft glass" look. The tokens and the glass layer are not here:
+ * they are copied verbatim from chen97/todo into public/look/ by tools/sync-look.sh, and
+ * index.html loads tokens.css, this file (public/app.css), glass.css, then shell.css. This file never declares a
+ * token. The rules that matter and are easy to lose:
  *
  *   - One spacing scale. Space between cards is larger than space inside them, which is what
  *     makes a page read as groups rather than a list of boxes.
  *   - Prose is capped at a readable measure. A window can be 1600px wide; a sentence should
  *     not be.
  *   - Anything pressable answers the press (`:active` scale), and anything focusable shows it.
- *   - Colour carries meaning — green ran, blue waits, red failed — and nothing else is
- *     coloured, so those three keep meaning something.
+ *   - Colour carries meaning — green ran, indigo waits, red failed — and nothing else is
+ *     coloured, so those three keep meaning something. A filled accent surface is `--ac-fill`
+ *     with white ink; `--ac` is for marks and `--ac-tx` for text.
  *
- * The token block below is the company design system's, copied verbatim rather than adapted:
- * this is the app the system was seeded *from*, so anything that drifts here drifts in the
- * standard's own reference. The only variable this file adds is `--scroll-face`, which is not a
- * token — it is a per-box hint naming the surface a scrollbar floats on, set where it is used.
+ * The only variable this file adds is `--scroll-face`, which is not a token — it is a per-box
+ * hint naming the solid surface a scrollbar floats on, set where it is used.
  */
-
-:root {
-  /* ---- Surfaces: furthest back to nearest ----
-     Three steps plus an input well. Enough to say "page", "card", "control" without turning
-     depth into decoration. A fourth surface is almost always a card that should have been one
-     card. */
-  --bg: #12161c;         /* the page */
-  --panel: #1a1f27;      /* a card, a modal */
-  --panel-2: #212832;    /* a raised thing on a card: a tile, a choice, a default button */
-  --in: #262d37;         /* an input well, a hover fill, a code block on a card */
-  --line: #2c3540;       /* a divider, a quiet border */
-  --line-strong: #3a4552;/* a control's border, a scrollbar thumb */
-
-  /* ---- Ink ---- */
-  --tx: #e8ecf1;         /* body and heading */
-  --mut: #8d99a8;        /* secondary: meta, hints, table headers, placeholders */
-  --on-accent: #08101c;  /* ink on a filled accent surface. Unlike every other ink token this
-                            one FLIPS between schemes — near-black in dark, white in light —
-                            because the accent is light in dark and dark in light. It is still
-                            one literal per scheme. See § the ink that flips. */
-
-  /* ---- Axis 1: status. The three meanings an *operation* can have. ----
-     v1.5: the amber that stood here is gone from the estate. Blue carries both "waits" and
-     "interactive emphasis", which is exactly the double duty the one amber carried before it,
-     so this is a hue change and not a new meaning. */
-  --ac:  #7aacf7;        /* waits / needs a person / interactive accent */
-  --ok:  #5ccb8b;        /* ran / succeeded / granted */
-  --bad: #f07167;        /* failed / denied / destructive */
-
-  /* Text-safe variants. In dark these equal the base; in light --ok and --bad fail 4.5:1 as
-     text and their -tx variants do not. Rule: borders, dots, rings, bars and edges use the
-     base. TEXT uses the -tx variant. */
-  --ac-tx: var(--ac);    /* equal in BOTH schemes since v1.5 — § the accent needs no split */
-  --ok-tx: #5ccb8b;
-  --bad-tx: #f07167;
-
-  /* Filled accent surface. Also equal to --ac in both schemes since v1.5. Kept as a named
-     token so a component can still say which job it is doing, and so that CSS written
-     against v1.4 keeps working. */
-  --ac-fill: var(--ac);
-
-  /* Hover for a filled accent surface. A token, not an inline color-mix, because the two
-     schemes must travel in OPPOSITE directions: dark lightens, light darkens. Both moves
-     increase contrast against that scheme's own --on-accent. § hover travels both ways. */
-  --ac-hover: color-mix(in srgb, var(--ac) 88%, #fff);
-
-  /* Deprecated v1.4 spellings. Kept for one version so a repo that has not been migrated
-     still renders correctly — it simply turns blue. Removed in v1.6. Do not write these. */
-  --am: var(--ac);  --am-tx: var(--ac-tx);  --am-fill: var(--ac-fill);
-
-  /* ---- Spacing. 2 is the only sub-4 value that exists. ---- */
-  --s0: 2px;  --s1: 4px;  --s2: 8px;  --s3: 12px;
-  --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
-
-  /* ---- Radius ---- */
-  --r-sm: 7px;      /* something nested inside a control */
-  --r: 10px;        /* controls: button, input, pill-less badge, notice, tile */
-  --r-lg: 14px;     /* cards, modals, empty states */
-  --r-xl: 16px;     /* a hero object that is the subject of its screen */
-  --r-full: 999px;  /* pills, dots, scrollbar thumbs */
-
-  /* ---- Market colour. Unused here — GateHound plots nothing — and carried anyway, because a
-     `:root` that is a subset of the standard's is one a future chart quietly invents values
-     against. See `references/tokens.md` → "Market colour". ---- */
-  --up: #3fd6bb; --down: #ff6b8a; --neutral: #8d99a8;
-  --up-tx: #3fd6bb; --down-tx: #ff6b8a; --neutral-tx: #8d99a8;
-
-  /* ---- The user text-size factor. See `references/tokens.md` → "Type scaling". ----
-     Every size quoted anywhere in this system is the base value, i.e. the size at factor 1.
-     GateHound has no text-size control yet, so this stays 1 — but the sizes below are already
-     expressed against it, which is what makes adding that control a one-line change rather than
-     a re-migration of every step. */
-  --t-scale: 1;                                              /* .875 | 1 | 1.125 | 1.25 | 1.5 */
-  --t-scale-display: calc(1 + (var(--t-scale) - 1) * 0.5);   /* damped — display type only */
-
-  /* ---- Type: the UI scale. Everything a working screen is built from. ---- */
-  --t-micro: calc(10px * var(--t-scale));   /* uppercase marks: severity, "REQUIRED", icon names */
-  --t-xs: calc(11px * var(--t-scale));      /* pills, badges, table headers, sub-labels */
-  --t-sm: calc(12px * var(--t-scale));      /* meta, hints, code blocks */
-  --t-md: calc(12.5px * var(--t-scale));    /* controls and their labels */
-  --t-base: calc(13.5px * var(--t-scale));  /* body */
-  --t-lg: calc(15px * var(--t-scale));      /* card and dialog headings */
-  --t-xl: calc(17px * var(--t-scale));      /* a screen title, where a screen has one */
-
-  /* ---- Type: the display scale. Type that is the subject, not the content. ----
-     Steps climb at ~1.25x, so every adjacent pair is unmistakably a different size. This is a
-     different scale with a different job, not more of the UI scale — see "Display type" before
-     reaching into it. Nothing in this app is entitled to it: GateHound is all app screens, and
-     `references/tokens.md` is explicit that a settings page or a table does not reach in here. */
-  --t-2xl: calc(20px * var(--t-scale-display));  /* a section title over a group of cards */
-  --t-3xl: calc(26px * var(--t-scale-display));  /* screen title, content-led page; headline stat */
-  --t-4xl: calc(32px * var(--t-scale-display));  /* a page title, content-led or marketing */
-  --t-5xl: calc(40px * var(--t-scale-display));  /* hero headline at a small viewport; hero stat */
-  --t-6xl: calc(48px * var(--t-scale-display));  /* a hero headline */
-  --t-7xl: calc(60px * var(--t-scale-display));  /* a hero on a landing page that is mostly type */
-  --t-8xl: calc(72px * var(--t-scale-display));  /* the single largest thing on a site */
-
-  /* ---- Control height. Scales with type, because a control is sized by its content. ---- */
-  --ctl-h: calc(30px * var(--t-scale));        /* button, input, select */
-  --ctl-h-icon: calc(28px * var(--t-scale));   /* icon button height */
-  --ctl-w-icon: calc(30px * var(--t-scale));   /* icon button width */
-
-  --f-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --f-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-
-  /* ---- Motion ----
-     Taken as-is from Emil Kowalski's animation guidance rather than hand-rolled: the built-in
-     CSS easings are too weak to read as intentional. */
-  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);      /* something arriving */
-  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);  /* something moving between two places */
-  --d-fast: 160ms;   /* things you do dozens of times a day */
-  --d-quick: 200ms;  /* the same, when it travels a distance */
-  --d-enter: 250ms;  /* something arriving, once per real change */
-  --d-slow: 320ms;   /* a composed entrance with a stagger */
-
-  /* ---- Elevation ---- */
-  --shadow-1: 0 1px 2px rgba(0,0,0,.28), 0 8px 24px -12px rgba(0,0,0,.45);
-  --shadow-2: 0 2px 4px rgba(0,0,0,.32), 0 12px 32px -14px rgba(0,0,0,.55);
-  --shadow-3: 0 24px 64px -24px rgba(0,0,0,.6), 0 1px 2px rgba(0,0,0,.28);
-  --scrim: color-mix(in srgb, #000 52%, transparent);
-
-  --measure: 68ch;   /* the widest a sentence may be */
-  --screen: 1080px;  /* the widest a column of cards may be */
-
-  color-scheme: dark light;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f5f7fa; --panel: #ffffff; --panel-2: #f7f9fb; --in: #eef1f5;
-    --line: #dfe4ea; --line-strong: #c8d0d9;
-    --tx: #131820; --mut: #5d6875; --on-accent: #ffffff;
-    --ac: #1964ca; --ok: #1f9254; --bad: #c8382c;
-    --ok-tx: #0e7a46; --bad-tx: #b3241a;
-    /* --ac-tx, --ac-fill and the deprecated --am* aliases all resolve through var(--ac),
-       so light overrides the accent in exactly one place. That is the point of the change. */
-    --ac-hover: color-mix(in srgb, var(--ac) 88%, #000);  /* DARKENS — § hover travels both ways */
-    --up: #0d9488; --down: #e11d48; --neutral: #5d6875;
-    --up-tx: #0f766e; --down-tx: #be123c; --neutral-tx: #5d6875;
-    --shadow-1: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px -12px rgba(16,24,40,.14);
-    --shadow-2: 0 2px 4px rgba(16,24,40,.08), 0 12px 32px -14px rgba(16,24,40,.18);
-    --shadow-3: 0 24px 64px -24px rgba(16,24,40,.28), 0 1px 2px rgba(16,24,40,.06);
-    --scrim: color-mix(in srgb, #0b1017 34%, transparent);
-  }
-}
 
 * { box-sizing: border-box; }
 
@@ -168,45 +24,34 @@ body {
   margin: 0; background: var(--bg); color: var(--tx);
   font: var(--t-base)/1.5 var(--f-sans);
   -webkit-font-smoothing: antialiased;
-  /* The window is the viewport and only the content area scrolls. Letting the page scroll
-     means the scrollbar appears the moment content outgrows the window, taking width from the
-     layout and shifting everything sideways. */
-  height: 100vh; display: flex; flex-direction: column; overflow: hidden;
 }
 
 code, pre, .secret { font-family: var(--f-mono); font-size: var(--t-md); }
 
 /* ---- Chrome ---------------------------------------------------------------- */
 
-.top { flex: none; background: var(--bg); border-bottom: 1px solid var(--line); }
-header { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s5) var(--s2); }
-/* The window's title, and the one change in the design-system migration a person can see. It was
-   the last literal size in this file; `title-size.mjs` is why it is this token and not a smaller
-   one. Measured, because every plausible guess here turned out to be wrong:
+/* The large-title header names the screen; glass.css sets the title (`--t-4xl`, 800). The
+   gateway's status sits under it: its dot, then the sentence. */
+h1 { margin: 0; }
+.top { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2) var(--s3); margin-bottom: var(--s5); }
+.top-title { flex: 1; min-width: 0; }
+.top .meta { margin-bottom: 0; }
+.top .meta .dot { margin-right: var(--s2); vertical-align: 1px; }
+.top .meta:empty { display: none; }
+.top-actions { display: flex; gap: var(--s1); }
 
-     - The title was not "a pixel from a card's `h3`" — it was *below* the largest heading in the
-       window. An approval card's `h3` is `--t-lg` 15px, so at 14px the thing naming the app was
-       smaller than the thing naming one request inside it.
-     - `--t-lg` would not fix that, it would tie: 15px is also `.modal h3`. Three different things
-       — window, dialog, pending approval — at one size is not a ladder.
-     - A bigger title costs no vertical room. The header's height is set by the `Pause gateway`
-       button at `--ctl-h`, so the chrome is 90px at 10px, 14px or 17px alike. The "compact
-       menubar window cannot afford it" argument is worth exactly 0px, and the probe asserts it.
-
-   `--t-xl` is the scale's ceiling for an app screen (v1.1 § display type: app screens do not
-   reach into the display scale), which is the right ceiling for the one title a window has.
-
-   Worth knowing if you are reading the issue alongside this file: the decision that came back
-   asked for `--t-lg`, on the grounds that 15px reads as a title against a 12.5px card `h3` and
-   costs less height than 17px. Both halves measured false — 12.5px is an *ordinary* card's `h3`,
-   while the two headings a title actually competes with are already 15px, and the height
-   difference is 0px. It was answered on the ordinary card, which is the one you see when you read
-   the file rather than open the window. Run `title-size.mjs --h1=15px` and it fails three
-   assertions. Flagged back rather than applied; if it is reinstated, this line is the whole of
-   the change and the probe will go red to say so. */
-h1 { font-size: var(--t-xl); margin: 0; letter-spacing: -0.01em; }
-.sub { color: var(--mut); font-size: var(--t-sm); }
-header .ghost { margin-left: auto; }
+/* The sidebar's base, from look.md § the tab bar and the sidebar; glass.css and shell.css finish
+   it. Its items are buttons, because a screen here is a view of one window, not an address. */
+.side { display: flex; z-index: 50; }
+.side .brand, .nav-count { display: none; }
+.nav-item {
+  min-width: 0; box-sizing: border-box; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; color: var(--mut); text-decoration: none;
+  -webkit-tap-highlight-color: transparent; transition: color var(--d-fast) var(--ease-out);
+}
+.nav-item svg { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
+.nav-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+main { display: block; box-sizing: border-box; min-width: 0; }
 
 /* `inline-block` so a width and a height apply outside a flex row too — in a table cell an
    inline element ignores both and the dot renders as a sliver. A flex container blockifies its
@@ -244,81 +89,49 @@ table.args input { width: 100%; }
 td.tool-acts { white-space: nowrap; width: 1%; }
 td.tool-acts button + button { margin-left: 6px; }
 
-nav { display: flex; gap: var(--s1); padding: 0 var(--s5); position: relative; }
-nav button {
-  background: none; border: none; color: var(--mut); cursor: pointer;
-  padding: var(--s2) var(--s3); font: inherit; font-weight: 500; border-radius: var(--r) var(--r) 0 0;
-  position: relative; transition: color 160ms var(--ease-out);
-}
-nav button:hover { color: var(--tx); }
-nav button.active { color: var(--tx); }
-/* A bar under the active tab rather than a border on the button: it lines up with the
-   header's rule instead of interrupting it.
-   
-   One element for the whole nav rather than a mark on each button, so it can travel between
-   them. Switching tabs is something you do dozens of times a day, which puts it in the band
-   where motion has to be quick or absent — 200ms, and eased for on-screen movement rather than
-   for an entrance, because this is the same object moving rather than a new one arriving. */
-.tab-bar {
-  position: absolute; bottom: -1px; left: 0; height: 2px; width: 0;
-  background: var(--ac); border-radius: 2px 2px 0 0;
-  transform: translateX(0);
-  transition: transform 200ms var(--ease-in-out), width 200ms var(--ease-in-out);
-  pointer-events: none;
-}
-/* Placing it for the first time, or after the window resized, is not a movement anybody
-   asked to watch. */
-.tab-bar.still { transition: none; }
-
-@media (prefers-reduced-motion: reduce) {
-  .tab-bar { transition: none; }
-}
-
 .badge {
   background: var(--in); color: var(--mut); border-radius: var(--r-full);
   padding: 1px 6px; font-size: var(--t-xs); font-weight: 600; margin-left: var(--s1);
 }
-.badge.hot { background: var(--ac); color: var(--on-accent); }
+.badge.hot { background: var(--ac-fill); color: var(--on-accent); }
 
-main { flex: 1 1 auto; padding: var(--s5); overflow-y: scroll; scrollbar-gutter: stable; }
+main { overflow-y: scroll; scrollbar-gutter: stable; container: main / inline-size; }
 .screen.hidden, .hidden { display: none !important; }
 /* Cards and prose stop at a readable width; a 1600px window should not give 1600px sentences. */
-.screen { max-width: 1080px; margin: 0 auto; }
+.screen, main > .top { max-width: var(--screen); margin-inline: auto; }
 
 /* One scrollbar for the whole window. The platform default is a grey bar in a grey groove —
    the single control that dates a window fastest, and inside a card it draws a hard trough
    across a design that has no other hard edges. Ours is a capsule floating on the surface it
    scrolls: a transparent track, and a thumb inset by a border painted in that surface's own
-   colour, which is what `--scroll-face` carries. A box that scrolls over something other than
-   the page background sets it; everything else inherits the page.
+   colour, which is what `--scroll-face` carries. Glass is translucent, so by default the border
+   is transparent and `background-clip` alone insets the thumb; a box that scrolls over a solid
+   surface (a dialog) names it.
    `scrollbar-width`/`scrollbar-color` are deliberately absent: setting either makes Chromium
    ignore these rules entirely, and the Windows webview is Chromium. */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb {
   background: var(--line-strong); border-radius: var(--r-full);
-  border: 3px solid var(--scroll-face, var(--bg)); background-clip: padding-box;
+  border: 3px solid var(--scroll-face, transparent); background-clip: padding-box;
   min-height: 32px; min-width: 32px;
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--mut); background-clip: padding-box; }
-.card, .modal { --scroll-face: var(--panel); }
-input, select, textarea, .script-body { --scroll-face: var(--in); }
-pre { --scroll-face: var(--bg); }
+.modal { --scroll-face: var(--panel); }
 
 /* ---- Cards ----------------------------------------------------------------- */
 
-.card {
-  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
-  padding: var(--s4); margin-bottom: var(--s3); box-shadow: var(--shadow-1);
-}
+/* The glass card: glass.css sets the surface, edge, radius and padding. */
+.card { margin-bottom: var(--s4); padding-bottom: var(--s4); }
+/* A table wider than its card scrolls inside the card rather than running out of it: the sidebar
+   takes its share of a narrow window first, and the log has eight columns. */
+.card:has(table) { overflow-x: auto; }
 
 /* Anything a click can scroll to stops short of the window edge rather than flush against it.
    `scroll-margin` is the declarative half of that; `block: "nearest"` is the other half, and
    neither works without the other. Zero specificity, so it never competes with a real rule. */
 :where(.card, .checks, .row, table, input, select, textarea) { scroll-margin-block: var(--s4); }
-.card h3 {
-  margin: 0 0 var(--s1); font-size: var(--t-md); font-weight: 650; letter-spacing: -0.006em;
-}
+.card h3 { margin: 0 0 var(--s1); }
 /* The sentence under a heading explains the card; it is not body copy and should not run the
    full width of a wide window. */
 .card > .meta { max-width: 68ch; }
@@ -329,8 +142,7 @@ pre { --scroll-face: var(--bg); }
    calls card were touching. */
 .empty {
   color: var(--mut); text-align: center; padding: var(--s6) var(--s4);
-  border: 1px dashed var(--line); border-radius: var(--r-lg); background: var(--panel);
-  margin-bottom: var(--s3);
+  margin-bottom: var(--s4);
 }
 /* An empty state owes three things — what would be here, why it is not, and the one action that
    fills it. The heading is the first of those and needs to read as ink rather than as meta, so it
@@ -343,21 +155,15 @@ pre { --scroll-face: var(--bg); }
    a card-shaped placeholder — differing only in that the border and heading carry the failure.
    The border takes `--bad` mixed toward `--line` rather than the flat colour: a dashed red box
    at full strength reads as an alarm, and the screen failing to load is not one. */
-.empty.failed { border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
 .empty.failed h4 { color: var(--bad-tx); }
 
-.notice {
-  border: 1px solid var(--line-strong); border-left: 3px solid var(--mut);
-  background: var(--panel-2); border-radius: var(--r);
-  padding: var(--s3); margin: var(--s3) 0;
-}
-.notice.warn { border-left-color: var(--ac); }
+/* glass.css draws the notice and its `.warn` and `.error` edges. */
+.notice { margin: var(--s3) 0; }
 /* Surface level: the operation failed, the screen is intact. Distinct from `.warn`, which this
    app had been using for both — a warning is "mind this", an error is "it did not happen", and
    a reader scanning a column of accent edges cannot tell which one they are looking at. */
-.notice.error { border-left-color: var(--bad); }
 .notice.error strong { color: var(--bad-tx); }
-.notice.ok { border-left-color: var(--ok); }
+.notice.ok { border-left: 3px solid var(--ok); }
 .notice.ok strong { color: var(--ok-tx); }
 .notice strong { display: block; margin-bottom: var(--s0); }
 .notice .meta { margin-top: var(--s0); }
@@ -405,8 +211,8 @@ button {
 button:hover { background: var(--in); }
 /* Instant feedback on press — the interface answering, rather than waiting for the result. */
 button:active { transform: scale(0.97); }
-button.primary { background: var(--ac); color: var(--on-accent); border-color: transparent; font-weight: 650; }
-button.primary:hover { background: var(--ac-hover); }
+/* glass.css finishes the primary (the `--grad` capsule) and the ghost. */
+button.primary { background: var(--ac-fill); color: var(--on-accent); border-color: transparent; font-weight: 650; }
 /* `--bad-tx` for the label, `--bad` for the border: in light the base measures 4.57:1 as text
    against `--panel-2` and the border needs only 3:1, so the two part company. In dark they are
    the same value and this costs nothing. */
@@ -414,8 +220,7 @@ button.danger { color: var(--bad-tx); border-color: color-mix(in srgb, var(--bad
 button.danger:hover { background: color-mix(in srgb, var(--bad) 12%, transparent); }
 /* Quieter than a default button, but still visibly a button — borderless made "Edit" and
    "Reject" read as text, and a control you cannot see is a control nobody presses. */
-button.ghost { background: none; border-color: var(--line); color: var(--mut); }
-button.ghost:hover { background: var(--in); color: var(--tx); border-color: var(--line-strong); }
+button.ghost { border-color: transparent; }
 /* 0.5, not 0.4. Disabled controls are formally exempt from 1.4.3, but 0.4 measured 2.52:1 in
    light — unreadable rather than de-emphasised, and "is this greyed out or is my eye going" is
    not a question a UI should raise. Our floor for disabled text is 3:1; 0.5 gives 4.26 / 3.37.
@@ -437,8 +242,8 @@ button.primary:disabled { background: var(--in); }
    this block also matches input[type=checkbox] and input[type=radio] and deforms both. v1.5.3.
    :where() keeps the selector at specificity (0,0,1), identical to the bare `input` it replaces. */
 input:not(:where([type="checkbox"], [type="radio"])), select {
-  font: inherit; font-size: var(--t-md); color: var(--tx); background: var(--in);
-  border: 1px solid var(--line-strong); border-radius: var(--r);
+  font: inherit; font-size: var(--t-md); color: var(--tx);
+  border: 1px solid var(--line-strong);
   padding: 6px 10px; min-height: var(--ctl-h);
   transition: border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
 }
@@ -479,7 +284,7 @@ th {
 td { padding: 7px var(--s2); border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent); vertical-align: middle; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr { transition: background 120ms var(--ease-out); }
-tbody tr:hover { background: color-mix(in srgb, var(--panel-2) 70%, transparent); }
+tbody tr:hover { background: var(--in); }
 /* Only an actions column is right-aligned. Doing it to every last cell threw the values of
    two-column label/value tables against the far edge, a screen-width away from their labels. */
 td:last-child:has(button) { text-align: right; white-space: nowrap; }
@@ -492,7 +297,7 @@ td:last-child:has(button) { text-align: right; white-space: nowrap; }
 tr.clickable { cursor: pointer; }
 
 pre {
-  background: var(--bg); border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--in); border: 1px solid var(--line); border-radius: var(--r);
   padding: var(--s3); margin: var(--s3) 0 0; overflow-x: auto; font-size: var(--t-sm); line-height: 1.5;
 }
 
@@ -534,23 +339,20 @@ pre {
   border: 1px solid var(--line-strong); color: var(--mut); white-space: nowrap;
   display: inline-block;
 }
-/* Text takes the `-tx` variant, the border and fill take the base. In light the base measures
-   3.28:1 (`--ac`) and 3.50:1 (`--ok`) against `--in` — fine for a 1px border, both failing AA
-   for 11px text. */
-.pill.ok      { color: var(--ok-tx);  border-color: color-mix(in srgb, var(--ok) 40%, transparent);  background: color-mix(in srgb, var(--ok) 10%, transparent); }
-.pill.bad     { color: var(--bad-tx); border-color: color-mix(in srgb, var(--bad) 40%, transparent); background: color-mix(in srgb, var(--bad) 10%, transparent); }
-.pill.waiting { color: var(--ac-tx);  border-color: color-mix(in srgb, var(--ac) 40%, transparent);  background: color-mix(in srgb, var(--ac) 10%, transparent); }
+/* Text takes the `-tx` variant, the border takes the base: a 1px edge needs 3:1, 11px text 4.5. */
+/* No tint under the ink, v2.0: on light glass a 10% `--ok` wash took the label to 4.38:1. The
+   edge and the ink carry the meaning, the same fix ets-booking's pills took. */
+.pill.ok      { color: var(--ok-tx);  border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.pill.bad     { color: var(--bad-tx); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.pill.waiting { color: var(--ac-tx);  border-color: color-mix(in srgb, var(--ac) 45%, transparent); }
 /* The filled variant of `waiting`: something is waiting on a person *right now*. */
-.pill.hot { background: var(--ac); color: var(--on-accent); border-color: transparent; font-weight: 650; }
+.pill.hot { background: var(--ac-fill); color: var(--on-accent); border-color: transparent; font-weight: 650; }
 
 /* ---- A waiting approval ------------------------------------------------------
    The one thing on any screen that is asking for a decision, so it is the one thing given an
    accent edge. If everything were highlighted, nothing would be. */
 
-.card.approval { border-left: 3px solid var(--ac); background: var(--panel-2); }
-/* The one card heading that is a heading rather than a label, so it takes the scale's heading
-   step. This is the "14 → 15" collapse; the other 14 is the window's `h1`, still open. */
-.card.approval h3 { font-size: var(--t-lg); }
+.card.approval { border-left: 3px solid var(--ac); background: var(--glass-2); }
 
 /* ---- Collapsible rows (services, clients) ----------------------------------- */
 
@@ -570,7 +372,7 @@ pre {
 
 /* The board is measured geometry, so it must never be quietly cropped: if it does not fit, it
    scrolls and you can see that it did not. */
-.board-card { padding: var(--s5) var(--s4) var(--s4); overflow-x: auto; }
+.card.board-card { padding: var(--s5) var(--s4) var(--s4); overflow-x: auto; }
 .board {
   position: relative;
   display: grid;
@@ -578,8 +380,8 @@ pre {
   align-items: center;
   /* The traces need somewhere to run. Most of the width goes to the gaps rather than to the
      rails, because the routing between the chip and a tile is the part that says what this is. */
-  column-gap: clamp(44px, 7vw, 132px);
-  row-gap: clamp(40px, 6vw, 72px);
+  column-gap: clamp(44px, 7cqi, 132px);
+  row-gap: clamp(40px, 6cqi, 72px);
 }
 
 .board-wires {
@@ -635,7 +437,9 @@ pre {
 .tile {
   position: absolute; top: 0; height: 40px; z-index: 1;
   display: flex; align-items: center; gap: var(--s2); min-width: 0;
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r);
+  /* Solid, not glass: an expanded tile lies over its neighbours, and their labels must not
+     show through it. */
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r);
   padding: 0 var(--s3); font: inherit; color: var(--tx); text-align: left; cursor: pointer;
   transition: border-color 180ms var(--ease-out), background 180ms var(--ease-out),
               box-shadow 180ms var(--ease-out);
@@ -647,9 +451,9 @@ pre {
 .tile-icon { flex: none; width: 18px; height: 18px; color: var(--mut); position: relative; }
 .tile-dot {
   position: absolute; right: -3px; bottom: -1px; width: 7px; height: 7px;
-  box-shadow: 0 0 0 2px var(--panel-2);
+  box-shadow: 0 0 0 2px var(--panel);
 }
-.tile:hover .tile-dot, .tile:focus-visible .tile-dot { box-shadow: 0 0 0 2px var(--in); }
+.tile:hover .tile-dot, .tile:focus-visible .tile-dot { box-shadow: 0 0 0 2px var(--panel-2); }
 .tile-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5;
                  stroke-linecap: round; stroke-linejoin: round; }
 .tile-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -671,7 +475,7 @@ pre {
      window does not turn one tile into a banner. Without the first, expanding at a narrow
      window pushed the tile past the edge of the card and put a scrollbar under the board. */
   z-index: 5; width: max-content; min-width: 100%; max-width: min(320px, var(--grow, 320px));
-  border-color: var(--line-strong); background: var(--in);
+  border-color: var(--mut); background: var(--panel-2);
   box-shadow: var(--shadow-1);
 }
 /* Outward, always: a tile on the left grows further left, one on the right grows further
@@ -691,7 +495,7 @@ pre {
 /* State indication when this tile is part of a call. */
 .tile-slot.lit .tile {
   border-color: var(--ac);
-  background: color-mix(in srgb, var(--ac) 8%, var(--panel-2));
+  background: color-mix(in srgb, var(--ac) 8%, var(--panel));
 }
 .tile-slot.lit .tile-icon { color: var(--ac); }
 .empty-tile { border-style: dashed; }
@@ -748,7 +552,7 @@ pre {
 .chip-act {
   position: relative;
   display: flex; align-items: center; justify-content: center;
-  width: var(--ctl-w-icon); height: var(--ctl-h-icon); padding: 0;
+  width: var(--ctl-w-icon); height: var(--ctl-w-icon); padding: 0;
   background: none; border: 1px solid transparent; border-radius: var(--r);
   color: var(--mut); cursor: pointer;
   transition: color 160ms var(--ease-out), background 160ms var(--ease-out),
@@ -880,7 +684,8 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
 @keyframes tile-in       { from { opacity: 0; transform: translateY(10px); }  to { opacity: 1; transform: none; } }
 @keyframes chip-in       { from { opacity: 0; transform: scale(.96); }        to { opacity: 1; transform: none; } }
 
-@media (max-width: 780px) {
+/* Measured against the content column, not the window: the sidebar takes its share first. */
+@container main (max-width: 600px) {
   /* Stacked, and the traces stop earning their space. */
   .board { grid-template-columns: minmax(0, 1fr); row-gap: var(--s4); }
   .rail.left, .rail.right, .chip { grid-column: 1; }
@@ -946,10 +751,8 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
   white-space: nowrap;
 }
 .sev-note   { color: var(--mut); border-color: var(--line-strong); }
-.sev-warn   { color: var(--ac-tx); border-color: color-mix(in srgb, var(--ac) 40%, transparent);
-              background: color-mix(in srgb, var(--ac) 10%, transparent); }
-.sev-danger { color: var(--bad-tx); border-color: color-mix(in srgb, var(--bad) 45%, transparent);
-              background: color-mix(in srgb, var(--bad) 12%, transparent); }
+.sev-warn   { color: var(--ac-tx); border-color: color-mix(in srgb, var(--ac) 45%, transparent); }
+.sev-danger { color: var(--bad-tx); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
 
 .findings td { vertical-align: top; padding: var(--s2) var(--s2) var(--s2) 0; }
 .findings td:first-child { width: 62px; }
@@ -979,7 +782,6 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
   min-height: 280px;
   resize: vertical;
   padding: var(--s3);
-  background: var(--in);
   border: 1px solid var(--line);
   border-radius: var(--r);
   color: var(--tx);
@@ -1009,15 +811,14 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
   margin-top: var(--s3);
   padding: var(--s3);
   border: 1px solid var(--line);
-  border-radius: var(--r);
-  background: var(--panel-2);
   cursor: pointer;
   line-height: 1.5;
   transition: border-color var(--d-fast) var(--ease-out);
 }
 .check:hover { border-color: var(--line-strong); }
 .check:has(input:checked) { border-color: color-mix(in srgb, var(--ac) 35%, transparent); }
-.check input { margin-top: var(--s0); flex: none; accent-color: var(--ac); }
+/* `--ac-tx`, not `--ac`: the native tick on `--glass-2` measured 2.99 in dark (todo #37). */
+.check input { margin-top: var(--s0); flex: none; accent-color: var(--ac-tx); }
 
 /* The compact row, for a dense list of things you are ticking rather than a decision you are
    consenting to — a tool picker, a filter, a view toggle. Borderless, baseline-aligned, and the
@@ -1031,7 +832,7 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
   background: none;
   transition: background var(--d-fast) var(--ease-out);
 }
-.check.compact:hover { background: var(--panel-2); border-color: transparent; }
+.check.compact:hover { background: var(--in); border-color: transparent; }
 .check.compact:has(input:checked) { border-color: transparent; }
 .check.compact input { margin-top: 0; min-height: 0; }
 .check.compact .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1042,14 +843,14 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
    list look like a form. */
 
 .grant-group { margin-top: var(--s3); }
-.grant-group .check.group { margin-top: 0; background: var(--panel-2); }
+.grant-group .check.group { margin-top: 0; }
 .grant-group .check.group:has(input:checked),
 .grant-group .check.group:has(input:indeterminate) {
   border-color: color-mix(in srgb, var(--ac) 35%, transparent);
 }
 /* Partly granted is its own answer and has to look like one: the same accent as a full grant,
    but hollow, so "some of these" never reads as "all of these" at a glance. */
-.grant-group .check.group input:indeterminate { accent-color: var(--ac); opacity: .75; }
+.grant-group .check.group input:indeterminate { accent-color: var(--ac-tx); opacity: .75; }
 
 .grant-tools {
   margin-left: var(--s4);
@@ -1089,7 +890,7 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
 .grant-head .grant-twist {
   flex: none; width: 44px; padding: 0;
   display: flex; align-items: center; justify-content: center;
-  border-radius: var(--r);
+  border-radius: var(--r-lg);   /* the check row's radius beside it, not a capsule */
 }
 .grant-head .grant-twist .twist { width: auto; font-size: var(--t-xs); }
 
@@ -1138,12 +939,11 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
   /* A token, because 52% of black over a #f5f7fa page is a dark-mode scrim on a light page.
      `--scrim` is 34% of #0b1017 in light. */
   background: var(--scrim);
-  backdrop-filter: blur(2px);
   opacity: 1;
   transition: opacity var(--d-enter) var(--ease-out);
 }
 .modal {
-  background: var(--panel); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  background: var(--panel); border: 1px solid var(--glass-line);
   box-shadow: var(--shadow-3);
   padding: var(--s5);
   width: 100%; max-height: calc(100vh - var(--s6) * 2);
@@ -1180,7 +980,7 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
 .modal-step .kv td:first-child { width: 140px; }
 .modal-step .kv input, .modal-step .kv select { width: 100%; max-width: 460px; }
 
-.modal h3 { margin: 0; font-size: var(--t-lg); line-height: 1.4; }
+.modal h3 { margin: 0; font-size: var(--t-xl); font-weight: 700; letter-spacing: -0.015em; line-height: 1.4; }
 .modal-p { margin: 0; color: var(--mut); line-height: 1.55; white-space: pre-wrap; }
 .modal-p + .modal-p { margin-top: calc(var(--s2) * -1); }
 
@@ -1199,12 +999,12 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
 .modal-choices { gap: var(--s2); }
 .modal-choice {
   display: flex; align-items: flex-start; gap: var(--s3); cursor: pointer;
-  padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r);
+  padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r-lg);
   background: var(--panel-2);
   transition: border-color 160ms var(--ease-out), background 160ms var(--ease-out);
 }
-.modal-choice:hover { border-color: var(--line-strong); background: var(--in); }
-.modal-choice input { margin: 2px 0 0; flex: none; accent-color: var(--ac); }
+.modal-choice:hover { border-color: var(--line-strong); }
+.modal-choice input { margin: 2px 0 0; flex: none; accent-color: var(--ac-tx); }
 /* Selected state, case 2b: the radio dot carries the selection, so the card takes only the
    35% accent border and keeps its `--panel-2` bed. One border value for every checked control. */
 .modal-choice:has(input:checked) { border-color: color-mix(in srgb, var(--ac) 35%, transparent); }
@@ -1235,4 +1035,12 @@ body.unwatched .chip .pill.hot::after { animation-play-state: paused; }
   /* Fewer and gentler, not none: the fade still says something arrived, the movement goes. */
   .modal-back, .modal { transition-duration: 120ms; }
   .modal-back.pre .modal, .modal-back.leaving .modal { transform: none; }
+}
+
+/* ---- Touch ----------------------------------------------------------------------
+   A desktop window, but a touch screen is still a touch screen: 44px targets there. */
+@media (pointer: coarse) {
+  button, input:not(:where([type="checkbox"], [type="radio"])), select { min-height: 44px; }
+  .chip-act { width: 44px; height: 44px; }
+  .check, .modal-choice { min-height: 44px; }
 }

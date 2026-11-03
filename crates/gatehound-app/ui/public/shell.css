@@ -1,0 +1,53 @@
+/* The desktop-app shell, loaded after glass.css (design system v2.0, look.md § which shell).
+ *
+ * A desktop window gets the sidebar at every size and never the phone tab bar. glass.css builds
+ * the sidebar from 1024px and the floating capsule below it, so under 1024px this file restates
+ * the sidebar, a little narrower, and the content narrows instead. From 1024px glass.css alone
+ * draws it.
+ *
+ * The window is the viewport and only the content area scrolls. Letting the page scroll means
+ * the scrollbar appears the moment content outgrows the window, taking width from the layout
+ * and shifting everything sideways. */
+
+body { height: 100vh; overflow: hidden; }
+.app { display: grid; height: 100vh; grid-template-rows: minmax(0, 1fr); }
+main { padding-top: 36px; }
+
+.side .brand { white-space: nowrap; color: var(--tx); }
+.side .brand-mark { flex: none; }
+/* The nav items are buttons, not links: the base button rules would give them a fill. */
+.side .nav-item { font-family: inherit; cursor: pointer; transform: none; }
+.side .nav-item svg { flex: none; }
+/* The pending count on Home: the standard count badge, filled while something waits. */
+.side .nav-item .badge { margin-left: auto; }
+
+@media (max-width: 1023px) {
+  .app { grid-template-columns: 224px minmax(0, 1fr); }
+  .side {
+    position: sticky; top: 12px; left: auto; right: auto; bottom: auto; margin: 12px 0 12px 12px;
+    height: calc(100vh - 24px); border-radius: 26px; padding: 28px var(--s3) 20px;
+    background: var(--glass); -webkit-backdrop-filter: none; backdrop-filter: none;
+    flex-direction: column; justify-content: flex-start; gap: 2px;
+  }
+  .side .brand {
+    display: flex; align-items: center; gap: 10px; padding: 0 var(--s2) var(--s5);
+    font-size: var(--t-xl); font-weight: 700;
+  }
+  .brand-mark {
+    display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 9px;
+    background: var(--grad); color: #fff;
+  }
+  .brand-mark svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+  .nav-item {
+    flex: none; flex-direction: row; justify-content: flex-start; gap: var(--s3);
+    min-height: 40px; padding: 0 var(--s3); border-radius: 12px;
+    font-size: var(--t-base); font-weight: 500; color: var(--tx);
+  }
+  .nav-item svg { width: 20px; height: 20px; color: var(--mut); }
+  .nav-item[aria-current="page"] { background: var(--glass-2); color: var(--tx); font-weight: 650; box-shadow: 0 2px 8px rgba(40, 50, 120, .08); }
+  .nav-item[aria-current="page"] svg { color: var(--ac-tx); }
+  @media (hover: hover) and (pointer: fine) { .nav-item:hover:not([aria-current="page"]) { background: var(--in); } }
+  main { padding: var(--s6) var(--s5) var(--s6) var(--s5); }
+}
+
+@media (pointer: coarse) { .side .nav-item { min-height: 44px; } }
