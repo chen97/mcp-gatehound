@@ -17,9 +17,8 @@ import { openBoard, reporter, FIXTURE } from "./board-harness.mjs";
 
 const override = process.argv.find((a) => a.startsWith("--h1="))?.slice(5) ?? null;
 
-/// One pending request, so the approval card exists. It carries the largest `h3` in the window
-/// (`--t-lg`, where an ordinary card's is `--t-md`), which makes it the real thing `h1` is
-/// competing with — comparing against an ordinary card's `h3` flatters the title by 2.5px.
+/// One pending request, so the approval card exists: it is the heading `h1` most competes with,
+/// the one thing on any screen asking for a decision.
 const PENDING = [
   { id: "p1", ts: new Date().toISOString(), identity: "claude", tool: "echo",
     args_preview: '{"text":"hello"}' },
@@ -82,22 +81,23 @@ r.check(
   `the title and a dialog heading are both ${h1}px — the same size for two different things`,
 );
 
-// The other half of the argument, and the half that is easy to assume rather than measure: that a
-// larger title costs vertical room in a window that has little to spare. It does not. The header
-// is a flex row whose height is set by the tallest thing in it — the `Pause gateway` button at
-// `--ctl-h` — so the title grows inside a row that was already that tall. Asserted by shrinking
-// the title to a size nothing would ship and checking the chrome does not move.
-const chrome = () => page.$eval(".top", (el) => el.getBoundingClientRect().height);
-const chromeNow = await chrome();
-await page.addStyleTag({ content: "h1 { font-size: 10px !important; }" });
-const chromeTiny = await chrome();
+// Since design system v2.0 (CHE-1448) the title is the standard's large title: `--t-4xl`, 32px
+// at the default text size, the same on every screen Chen Hao ships. The v1 argument that the
+// title must cost the board no vertical room went with the old header; the large title is a row
+// of its own above the cards, which is what the to-do look is.
+const large = await page.evaluate(() => {
+  const probe = document.createElement("span");
+  probe.style.fontSize = "var(--t-4xl)";
+  document.body.append(probe);
+  const px = parseFloat(getComputedStyle(probe).fontSize);
+  probe.remove();
+  return px;
+});
 r.say("");
 r.check(
-  chromeNow === chromeTiny,
-  `the title costs the board no vertical room — chrome is ${chromeNow}px whether the title is ` +
-    `${h1}px or 10px, because the row is as tall as its button either way`,
-  `the title drives the chrome's height: ${chromeNow}px at ${h1}px, ${chromeTiny}px at 10px — ` +
-    `a larger title costs ${chromeNow - chromeTiny}px of board`,
+  h1 === large,
+  `the title is the standard's large title — ${h1}px, --t-4xl`,
+  `the title is ${h1}px, not the standard's large title (--t-4xl, ${large}px)`,
 );
 
 await close();

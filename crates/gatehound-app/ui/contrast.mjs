@@ -114,10 +114,23 @@ const read = (page, sel, pseudo, disable) =>
     // is genuinely behind it rather than on white.
     const chain = [];
     for (let n = el; n; n = n.parentElement) chain.unshift(n);
+    // Since v2.0 a primary button is a gradient (`--grad`) on a transparent background colour, so
+    // reading `backgroundColor` alone measured its white label against the card behind it: 1.03:1
+    // for a label that is plainly readable. A gradient is composited stop by stop, and the stop
+    // the ink reads worst against is the one kept.
+    const lum = (c) => c.slice(0, 3).map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; })
+      .reduce((s, v, i) => s + v * [0.2126, 0.7152, 0.0722][i], 0);
+    const cr = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
     let bg = [255, 255, 255];
     for (const n of chain) {
-      const c = parse(getComputedStyle(n).backgroundColor);
+      const ns = getComputedStyle(n);
+      const c = parse(ns.backgroundColor);
       if (c && c[3] > 0) bg = over(c, bg);
+      if (ns.backgroundImage.includes("gradient")) {
+        const stops = [...ns.backgroundImage.matchAll(/(?:rgba?|color)\([^)]+\)/g)].map((m) => parse(m[0]));
+        const beds = stops.map((st) => over(st, bg));
+        bg = beds.reduce((w, b) => (cr(over(colour, b), b) < cr(over(colour, w), w) ? b : w), beds[0] ?? bg);
+      }
     }
     // The element's own opacity fades its text toward its backdrop — which is how a disabled
     // control gets quieter, and it has to be in the number or the number is not what is on screen.
