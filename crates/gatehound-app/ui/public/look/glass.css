@@ -1,7 +1,8 @@
-/* Design system v2.0 — the canonical look layer, "Soft glass" (CHE-1430; chosen for todo on CHE-940,
-   built on CHE-947, made the standard on CHE-1427). Loaded after the site's own component CSS on
-   every page; every value comes from tokens.css. Other repos copy this file and tokens.css verbatim
-   with tools/sync-look.sh and never edit the copy. Rules for todo's own parts (rows, habits, pets,
+/* Design system v2.0 — the canonical look layer, "Soft glass". Loaded after the site's own
+   component CSS on every page; every value comes from tokens.css. Its source is public/glass.css
+   in chen97/todo: edit it there, never in a copy. Other repos copy this file and tokens.css as-is
+   with tools/sync-look.sh, some of them public, so keep people's names, hostnames and issue keys
+   out of every comment here. Rules for todo's own parts (rows, habits, pets,
    the shop) sit here too: in another site they match nothing and cost nothing.
 
    Performance: a card does not overlap other content, and the mesh behind it is already soft, so a

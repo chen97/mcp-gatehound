@@ -1,6 +1,6 @@
 #!/bin/sh
-# Design system v2.0 (CHE-1430): every one of Chen Hao's sites and apps wears the look that lives
-# here, in chen97/todo: public/tokens.css (the tokens) and public/glass.css (the "Soft glass" layer).
+# Design system v2.0: every site and app in this estate wears the look whose source lives in
+# chen97/todo: public/tokens.css (the tokens) and public/glass.css (the "Soft glass" layer).
 # A repo copies this script once, to tools/sync-look.sh, and never edits it. The script copies the
 # two files, unchanged, into one folder of that repo and records the commit in a SOURCE file. Never
 # edit the copies by hand: change chen97/todo, then run this in each repo.
@@ -10,7 +10,10 @@
 #   tools/sync-look.sh --check [dir]    exit 1 if the copy differs from todo's main
 #
 # A desktop app's web view passes its UI folder, e.g. `tools/sync-look.sh rust/ui/src/look`.
-# Needs GITHUB_TOKEN (chen97/todo is private). Run from the repo root.
+# This script and the two files are copied as-is into other repos, some of them public, so keep
+# people's names, hostnames and issue keys out of them.
+#
+# Needs GITHUB_TOKEN with read access to chen97/todo. Run from the repo root.
 set -eu
 check=0
 [ "${1:-}" = "--check" ] && { check=1; shift; }

@@ -81,8 +81,8 @@ r.check(
   `the title and a dialog heading are both ${h1}px — the same size for two different things`,
 );
 
-// Since design system v2.0 (CHE-1448) the title is the standard's large title: `--t-4xl`, 32px
-// at the default text size, the same on every screen Chen Hao ships. The v1 argument that the
+// Since design system v2.0 the title is the standard's large title: `--t-4xl`, 32px
+// at the default text size, the same on every screen in the system. The v1 argument that the
 // title must cost the board no vertical room went with the old header; the large title is a row
 // of its own above the cards, which is what the to-do look is.
 const large = await page.evaluate(() => {

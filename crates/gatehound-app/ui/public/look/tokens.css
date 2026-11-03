@@ -1,7 +1,7 @@
-/* Design system v2.0 — the canonical token block (CHE-1430). This file IS the standard.
-   The look ("Soft glass") was chosen for todo.chenhao.do on CHE-940 and made the standard for
-   every repo on CHE-1427. Other repos copy this file and glass.css verbatim, with their own
-   tools/sync-look.sh, and never edit the copy: change it here, in chen97/todo, then sync.
+/* Design system v2.0 — the canonical token block. This file IS the standard.
+   Its source is public/tokens.css in chen97/todo: edit it there, never in a copy. Other repos
+   copy this file and glass.css as-is with tools/sync-look.sh, some of them public, so keep
+   people's names, hostnames and issue keys out of every comment here.
    The skill (`design-system`, references/tokens.md) documents every value below; where the two
    disagree, this file wins and the skill is the defect. Load order: tokens.css, the site's own
    component CSS, glass.css, the site's page CSS. */
@@ -47,7 +47,7 @@
 
   /* ---- Market direction: which way a quantity moved. Numbers and strokes only. ---- */
   --up: #3fd6bb;   --up-tx: #3fd6bb;
-  --down: #ff6b8a; --down-tx: #ff8aa3;   /* text lighter than the mark: 4.42 → 5.39 on a card (CHE-1430) */
+  --down: #ff6b8a; --down-tx: #ff8aa3;   /* text lighter than the mark: 4.42 → 5.39 on a card */
   --neutral: var(--mut); --neutral-tx: var(--mut);
 
   /* ---- The categorical palette: which group a thing belongs to (todo's categories, a chart's
